@@ -7,7 +7,8 @@ interface WorkspaceModalProps {
   isOpen: boolean;
   onClose: () => void;
   currentWorkspace: string;
-  onSelectWorkspace: (path: string) => Promise<void>;
+  launchWorkspaceRoot?: string;
+  onSelectWorkspace: (path: string, scope: 'session' | 'global', reset?: boolean) => Promise<void>;
 }
 
 const RECENT_STORAGE_KEY = 'luna_recent_workspaces';
@@ -36,10 +37,12 @@ export const WorkspaceModal: React.FC<WorkspaceModalProps> = ({
   isOpen,
   onClose,
   currentWorkspace,
+  launchWorkspaceRoot,
   onSelectWorkspace,
 }) => {
   const [browse, setBrowse] = useState<WorkspaceBrowseResult | null>(null);
   const [pathInput, setPathInput] = useState(currentWorkspace);
+  const [scope, setScope] = useState<'session' | 'global'>('session');
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -76,14 +79,14 @@ export const WorkspaceModal: React.FC<WorkspaceModalProps> = ({
 
   if (!isOpen) return null;
 
-  const confirmPath = async (targetPath: string) => {
+  const confirmPath = async (targetPath: string, reset = false) => {
     const clean = targetPath.trim();
-    if (!clean) return;
+    if (!clean && !reset) return;
     setSaving(true);
     setErrorMsg(null);
     try {
-      await onSelectWorkspace(clean);
-      saveRecent(clean);
+      await onSelectWorkspace(clean, scope, reset);
+      if (clean) saveRecent(clean);
       onClose();
     } catch (e) {
       setErrorMsg(String(e));
@@ -204,19 +207,49 @@ export const WorkspaceModal: React.FC<WorkspaceModalProps> = ({
           </div>
         </div>
 
-        <div className="modal-footer">
-          <button type="button" className="btn btn-secondary" onClick={onClose}>
-            Cancel
-          </button>
-          <button
-            type="button"
-            className="btn btn-primary"
-            disabled={saving || !pathInput.trim()}
-            onClick={() => confirmPath(browse?.current || pathInput)}
-          >
-            <Check size={14} />
-            <span>{saving ? 'Switching…' : 'Use this folder'}</span>
-          </button>
+        <div className="modal-footer modal-footer-between">
+          <div className="inline-row">
+            <div className="segmented-toggle" role="group" aria-label="Workspace scope">
+              <button
+                type="button"
+                className={`segmented-btn ${scope === 'session' ? 'active' : ''}`}
+                onClick={() => setScope('session')}
+              >
+                This session
+              </button>
+              <button
+                type="button"
+                className={`segmented-btn ${scope === 'global' ? 'active' : ''}`}
+                onClick={() => setScope('global')}
+              >
+                Global default
+              </button>
+            </div>
+            {launchWorkspaceRoot && currentWorkspace !== launchWorkspaceRoot && (
+              <button
+                type="button"
+                className="btn btn-secondary btn-xs"
+                disabled={saving}
+                onClick={() => confirmPath(launchWorkspaceRoot, true)}
+              >
+                Reset
+              </button>
+            )}
+          </div>
+          <div className="inline-row">
+            <button type="button" className="btn btn-secondary" onClick={onClose}>
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="btn btn-primary"
+              disabled={saving || !pathInput.trim()}
+              onClick={() => confirmPath(browse?.current || pathInput)}
+            >
+              <Check size={14} />
+              <span>{saving ? 'Switching…' : 'Use this folder'}</span>
+            </button>
+          </div>
         </div>
       </div>
     </div>

@@ -1,9 +1,14 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import type {
+  AgentMode,
   ApprovalRequestPayload,
   ClarifyRequestPayload,
+  GoalStatus,
+  SkillSummary,
+  TodoItem,
   ToolCallItem,
   TranscriptMessageDto,
+  WorkerProfile,
 } from '../types';
 import {
   ChevronDown,
@@ -19,9 +24,17 @@ import {
   Check,
   PanelLeft,
   Plus,
+  ListTodo,
+  GitBranch,
+  Layers,
+  MoreHorizontal,
+  Minimize2,
+  GitFork,
+  Activity,
 } from 'lucide-react';
 import { MarkdownContent } from './MarkdownContent';
 import { Composer } from './Composer';
+import type { ActiveDrawerTab } from './SessionDrawers';
 
 interface ChatViewProps {
   sessionId: string | null;
@@ -29,15 +42,36 @@ interface ChatViewProps {
   workspaceRoot: string;
   provider: string;
   model: string;
+  accountLabel?: string | null;
+  mode: AgentMode;
+  reasoningEffort: string | null;
+  contextTokens: number;
+  contextWindow: number;
+  queuedCount: number;
+  todos: TodoItem[];
+  goal: GoalStatus | null;
+  workers: Record<string, WorkerProfile>;
+  skills: SkillSummary[];
+  notices: Array<{ id: string; text: string; kind: 'info' | 'err' }>;
+  onDismissNotice: (id: string) => void;
   messages: TranscriptMessageDto[];
   turnRunning: boolean;
   sidebarOpen: boolean;
   onToggleSidebar: () => void;
   onOpenModelPicker: () => void;
   onOpenWorkspacePicker: () => void;
+  onOpenDrawer: (tab: ActiveDrawerTab) => void;
+  onRenameSession: (name: string) => void;
+  onCompactSession: () => void;
+  onSummarizeSession: () => void;
+  onRememberSession: () => void;
+  onForkSession: () => void;
   onNewSession: () => void;
-  onSendMessage: (text: string) => void;
+  onSendMessage: (text: string, images?: string[], sendMode?: 'steer' | 'queue') => void;
+  onSlashCommand: (raw: string, images?: string[]) => boolean;
   onInterrupt: () => void;
+  onChangeMode: (mode: AgentMode) => void;
+  onChangeReasoning: (effort: string | null) => void;
   pendingApproval: ApprovalRequestPayload | null;
   onResolveApproval: (
     decision: 'run' | 'deny' | 'run_with_args' | 'deny_with_feedback',
@@ -453,21 +487,56 @@ const AssistantTurnRow: React.FC<AssistantTurnRowProps> = React.memo(
 
 const INITIAL_VISIBLE_TURNS = 35;
 
+function parseUserMessageParts(content: string): { text: string; images: string[] } {
+  const images: string[] = [];
+  const textLines: string[] = [];
+  for (const line of content.split('\n')) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith('data:image/') && trimmed.includes(';base64,')) {
+      images.push(trimmed);
+    } else {
+      textLines.push(line);
+    }
+  }
+  return { text: textLines.join('\n').trim(), images };
+}
+
 export const ChatView: React.FC<ChatViewProps> = ({
   sessionId,
   sessionTitle,
   workspaceRoot,
   provider,
   model,
+  accountLabel,
+  mode,
+  reasoningEffort,
+  contextTokens,
+  contextWindow,
+  queuedCount,
+  todos,
+  goal,
+  workers,
+  skills,
+  notices,
+  onDismissNotice,
   messages,
   turnRunning,
   sidebarOpen,
   onToggleSidebar,
   onOpenModelPicker,
   onOpenWorkspacePicker,
+  onOpenDrawer,
+  onRenameSession,
+  onCompactSession,
+  onSummarizeSession,
+  onRememberSession,
+  onForkSession,
   onNewSession,
   onSendMessage,
+  onSlashCommand,
   onInterrupt,
+  onChangeMode,
+  onChangeReasoning,
   pendingApproval,
   onResolveApproval,
   pendingClarify,
@@ -481,14 +550,23 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const [copiedTurnKey, setCopiedTurnKey] = useState<string | null>(null);
   const [visibleTurnLimit, setVisibleTurnLimit] = useState(INITIAL_VISIBLE_TURNS);
 
-  // Approval Q&A state
+  const [renamingTitle, setRenamingTitle] = useState(false);
+  const [titleDraft, setTitleDraft] = useState(sessionTitle);
+  const [moreMenuOpen, setMoreMenuOpen] = useState(false);
+
+  // Approval state
   const [approvalQuestion, setApprovalQuestion] = useState('');
   const [approvalReplies, setApprovalReplies] = useState<Array<{ q: string; a: string }>>([]);
   const [askingApproval, setAskingApproval] = useState(false);
+  const [editingArgs, setEditingArgs] = useState(false);
+  const [argsDraft, setArgsDraft] = useState('');
+  const [argsError, setArgsError] = useState<string | null>(null);
+  const [denyingWithFeedback, setDenyingWithFeedback] = useState(false);
+  const [denyFeedback, setDenyFeedback] = useState('');
 
   // Clarify state
   const [clarifyAnswers, setClarifyAnswers] = useState<Record<number, string>>({});
-  const [customClarifyInput, setCustomClarifyInput] = useState('');
+  const [clarifyCustom, setClarifyCustom] = useState<Record<number, string>>({});
 
   const messagesAreaRef = useRef<HTMLDivElement>(null);
   const prevTurnRunningRef = useRef(turnRunning);
@@ -518,7 +596,19 @@ export const ChatView: React.FC<ChatViewProps> = ({
     setExpandedReasoning({});
     setExpandedTools({});
     setVisibleTurnLimit(INITIAL_VISIBLE_TURNS);
+    setRenamingTitle(false);
+    setMoreMenuOpen(false);
   }, [sessionId]);
+
+  useEffect(() => {
+    if (pendingApproval) {
+      setEditingArgs(false);
+      setArgsDraft(JSON.stringify(pendingApproval.arguments ?? {}, null, 2));
+      setArgsError(null);
+      setDenyingWithFeedback(false);
+      setDenyFeedback('');
+    }
+  }, [pendingApproval]);
 
   // Keep viewport anchored to bottom during live turns without laggy smooth-scroll fighting tokens
   useEffect(() => {
@@ -595,17 +685,20 @@ export const ChatView: React.FC<ChatViewProps> = ({
         : [{ question: pendingClarify.question || '', choices: pendingClarify.choices || [] }];
 
     const answers = questions.map((_, idx) => {
-      return clarifyAnswers[idx] || customClarifyInput || 'Skipped';
+      const custom = (clarifyCustom[idx] || '').trim();
+      if (custom) return custom;
+      return clarifyAnswers[idx] || 'Skipped';
     });
     onResolveClarify(answers);
     setClarifyAnswers({});
-    setCustomClarifyInput('');
+    setClarifyCustom({});
   };
 
   const modelLabel = model || provider || 'default';
   const workspaceFolder =
     workspaceRoot.split('/').filter(Boolean).pop() || workspaceRoot || 'Workspace';
   const hasUserOrAssistantMessages = messages.length > 0;
+  const openTodosCount = todos.filter((t) => t.status !== 'done').length;
 
   return (
     <div className="chat-view">
@@ -622,20 +715,196 @@ export const ChatView: React.FC<ChatViewProps> = ({
               <PanelLeft size={16} />
             </button>
           )}
-          <span className="chat-header-title" title={sessionTitle}>
-            {sessionTitle || 'New conversation'}
-          </span>
+          {renamingTitle && sessionId ? (
+            <input
+              type="text"
+              className="header-rename-input"
+              autoFocus
+              value={titleDraft}
+              onChange={(e) => setTitleDraft(e.target.value)}
+              onBlur={() => {
+                setRenamingTitle(false);
+                if (titleDraft.trim() && titleDraft.trim() !== sessionTitle) {
+                  onRenameSession(titleDraft.trim());
+                }
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.currentTarget.blur();
+                } else if (e.key === 'Escape') {
+                  setTitleDraft(sessionTitle);
+                  setRenamingTitle(false);
+                }
+              }}
+            />
+          ) : (
+            <button
+              type="button"
+              className="chat-header-title-btn"
+              onClick={() => {
+                if (!sessionId) return;
+                setTitleDraft(sessionTitle || '');
+                setRenamingTitle(true);
+              }}
+              title={sessionId ? 'Click to rename conversation' : undefined}
+            >
+              {sessionTitle || 'New conversation'}
+            </button>
+          )}
         </div>
 
         <div className="chat-header-right">
+          {goal && goal.running && (
+            <button
+              type="button"
+              className="status-chip status-chip-live"
+              onClick={() => onOpenDrawer('tasks')}
+              title={`Goal loop: ${goal.objective}`}
+            >
+              <span className="pulse-dot" />
+              <span className="tabular-nums">
+                Goal {goal.iteration}/{goal.max_iterations}
+              </span>
+            </button>
+          )}
+
           {turnRunning && (
             <span className="status-chip status-chip-live">
               <span className="pulse-dot" />
               <span>Working</span>
             </span>
           )}
+
+          {sessionId && (
+            <div className="header-actions-group">
+              <button
+                type="button"
+                className="header-action-btn"
+                onClick={() => onOpenDrawer('todos')}
+                title="Session checklist (/todo)"
+              >
+                <ListTodo size={14} />
+                {openTodosCount > 0 && (
+                  <span className="header-badge-num tabular-nums">{openTodosCount}</span>
+                )}
+              </button>
+
+              <button
+                type="button"
+                className="header-action-btn"
+                onClick={() => onOpenDrawer('checkpoints')}
+                title="File changes & rewind (/diff, /rewind)"
+              >
+                <GitBranch size={14} />
+              </button>
+
+              <button
+                type="button"
+                className="header-action-btn"
+                onClick={() => onOpenDrawer('tasks')}
+                title="Subagents, jobs & goal loop (/subagents, /goal)"
+              >
+                <Layers size={14} />
+              </button>
+
+              <div className="header-more-wrap">
+                <button
+                  type="button"
+                  className="header-action-btn"
+                  onClick={() => setMoreMenuOpen((v) => !v)}
+                  title="More session actions"
+                  aria-label="More session actions"
+                >
+                  <MoreHorizontal size={15} />
+                </button>
+                {moreMenuOpen && (
+                  <div
+                    className="header-dropdown"
+                    onMouseLeave={() => setMoreMenuOpen(false)}
+                  >
+                    <button
+                      type="button"
+                      className="header-dropdown-item"
+                      onClick={() => {
+                        setMoreMenuOpen(false);
+                        onCompactSession();
+                      }}
+                    >
+                      <Minimize2 size={13} />
+                      <span>Compact history</span>
+                    </button>
+                    <button
+                      type="button"
+                      className="header-dropdown-item"
+                      onClick={() => {
+                        setMoreMenuOpen(false);
+                        onSummarizeSession();
+                      }}
+                    >
+                      <Sparkles size={13} />
+                      <span>Summarize & new chat</span>
+                    </button>
+                    <button
+                      type="button"
+                      className="header-dropdown-item"
+                      onClick={() => {
+                        setMoreMenuOpen(false);
+                        onRememberSession();
+                      }}
+                    >
+                      <Sparkles size={13} />
+                      <span>Remember now</span>
+                    </button>
+                    <button
+                      type="button"
+                      className="header-dropdown-item"
+                      onClick={() => {
+                        setMoreMenuOpen(false);
+                        onForkSession();
+                      }}
+                    >
+                      <GitFork size={13} />
+                      <span>Fork conversation</span>
+                    </button>
+                    <button
+                      type="button"
+                      className="header-dropdown-item"
+                      onClick={() => {
+                        setMoreMenuOpen(false);
+                        onOpenDrawer('usage');
+                      }}
+                    >
+                      <Activity size={13} />
+                      <span>Usage & system health</span>
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
         </div>
       </header>
+
+      {notices.length > 0 && (
+        <div className="notices-strip">
+          {notices.map((n) => (
+            <div
+              key={n.id}
+              className={`notice-pill ${n.kind === 'err' ? 'notice-pill-err' : ''}`}
+            >
+              <span>{n.text}</span>
+              <button
+                type="button"
+                className="notice-close"
+                onClick={() => onDismissNotice(n.id)}
+                aria-label="Dismiss"
+              >
+                ×
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
 
       <div className="messages-area" ref={messagesAreaRef}>
         <div className="messages-column">
@@ -700,9 +969,19 @@ export const ChatView: React.FC<ChatViewProps> = ({
           ) : (
             visibleTurns.map((turn, turnIdx) => {
               if (turn.kind === 'user') {
+                const parsed = parseUserMessageParts(turn.content);
                 return (
                   <div key={turn.key} className="turn-user">
-                    <div className="user-bubble">{turn.content}</div>
+                    <div className="user-bubble">
+                      {parsed.images.length > 0 && (
+                        <div className="user-bubble-images">
+                          {parsed.images.map((src, i) => (
+                            <img key={i} src={src} alt={`Attachment ${i + 1}`} />
+                          ))}
+                        </div>
+                      )}
+                      {parsed.text && <div>{parsed.text}</div>}
+                    </div>
                   </div>
                 );
               }
@@ -753,13 +1032,62 @@ export const ChatView: React.FC<ChatViewProps> = ({
               )}
 
               <div className="form-group">
-                <span className="form-label">
-                  {pendingApproval.diff ? 'Proposed diff' : 'Arguments'}
-                </span>
-                <pre className="diff-view">
-                  {pendingApproval.diff || JSON.stringify(pendingApproval.arguments, null, 2)}
-                </pre>
+                <div className="form-label-row">
+                  <span className="form-label">
+                    {pendingApproval.diff && !editingArgs ? 'Proposed diff' : 'Arguments'}
+                  </span>
+                  <button
+                    type="button"
+                    className="picker-mini-btn"
+                    onClick={() => setEditingArgs((v) => !v)}
+                  >
+                    {editingArgs ? 'Cancel edit' : 'Edit arguments'}
+                  </button>
+                </div>
+                {editingArgs ? (
+                  <>
+                    <textarea
+                      className="form-textarea mono-input"
+                      rows={6}
+                      value={argsDraft}
+                      onChange={(e) => {
+                        setArgsDraft(e.target.value);
+                        setArgsError(null);
+                      }}
+                    />
+                    {argsError && <div className="text-danger">{argsError}</div>}
+                  </>
+                ) : (
+                  <pre className="diff-view">
+                    {pendingApproval.diff || JSON.stringify(pendingApproval.arguments, null, 2)}
+                  </pre>
+                )}
               </div>
+
+              {denyingWithFeedback && (
+                <div className="form-group">
+                  <span className="form-label">Feedback for model (why you denied)</span>
+                  <input
+                    type="text"
+                    className="form-input"
+                    autoFocus
+                    placeholder="e.g. Use read-only check instead…"
+                    value={denyFeedback}
+                    onChange={(e) => setDenyFeedback(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        const clean = denyFeedback.trim();
+                        if (clean) {
+                          onResolveApproval('deny_with_feedback', undefined, clean);
+                        } else {
+                          onResolveApproval('deny');
+                        }
+                        setApprovalReplies([]);
+                      }
+                    }}
+                  />
+                </div>
+              )}
 
               {approvalReplies.length > 0 && (
                 <div className="form-group">
@@ -798,32 +1126,89 @@ export const ChatView: React.FC<ChatViewProps> = ({
               </div>
             </div>
 
-            <div className="modal-footer">
-              <button
-                type="button"
-                className="btn btn-danger"
-                onClick={() => {
-                  const reason = window.prompt('Optional denial reason or feedback:');
-                  if (reason && reason.trim()) {
-                    onResolveApproval('deny_with_feedback', undefined, reason.trim());
-                  } else {
-                    onResolveApproval('deny');
-                  }
-                  setApprovalReplies([]);
-                }}
-              >
-                Deny
-              </button>
-              <button
-                type="button"
-                className="btn btn-primary"
-                onClick={() => {
-                  onResolveApproval('run');
-                  setApprovalReplies([]);
-                }}
-              >
-                Allow
-              </button>
+            <div className="modal-footer modal-footer-between">
+              <div className="inline-row">
+                {!denyingWithFeedback ? (
+                  <>
+                    <button
+                      type="button"
+                      className="btn btn-danger"
+                      onClick={() => {
+                        onResolveApproval('deny');
+                        setApprovalReplies([]);
+                      }}
+                    >
+                      Deny
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      onClick={() => setDenyingWithFeedback(true)}
+                    >
+                      Deny + feedback
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    className="btn btn-danger"
+                    onClick={() => {
+                      const clean = denyFeedback.trim();
+                      onResolveApproval(
+                        clean ? 'deny_with_feedback' : 'deny',
+                        undefined,
+                        clean || undefined
+                      );
+                      setApprovalReplies([]);
+                    }}
+                  >
+                    Submit denial
+                  </button>
+                )}
+              </div>
+
+              <div className="inline-row">
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={() => {
+                    onChangeMode('auto');
+                    onResolveApproval('run');
+                    setApprovalReplies([]);
+                  }}
+                  title="Switch this session to Auto mode and allow"
+                >
+                  Allow session
+                </button>
+                {editingArgs ? (
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    onClick={() => {
+                      try {
+                        const parsed = JSON.parse(argsDraft);
+                        onResolveApproval('run_with_args', parsed);
+                        setApprovalReplies([]);
+                      } catch (err) {
+                        setArgsError(`Invalid JSON: ${String(err)}`);
+                      }
+                    }}
+                  >
+                    Run edited
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    onClick={() => {
+                      onResolveApproval('run');
+                      setApprovalReplies([]);
+                    }}
+                  >
+                    Allow
+                  </button>
+                )}
+              </div>
             </div>
           </div>
         </div>
@@ -840,10 +1225,13 @@ export const ChatView: React.FC<ChatViewProps> = ({
             </div>
 
             <div className="modal-body">
-              {pendingClarify.questions && pendingClarify.questions.length > 0 ? (
-                pendingClarify.questions.map((q, idx) => (
-                  <div key={idx} className="form-group">
-                    <span className="form-label form-label-strong">{q.question}</span>
+              {(pendingClarify.questions && pendingClarify.questions.length > 0
+                ? pendingClarify.questions
+                : [{ question: pendingClarify.question || '', choices: pendingClarify.choices || [] }]
+              ).map((q, idx) => (
+                <div key={idx} className="form-group">
+                  <span className="form-label form-label-strong">{q.question}</span>
+                  {(q.choices || []).length > 0 && (
                     <div className="radio-list">
                       {(q.choices || []).map((choice) => (
                         <label key={choice} className="radio-row">
@@ -859,38 +1247,19 @@ export const ChatView: React.FC<ChatViewProps> = ({
                         </label>
                       ))}
                     </div>
-                  </div>
-                ))
-              ) : (
-                <div className="form-group">
-                  <span className="form-label form-label-strong">{pendingClarify.question}</span>
-                  <div className="radio-list">
-                    {(pendingClarify.choices || []).map((choice) => (
-                      <label key={choice} className="radio-row">
-                        <input
-                          type="radio"
-                          name="choice-0"
-                          checked={clarifyAnswers[0] === choice}
-                          onChange={() => setClarifyAnswers((prev) => ({ ...prev, [0]: choice }))}
-                        />
-                        <span>{choice}</span>
-                      </label>
-                    ))}
-                  </div>
+                  )}
+                  <input
+                    type="text"
+                    className="form-input"
+                    placeholder="Or type a custom answer…"
+                    value={clarifyCustom[idx] || ''}
+                    onChange={(e) =>
+                      setClarifyCustom((prev) => ({ ...prev, [idx]: e.target.value }))
+                    }
+                    onKeyDown={(e) => e.key === 'Enter' && handleClarifySubmit()}
+                  />
                 </div>
-              )}
-
-              <div className="form-group">
-                <span className="form-label">Or enter a custom answer</span>
-                <input
-                  type="text"
-                  className="form-input"
-                  placeholder="Type response…"
-                  value={customClarifyInput}
-                  onChange={(e) => setCustomClarifyInput(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && handleClarifySubmit()}
-                />
-              </div>
+              ))}
             </div>
 
             <div className="modal-footer">
@@ -908,11 +1277,23 @@ export const ChatView: React.FC<ChatViewProps> = ({
         showWorkspacePicker={!hasUserOrAssistantMessages}
         provider={provider}
         model={model}
+        accountLabel={accountLabel}
+        mode={mode}
+        reasoningEffort={reasoningEffort}
+        contextTokens={contextTokens}
+        contextWindow={contextWindow}
+        queuedCount={queuedCount}
         turnRunning={turnRunning}
+        workers={workers}
+        skills={skills}
         onSend={onSendMessage}
+        onSlashCommand={onSlashCommand}
         onInterrupt={onInterrupt}
+        onChangeMode={onChangeMode}
+        onChangeReasoning={onChangeReasoning}
         onOpenModelPicker={onOpenModelPicker}
         onOpenWorkspacePicker={onOpenWorkspacePicker}
+        onOpenUsage={() => onOpenDrawer('usage')}
       />
     </div>
   );

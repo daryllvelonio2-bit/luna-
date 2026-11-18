@@ -1,21 +1,35 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use tokio::sync::{broadcast, oneshot, Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 
-use harness_app::events::{from_agent_event, AppEvent};
-use harness_app::runtime::{AppRuntime, AppSessionOptions};
+use harness_app::events::{from_agent_event, from_subagent_event, AppEvent};
+use harness_app::runtime::{AppRuntime, AppSessionOptions, ExtraToolRegistrar};
 use harness_app::session::{open_store, SessionSelection};
 use harness_core::config::Config;
 use harness_core::session::SqliteSessionStore;
-use harness_core::{ApprovalDecision, ClarifyResponse, HarnessError};
-use harness_plugins::PluginManager;
+use harness_core::{ApprovalDecision, ClarifyResponse, HarnessError, ToolRegistry};
+use harness_plugins::{PluginManager, SkillLoader, SkillViewTool, SkillsListTool};
 use harness_providers::{CredentialManager, ModelDiscovery};
 use harness_scheduler::{ensure_scheduler_plugin, ScheduleStore, SchedulerService};
 
 use crate::auth::WebAuthState;
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct WebGoalStatus {
+    pub objective: String,
+    pub iteration: usize,
+    pub max_iterations: usize,
+    pub running: bool,
+}
+
+pub struct ActiveGoalHandle {
+    pub status: WebGoalStatus,
+    pub cancel: CancellationToken,
+}
 
 pub struct ActiveSessionHandle {
     pub runtime: Arc<Mutex<AppRuntime>>,
@@ -23,10 +37,13 @@ pub struct ActiveSessionHandle {
     pub active_cancel: std::sync::Mutex<Option<CancellationToken>>,
     pub pending_approvals: Arc<Mutex<HashMap<String, oneshot::Sender<ApprovalDecision>>>>,
     pub pending_clarifies: Arc<Mutex<HashMap<String, oneshot::Sender<ClarifyResponse>>>>,
+    pub queued_messages: Arc<Mutex<VecDeque<String>>>,
+    pub active_goal: Arc<Mutex<Option<ActiveGoalHandle>>>,
 }
 
 pub struct WebState {
     pub config: RwLock<Config>,
+    pub launch_workspace_root: PathBuf,
     pub store: Arc<SqliteSessionStore>,
     pub cred_manager: Arc<CredentialManager>,
     pub discovery: Arc<ModelDiscovery>,
@@ -78,9 +95,11 @@ impl WebState {
         let scheduler = Arc::new(SchedulerService::new(sched_store));
 
         let (event_tx, _) = broadcast::channel(512);
+        let launch_workspace_root = config.paths.workspace_root.clone();
 
         Ok(Arc::new(Self {
             config: RwLock::new(config),
+            launch_workspace_root,
             store,
             cred_manager,
             discovery,
@@ -140,11 +159,40 @@ impl WebState {
             None
         };
 
+        let cfg_snapshot = self.config.read().await.clone();
+        let skills_dir = cfg_snapshot.paths.skills_dir.clone();
+        let ws_skills_dir = cfg_snapshot.paths.workspace_root.join(".harness/skills");
+        let extra_tools: Option<ExtraToolRegistrar> = Some(Arc::new(move |registry| {
+            let skills_dir = skills_dir.clone();
+            let ws_skills_dir = ws_skills_dir.clone();
+            Box::pin(async move {
+                let mut all_skills = Vec::new();
+                if let Ok(skills) = SkillLoader::load_skills_from_dir(&skills_dir) {
+                    all_skills.extend(skills);
+                }
+                if ws_skills_dir.exists() {
+                    if let Ok(skills) = SkillLoader::load_skills_from_dir(&ws_skills_dir) {
+                        all_skills.extend(skills);
+                    }
+                }
+                if !all_skills.is_empty() {
+                    let skills_arc = Arc::new(all_skills);
+                    registry
+                        .register(Arc::new(SkillViewTool::new(skills_arc.clone())))
+                        .await?;
+                    registry
+                        .register(Arc::new(SkillsListTool::new(skills_arc)))
+                        .await?;
+                }
+                Ok(())
+            })
+        }));
+
         let options = AppSessionOptions {
             interactive: true,
             explicit_model: false,
             system_prompt_prefix: agent_entry.as_ref().map(|a| a.system_prompt.clone()),
-            extra_tools: None,
+            extra_tools,
         };
 
         let event_tx = self.event_tx.clone();
@@ -154,7 +202,6 @@ impl WebState {
             let _ = event_tx.send(app_evt);
         });
 
-        let cfg_snapshot = self.config.read().await.clone();
         let mut runtime = AppRuntime::prepare(
             cfg_snapshot,
             self.cred_manager.clone(),
@@ -164,6 +211,38 @@ impl WebState {
             Some(observer),
         )
         .await?;
+
+        // Forward delegated subagent events onto the WebSocket stream
+        {
+            let sub_tx = self.event_tx.clone();
+            let sub_sid = session_id.to_string();
+            runtime
+                .delegate_tool
+                .set_event_notifier(Arc::new(move |evt| {
+                    let _ = sub_tx.send(from_subagent_event(&sub_sid, evt));
+                }));
+        }
+
+        // Forward background job completions onto the WebSocket stream
+        let mut job_rx = std::mem::replace(
+            &mut runtime.channels.job_rx,
+            tokio::sync::mpsc::unbounded_channel().1,
+        );
+        {
+            let job_tx = self.event_tx.clone();
+            let job_sid = session_id.to_string();
+            tokio::spawn(async move {
+                while let Some(comp) = job_rx.recv().await {
+                    let _ = job_tx.send(AppEvent::JobCompleted {
+                        session_id: job_sid.clone(),
+                        job_id: comp.id,
+                        command: comp.command,
+                        status: comp.status,
+                        elapsed_secs: comp.elapsed_secs,
+                    });
+                }
+            });
+        }
 
         let pending_approvals = Arc::new(Mutex::new(HashMap::new()));
         let pending_clarifies = Arc::new(Mutex::new(HashMap::new()));
@@ -214,6 +293,8 @@ impl WebState {
             active_cancel: std::sync::Mutex::new(None),
             pending_approvals,
             pending_clarifies,
+            queued_messages: Arc::new(Mutex::new(VecDeque::new())),
+            active_goal: Arc::new(Mutex::new(None)),
         });
 
         map.insert(session_id.to_string(), handle.clone());

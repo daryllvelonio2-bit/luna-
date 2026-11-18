@@ -7,6 +7,7 @@
 //! - Proactive scheduled automations and TypeScript plugins management
 
 pub mod auth;
+pub mod extra_routes;
 pub mod routes;
 pub mod server;
 pub mod state;

@@ -1,14 +1,28 @@
 import type {
+  AgentMode,
   AppEvent,
   BootstrapPayload,
+  GoalStatus,
   GuiSessionItem,
+  HeartbeatPayload,
+  JobSummary,
   MemoryFact,
+  ModelScope,
+  ModelTarget,
   NoteEntry,
   PluginBuilderSpec,
   PluginSummary,
+  ProfileItem,
   ProviderInfo,
+  RotationStrategy,
   ScheduleTask,
+  SessionStatePayload,
+  SubagentTaskRecord,
+  TodoItem,
   TranscriptMessageDto,
+  TurnDiffItem,
+  UsagePayload,
+  WorkerProfile,
   WorkspaceBrowseResult,
 } from './types';
 
@@ -119,8 +133,9 @@ class ApiClient {
     return JSON.parse(text) as T;
   }
 
-  public async bootstrap(): Promise<BootstrapPayload> {
-    return this.request<BootstrapPayload>('/api/bootstrap');
+  public async bootstrap(sessionId?: string | null): Promise<BootstrapPayload> {
+    const q = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : '';
+    return this.request<BootstrapPayload>(`/api/bootstrap${q}`);
   }
 
   public async listSessions(limit = 150): Promise<GuiSessionItem[]> {
@@ -141,10 +156,23 @@ class ApiClient {
     );
   }
 
-  public async sendMessage(sessionId: string, message: string, pluginAgentId?: string | null): Promise<void> {
+  public async sendMessage(
+    sessionId: string,
+    message: string,
+    opts?: {
+      images?: string[];
+      mode?: 'steer' | 'queue';
+      pluginAgentId?: string | null;
+    }
+  ): Promise<void> {
     return this.request<void>(`/api/sessions/${encodeURIComponent(sessionId)}/send`, {
       method: 'POST',
-      body: JSON.stringify({ message, plugin_agent_id: pluginAgentId ?? null }),
+      body: JSON.stringify({
+        message,
+        images: opts?.images ?? [],
+        mode: opts?.mode ?? null,
+        plugin_agent_id: opts?.pluginAgentId ?? null,
+      }),
     });
   }
 
@@ -162,15 +190,155 @@ class ApiClient {
   }
 
   public async forkSession(sessionId: string): Promise<string> {
-    const res = await this.request<{ session_id: string }>(`/api/sessions/${encodeURIComponent(sessionId)}/fork`, {
-      method: 'POST',
-    });
+    const res = await this.request<{ session_id: string }>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/fork`,
+      { method: 'POST' }
+    );
     return res.session_id;
   }
 
   public async deleteSession(sessionId: string): Promise<void> {
     return this.request<void>(`/api/sessions/${encodeURIComponent(sessionId)}`, {
       method: 'DELETE',
+    });
+  }
+
+  public async getSessionState(sessionId: string): Promise<SessionStatePayload> {
+    return this.request<SessionStatePayload>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/state`
+    );
+  }
+
+  public async setSessionMode(sessionId: string, mode: AgentMode): Promise<{ mode: AgentMode }> {
+    return this.request<{ mode: AgentMode }>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/mode`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ mode }),
+      }
+    );
+  }
+
+  public async setSessionReasoning(
+    sessionId: string,
+    effort: string | null
+  ): Promise<{ reasoning_effort: string | null }> {
+    return this.request<{ reasoning_effort: string | null }>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/reasoning`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ effort }),
+      }
+    );
+  }
+
+  public async compactSession(
+    sessionId: string
+  ): Promise<{ turns: number; messages: number; summary?: string | null; context_tokens: number }> {
+    return this.request(`/api/sessions/${encodeURIComponent(sessionId)}/compact`, {
+      method: 'POST',
+    });
+  }
+
+  public async summarizeSession(
+    sessionId: string
+  ): Promise<{ session_id: string; summary: string }> {
+    return this.request(`/api/sessions/${encodeURIComponent(sessionId)}/summarize`, {
+      method: 'POST',
+    });
+  }
+
+  public async rememberSession(
+    sessionId: string
+  ): Promise<{ memories: number; notes: number; summary: string }> {
+    return this.request(`/api/sessions/${encodeURIComponent(sessionId)}/remember`, {
+      method: 'POST',
+    });
+  }
+
+  public async setMemoryScope(
+    sessionId: string,
+    project: string | null
+  ): Promise<{ memory_project_filter: string | null }> {
+    return this.request(`/api/sessions/${encodeURIComponent(sessionId)}/memory-scope`, {
+      method: 'POST',
+      body: JSON.stringify({ project }),
+    });
+  }
+
+  public async getTodos(sessionId: string): Promise<{ items: TodoItem[] }> {
+    return this.request(`/api/sessions/${encodeURIComponent(sessionId)}/todos`);
+  }
+
+  public async mutateTodo(
+    sessionId: string,
+    payload: { action: string; id?: number; text?: string; status?: string }
+  ): Promise<{ items: TodoItem[] }> {
+    return this.request(`/api/sessions/${encodeURIComponent(sessionId)}/todos`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  public async listCheckpoints(sessionId: string): Promise<{ turns: TurnDiffItem[] }> {
+    return this.request(`/api/sessions/${encodeURIComponent(sessionId)}/checkpoints`);
+  }
+
+  public async rewindCheckpoint(
+    sessionId: string,
+    seq: number
+  ): Promise<{ restored: string[]; deleted: string[]; skipped: string[] }> {
+    return this.request(`/api/sessions/${encodeURIComponent(sessionId)}/rewind`, {
+      method: 'POST',
+      body: JSON.stringify({ seq }),
+    });
+  }
+
+  public async manageGoal(
+    sessionId: string,
+    action: 'start' | 'stop',
+    objective?: string,
+    maxIterations?: number
+  ): Promise<{ goal?: GoalStatus; stopped?: boolean }> {
+    return this.request(`/api/sessions/${encodeURIComponent(sessionId)}/goal`, {
+      method: 'POST',
+      body: JSON.stringify({
+        action,
+        objective,
+        max_iterations: maxIterations,
+      }),
+    });
+  }
+
+  public async listTasks(
+    sessionId: string
+  ): Promise<{ subagents: SubagentTaskRecord[]; jobs: JobSummary[]; goal: GoalStatus | null }> {
+    return this.request(`/api/sessions/${encodeURIComponent(sessionId)}/tasks`);
+  }
+
+  public async killTask(
+    sessionId: string,
+    taskId: string,
+    kind: 'subagent' | 'job'
+  ): Promise<{ killed: boolean }> {
+    return this.request(
+      `/api/sessions/${encodeURIComponent(sessionId)}/tasks/${encodeURIComponent(taskId)}/kill`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ kind }),
+      }
+    );
+  }
+
+  public async runWorker(
+    sessionId: string,
+    workerName: string,
+    task: string,
+    images?: string[]
+  ): Promise<{ task_id: string; child_session_id: string; worker: string; provider: string; model: string }> {
+    return this.request(`/api/sessions/${encodeURIComponent(sessionId)}/worker`, {
+      method: 'POST',
+      body: JSON.stringify({ worker_name: workerName, task, images }),
     });
   }
 
@@ -215,8 +383,9 @@ class ApiClient {
     return res.reply;
   }
 
-  public async getProviders(): Promise<ProviderInfo[]> {
-    return this.request<ProviderInfo[]>('/api/providers');
+  public async getProviders(sessionId?: string | null): Promise<ProviderInfo[]> {
+    const q = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : '';
+    return this.request<ProviderInfo[]>(`/api/providers${q}`);
   }
 
   public async refreshProviderModels(providerId: string): Promise<string[]> {
@@ -228,11 +397,19 @@ class ApiClient {
   public async setDefaultModel(
     provider: string,
     model: string,
-    sessionId?: string | null
-  ): Promise<{ provider: string; model: string }> {
-    return this.request<{ provider: string; model: string }>('/api/models/default', {
+    sessionId?: string | null,
+    scope: ModelScope = 'session',
+    target: ModelTarget = 'session'
+  ): Promise<{ provider: string; model: string; scope: string; target: string }> {
+    return this.request('/api/models/default', {
       method: 'POST',
-      body: JSON.stringify({ provider, model, session_id: sessionId ?? null }),
+      body: JSON.stringify({
+        provider,
+        model,
+        session_id: sessionId ?? null,
+        scope,
+        target,
+      }),
     });
   }
 
@@ -241,18 +418,178 @@ class ApiClient {
     return this.request<WorkspaceBrowseResult>(`/api/workspace/browse${q}`);
   }
 
-  public async setWorkspace(path: string): Promise<{ workspace_root: string }> {
+  public async setWorkspace(
+    path: string,
+    scope: 'session' | 'global' = 'session',
+    reset = false
+  ): Promise<{ workspace_root: string }> {
     return this.request<{ workspace_root: string }>('/api/workspace', {
       method: 'POST',
-      body: JSON.stringify({ path }),
+      body: JSON.stringify({ path, scope, reset }),
     });
   }
 
-  public async saveCredential(provider: string, apiKey: string): Promise<void> {
+  public async saveCredential(
+    provider: string,
+    apiKey: string,
+    label?: string,
+    isPriority = true
+  ): Promise<void> {
     return this.request<void>('/api/credentials', {
       method: 'POST',
-      body: JSON.stringify({ provider, api_key: apiKey }),
+      body: JSON.stringify({
+        provider,
+        api_key: apiKey,
+        label: label || undefined,
+        is_priority: isPriority,
+      }),
     });
+  }
+
+  public async removeCredential(provider: string, credentialId: string): Promise<void> {
+    return this.request<void>(
+      `/api/credentials/${encodeURIComponent(provider)}/${encodeURIComponent(credentialId)}`,
+      { method: 'DELETE' }
+    );
+  }
+
+  public async setPriorityCredential(
+    provider: string,
+    credentialId: string,
+    scope: 'session' | 'global',
+    sessionId?: string | null
+  ): Promise<void> {
+    return this.request<void>(`/api/credentials/${encodeURIComponent(provider)}/priority`, {
+      method: 'POST',
+      body: JSON.stringify({
+        credential_id: credentialId,
+        scope,
+        session_id: sessionId ?? null,
+      }),
+    });
+  }
+
+  public async clearPriorityCredential(
+    provider: string,
+    credentialId: string | null,
+    scope: 'session' | 'global',
+    sessionId?: string | null
+  ): Promise<void> {
+    return this.request<void>(`/api/credentials/${encodeURIComponent(provider)}/priority`, {
+      method: 'DELETE',
+      body: JSON.stringify({
+        credential_id: credentialId,
+        scope,
+        session_id: sessionId ?? null,
+      }),
+    });
+  }
+
+  public async setRotationStrategy(provider: string, strategy: RotationStrategy): Promise<void> {
+    return this.request<void>(`/api/credentials/${encodeURIComponent(provider)}/strategy`, {
+      method: 'POST',
+      body: JSON.stringify({ strategy }),
+    });
+  }
+
+  public async resetCooldowns(provider?: string): Promise<{ reset_count: number }> {
+    return this.request('/api/credentials/reset-cooldowns', {
+      method: 'POST',
+      body: JSON.stringify({ provider: provider ?? null }),
+    });
+  }
+
+  public async importCredentials(
+    kind: 'antigravity' | 'opencode' | 'codex'
+  ): Promise<{ imported: string[] }> {
+    return this.request('/api/credentials/import', {
+      method: 'POST',
+      body: JSON.stringify({ kind }),
+    });
+  }
+
+  public async addCustomProvider(payload: {
+    id: string;
+    base_url: string;
+    api_key?: string;
+    label?: string;
+    context_window?: number;
+  }): Promise<{ id: string; base_url: string }> {
+    return this.request('/api/providers/custom', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  public async getUsage(sessionId?: string | null): Promise<UsagePayload> {
+    const q = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : '';
+    return this.request<UsagePayload>(`/api/usage${q}`);
+  }
+
+  public async updateSettings(payload: {
+    theme?: 'dark' | 'light';
+    auto_collapse?: boolean;
+    auto_hide_thinking?: boolean;
+    block_limit?: number | null;
+    auto_compact_enabled?: boolean;
+    auto_compact_threshold?: number;
+    auto_compact_percent?: number;
+    memory_enabled?: boolean;
+    notes_enabled?: boolean;
+    skills_enabled?: boolean;
+    mcp_enabled?: boolean;
+    memory_mode?: 'session' | 'background';
+    session_id?: string | null;
+  }): Promise<void> {
+    return this.request<void>('/api/settings', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  public async upsertWorker(payload: {
+    name: string;
+    provider: string;
+    model: string;
+    reasoning_effort?: string | null;
+  }): Promise<{ workers: Record<string, WorkerProfile> }> {
+    return this.request('/api/workers', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  public async deleteWorker(name: string): Promise<{ workers: Record<string, WorkerProfile> }> {
+    return this.request(`/api/workers/${encodeURIComponent(name)}`, {
+      method: 'DELETE',
+    });
+  }
+
+  public async listProfiles(): Promise<{ profiles: ProfileItem[] }> {
+    return this.request('/api/profiles');
+  }
+
+  public async createProfile(payload: {
+    name: string;
+    summary?: string;
+    persona?: string;
+    behavior?: string;
+  }): Promise<void> {
+    return this.request('/api/profiles', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  public async deleteProfile(name: string): Promise<void> {
+    return this.request(`/api/profiles/${encodeURIComponent(name)}`, {
+      method: 'DELETE',
+    });
+  }
+
+  public async getHeartbeat(sessionId?: string | null): Promise<HeartbeatPayload> {
+    const q = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : '';
+    return this.request<HeartbeatPayload>(`/api/heartbeat${q}`);
   }
 
   public async listPlugins(): Promise<PluginSummary[]> {
