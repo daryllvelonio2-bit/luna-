@@ -67,7 +67,7 @@ pub fn automation_skill() -> Skill {
 }
 
 /// Default pre-fill string when the user selects `/automation` in CLI/TUI/Web composers.
-pub const AUTOMATION_PREFILL: &str = "/automation guide me with automation ";
+pub const AUTOMATION_PREFILL: &str = "/automation guide me with creating an  automation ";
 
 /// Format a user `/automation <arg>` request into the model prompt that tells
 /// the agent to load the `automation` skill, clarify if needed, and create tasks.

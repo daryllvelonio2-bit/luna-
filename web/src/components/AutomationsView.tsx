@@ -47,7 +47,7 @@ interface AutomationsViewProps {
   onToggleTask: (id: string, paused: boolean) => Promise<void> | void;
   onRunTask: (id: string) => Promise<string | null>;
   onDeleteTask: (id: string) => Promise<void> | void;
-  onGuideInChat: (description: string) => void;
+  onStartAutomationConversation: (prefill?: string) => void;
   onOpenSession: (sessionId: string) => void;
   onRefresh: () => void;
 }
@@ -251,7 +251,7 @@ export const AutomationsView: React.FC<AutomationsViewProps> = ({
   onToggleTask,
   onRunTask,
   onDeleteTask,
-  onGuideInChat,
+  onStartAutomationConversation,
   onOpenSession,
   onRefresh,
 }) => {
@@ -263,11 +263,7 @@ export const AutomationsView: React.FC<AutomationsViewProps> = ({
   const [runningSessions, setRunningSessions] = useState<Record<string, string>>({});
   const [startingRunId, setStartingRunId] = useState<string | null>(null);
 
-  // Guided "Create with Prompt" modal
-  const [showPromptModal, setShowPromptModal] = useState(false);
-  const [guidedPrompt, setGuidedPrompt] = useState('');
-
-  // Structured Create / Edit modal
+  // Structured Edit modal (for adjusting existing automations)
   const [showEditorModal, setShowEditorModal] = useState(false);
   const [editingTask, setEditingTask] = useState<ScheduleTask | null>(null);
   const [name, setName] = useState('');
@@ -347,17 +343,7 @@ export const AutomationsView: React.FC<AutomationsViewProps> = ({
   }, [cadenceKind, dailyTime, intervalValue, intervalUnit, cronExpr, onceValue]);
 
   const openCreateModal = () => {
-    setEditingTask(null);
-    setName('');
-    setInstruction('');
-    setCadenceKind('daily');
-    setDailyTime('19:00');
-    setIntervalValue(1);
-    setIntervalUnit('hours');
-    setCronExpr('0 9 * * 1-5');
-    setOnceValue('');
-    setTargetKind('new_session_each_run');
-    setShowEditorModal(true);
+    onStartAutomationConversation();
   };
 
   const openEditModal = (task: ScheduleTask) => {
@@ -417,15 +403,6 @@ export const AutomationsView: React.FC<AutomationsViewProps> = ({
     }
   };
 
-  const handleLaunchGuidedPrompt = (e: React.FormEvent) => {
-    e.preventDefault();
-    const text = guidedPrompt.trim();
-    if (!text) return;
-    setShowPromptModal(false);
-    setGuidedPrompt('');
-    onGuideInChat(text);
-  };
-
   return (
     <div className="page-view auto-view">
       <header className="chat-header auto-header">
@@ -483,16 +460,11 @@ export const AutomationsView: React.FC<AutomationsViewProps> = ({
 
           <button
             type="button"
-            className="btn auto-btn-magic"
-            onClick={() => setShowPromptModal(true)}
+            className="btn btn-primary"
+            onClick={() => onStartAutomationConversation()}
           >
             <Sparkles size={14} />
-            <span>Create with Prompt</span>
-          </button>
-
-          <button type="button" className="btn btn-primary" onClick={openCreateModal}>
-            <Plus size={14} />
-            <span>New automation</span>
+            <span>Create automation</span>
           </button>
         </div>
       </header>
@@ -640,16 +612,34 @@ export const AutomationsView: React.FC<AutomationsViewProps> = ({
                 <div className="auto-empty-actions">
                   <button
                     type="button"
-                    className="btn auto-btn-magic"
-                    onClick={() => setShowPromptModal(true)}
+                    className="btn btn-primary"
+                    onClick={() => onStartAutomationConversation()}
                   >
                     <Sparkles size={14} />
-                    <span>Create with Prompt</span>
+                    <span>Create automation</span>
                   </button>
-                  <button type="button" className="btn btn-secondary" onClick={openCreateModal}>
-                    <Plus size={14} />
-                    <span>Manual schedule</span>
-                  </button>
+                </div>
+              )}
+              {tasks.length === 0 && (
+                <div className="auto-starters" style={{ marginTop: '20px', maxWidth: '640px' }}>
+                  <div className="auto-starters-label">Starter workflows</div>
+                  <div className="auto-starter-chips">
+                    {GUIDED_STARTERS.map((s) => (
+                      <button
+                        key={s.label}
+                        type="button"
+                        className="auto-starter-chip"
+                        onClick={() =>
+                          onStartAutomationConversation(
+                            `/automation guide me with creating an  automation to ${s.prompt}`
+                          )
+                        }
+                      >
+                        <Sparkles size={11} />
+                        <span>{s.label}</span>
+                      </button>
+                    ))}
+                  </div>
                 </div>
               )}
             </div>
@@ -907,88 +897,8 @@ export const AutomationsView: React.FC<AutomationsViewProps> = ({
         </div>
       </div>
 
-      {/* Guided "Create with Prompt" Modal */}
-      {showPromptModal && (
-        <div className="modal-backdrop" onClick={() => setShowPromptModal(false)}>
-          <form
-            className="modal-card auto-modal-wide"
-            onSubmit={handleLaunchGuidedPrompt}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="modal-header auto-modal-header">
-              <div className="auto-modal-title-wrap">
-                <span className="auto-header-icon">
-                  <Sparkles size={14} />
-                </span>
-                <span className="modal-title">Create Automation with Luna</span>
-              </div>
-              <button
-                type="button"
-                className="icon-btn"
-                onClick={() => setShowPromptModal(false)}
-                aria-label="Close"
-              >
-                <X size={15} />
-              </button>
-            </div>
-
-            <div className="modal-body">
-              <p className="auto-modal-lead">
-                Describe what should run and when. Luna reads the global{' '}
-                <code>automation</code> skill, asks clarifying questions if any details are
-                missing, and creates the scheduled task(s) automatically.
-              </p>
-
-              <div className="form-group">
-                <label className="form-label">What would you like to automate?</label>
-                <textarea
-                  className="form-input auto-guided-textarea"
-                  rows={4}
-                  required
-                  autoFocus
-                  placeholder="Describe your workflow, cadence (e.g. every day at 7pm, every hour, weekdays at 9am), and expected outputs..."
-                  value={guidedPrompt}
-                  onChange={(e) => setGuidedPrompt(e.target.value)}
-                />
-              </div>
-
-              <div className="auto-starters">
-                <div className="auto-starters-label">Starter ideas</div>
-                <div className="auto-starter-chips">
-                  {GUIDED_STARTERS.map((s) => (
-                    <button
-                      key={s.label}
-                      type="button"
-                      className="auto-starter-chip"
-                      onClick={() => setGuidedPrompt(s.prompt)}
-                    >
-                      <Sparkles size={11} />
-                      <span>{s.label}</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </div>
-
-            <div className="modal-footer">
-              <button
-                type="button"
-                className="btn btn-secondary"
-                onClick={() => setShowPromptModal(false)}
-              >
-                Cancel
-              </button>
-              <button type="submit" className="btn btn-primary" disabled={!guidedPrompt.trim()}>
-                <Sparkles size={14} />
-                <span>Guide me in Chat</span>
-              </button>
-            </div>
-          </form>
-        </div>
-      )}
-
-      {/* Structured Create / Edit Modal */}
-      {showEditorModal && (
+      {/* Structured Edit Modal (for editing existing automations) */}
+      {showEditorModal && editingTask && (
         <div className="modal-backdrop" onClick={() => setShowEditorModal(false)}>
           <form
             className="modal-card auto-modal-wide"
@@ -997,7 +907,7 @@ export const AutomationsView: React.FC<AutomationsViewProps> = ({
           >
             <div className="modal-header auto-modal-header">
               <span className="modal-title">
-                {editingTask ? 'Edit automation' : 'New scheduled automation'}
+                Edit automation: {editingTask.name}
               </span>
               <button
                 type="button"
@@ -1147,17 +1057,33 @@ export const AutomationsView: React.FC<AutomationsViewProps> = ({
               </div>
             </div>
 
-            <div className="modal-footer">
+            <div className="modal-footer" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <button
                 type="button"
                 className="btn btn-secondary"
-                onClick={() => setShowEditorModal(false)}
+                onClick={() => {
+                  setShowEditorModal(false);
+                  onStartAutomationConversation(
+                    `/automation guide me with updating automation "${editingTask.name}" `
+                  );
+                }}
               >
-                Cancel
+                <Sparkles size={13} />
+                <span>Guide in chat</span>
               </button>
-              <button type="submit" className="btn btn-primary" disabled={saving}>
-                {saving ? 'Saving…' : editingTask ? 'Save changes' : 'Create automation'}
-              </button>
+
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={() => setShowEditorModal(false)}
+                >
+                  Cancel
+                </button>
+                <button type="submit" className="btn btn-primary" disabled={saving}>
+                  {saving ? 'Saving…' : 'Save changes'}
+                </button>
+              </div>
             </div>
           </form>
         </div>

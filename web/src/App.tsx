@@ -45,6 +45,7 @@ export const App: React.FC = () => {
 
   const [sessions, setSessions] = useState<GuiSessionItem[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [composerPrefill, setComposerPrefill] = useState<string | null>(null);
   const [messages, setMessages] = useState<TranscriptMessageDto[]>([]);
   const [turnRunning, setTurnRunning] = useState(false);
 
@@ -776,8 +777,8 @@ export const App: React.FC = () => {
       }
       if (cmd === '/automation' || cmd === '/automations') {
         if (!arg) {
-          api.listSchedules().then(setSchedules).catch(() => {});
-          setCurrentTab('automations');
+          setCurrentTab('chat');
+          setComposerPrefill('/automation guide me with creating an  automation ');
           return true;
         }
         const prompt =
@@ -1140,20 +1141,19 @@ export const App: React.FC = () => {
     }
   };
 
-  const handleGuideAutomationInChat = async (description: string) => {
-    setCurrentTab('chat');
-    if (!activeSessionIdRef.current) {
-      await handleNewSession(null);
+  const handleStartAutomationConversation = async (prefill?: string) => {
+    const text = prefill ?? '/automation guide me with creating an  automation ';
+    try {
+      const sid = await api.createSession();
+      await handleSelectSession(sid);
+      await api.renameSession(sid, 'Automation');
+    } catch {
+      if (!activeSessionIdRef.current) {
+        await handleNewSession(null);
+      }
     }
-    const clean = description.trim();
-    const prompt =
-      `Automation Workflow Request:\n` +
-      `1. First call \`skill_view\` with \`name: "automation"\` to load the global automation workflow instructions.\n` +
-      `2. Follow those instructions carefully for the user's request below.\n` +
-      `3. If critical details (timezone, tools/pipeline, side-effect boundaries, inputs/outputs, etc.) are missing or ambiguous, call \`clarify\` first before creating any schedules.\n` +
-      `4. Once requirements are clear, create or update the scheduled automation task(s) using \`schedule_create\` / \`schedule_edit\`.\n\n` +
-      `User request:\n${clean || 'guide me with automation'}`;
-    handleSendMessage(prompt);
+    setCurrentTab('chat');
+    setComposerPrefill(text);
   };
 
   const handleOpenAutomationSession = (sessionId: string) => {
@@ -1263,6 +1263,8 @@ export const App: React.FC = () => {
             onRememberSession={handleRememberSession}
             onForkSession={() => activeSessionId && handleForkSession(activeSessionId)}
             onNewSession={() => handleNewSession(null)}
+            composerPrefill={composerPrefill}
+            onClearComposerPrefill={() => setComposerPrefill(null)}
             onSendMessage={handleSendMessage}
             onSlashCommand={handleSlashCommand}
             onInterrupt={handleInterrupt}
@@ -1291,7 +1293,7 @@ export const App: React.FC = () => {
             onToggleTask={handleToggleSchedule}
             onRunTask={handleRunSchedule}
             onDeleteTask={handleDeleteSchedule}
-            onGuideInChat={handleGuideAutomationInChat}
+            onStartAutomationConversation={handleStartAutomationConversation}
             onOpenSession={handleOpenAutomationSession}
             onRefresh={() => api.listSchedules().then(setSchedules).catch(() => {})}
           />

@@ -31,10 +31,10 @@ const BUILTIN_SLASH_COMMANDS: SlashItem[] = [
   { cmd: '/mode', desc: 'Switch build / auto / plan mode', category: 'command', hasArg: true },
   {
     cmd: '/automation',
-    desc: 'Open Automations UI or guide a new scheduled workflow',
+    desc: 'Guide a new scheduled workflow in conversation',
     category: 'command',
     hasArg: true,
-    prefill: '/automation guide me with automation ',
+    prefill: '/automation guide me with creating an  automation ',
   },
   { cmd: '/compact', desc: 'Compact conversation history now', category: 'command' },
   { cmd: '/summarize', desc: 'Summarize and start a fresh chat', category: 'command' },
@@ -82,6 +82,8 @@ interface ComposerProps {
   turnRunning: boolean;
   workers: Record<string, WorkerProfile>;
   skills: SkillSummary[];
+  composerPrefill?: string | null;
+  onClearComposerPrefill?: () => void;
   onSend: (text: string, images?: string[], sendMode?: 'steer' | 'queue') => void;
   onSlashCommand: (raw: string, images?: string[]) => boolean;
   onInterrupt: () => void;
@@ -113,6 +115,8 @@ export const Composer: React.FC<ComposerProps> = React.memo(
     turnRunning,
     workers,
     skills,
+    composerPrefill,
+    onClearComposerPrefill,
     onSend,
     onSlashCommand,
     onInterrupt,
@@ -130,6 +134,21 @@ export const Composer: React.FC<ComposerProps> = React.memo(
     const thinkingRef = useRef<HTMLDivElement>(null);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
+
+    useEffect(() => {
+      if (composerPrefill != null) {
+        setInput(composerPrefill);
+        setSlashDismissed(true);
+        onClearComposerPrefill?.();
+        requestAnimationFrame(() => {
+          if (textareaRef.current) {
+            textareaRef.current.focus();
+            const len = composerPrefill.length;
+            textareaRef.current.setSelectionRange(len, len);
+          }
+        });
+      }
+    }, [composerPrefill, onClearComposerPrefill]);
 
     useEffect(() => {
       if (!thinkingOpen) return;
@@ -251,7 +270,13 @@ export const Composer: React.FC<ComposerProps> = React.memo(
       if (item.prefill) {
         setInput(item.prefill);
         setSlashDismissed(true);
-        textareaRef.current?.focus();
+        requestAnimationFrame(() => {
+          if (textareaRef.current) {
+            textareaRef.current.focus();
+            const len = item.prefill?.length ?? 0;
+            textareaRef.current.setSelectionRange(len, len);
+          }
+        });
       } else if (item.hasArg) {
         setInput(`${item.cmd} `);
         setSlashDismissed(true);

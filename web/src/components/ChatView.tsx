@@ -52,6 +52,8 @@ interface ChatViewProps {
   goal: GoalStatus | null;
   workers: Record<string, WorkerProfile>;
   skills: SkillSummary[];
+  composerPrefill?: string | null;
+  onClearComposerPrefill?: () => void;
   notices: Array<{ id: string; text: string; kind: 'info' | 'err' }>;
   onDismissNotice: (id: string) => void;
   messages: TranscriptMessageDto[];
@@ -518,6 +520,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
   goal,
   workers,
   skills,
+  composerPrefill,
+  onClearComposerPrefill,
   notices,
   onDismissNotice,
   messages,
@@ -1287,6 +1291,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
         turnRunning={turnRunning}
         workers={workers}
         skills={skills}
+        composerPrefill={composerPrefill}
+        onClearComposerPrefill={onClearComposerPrefill}
         onSend={onSendMessage}
         onSlashCommand={onSlashCommand}
         onInterrupt={onInterrupt}
