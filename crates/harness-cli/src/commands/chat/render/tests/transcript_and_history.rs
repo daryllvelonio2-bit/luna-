@@ -1,0 +1,957 @@
+use super::super::*;
+use serde_json::json;
+
+#[allow(dead_code)]
+fn plain_rows(rows: &[String]) -> Vec<String> {
+    rows.iter()
+        .map(|row| dialoguer::console::strip_ansi_codes(row).to_string())
+        .collect()
+}
+
+#[test]
+fn parse_turns_from_history_handles_multistep_and_empty_queries() {
+    use harness_core::Message;
+
+    let history = vec![
+        StoredMessage {
+            id: 1,
+            seq: 1,
+            message: Message::user("first question"),
+            is_summary: false,
+        },
+        StoredMessage {
+            id: 2,
+            seq: 2,
+            message: Message::assistant("first reply"),
+            is_summary: false,
+        },
+        StoredMessage {
+            id: 3,
+            seq: 3,
+            message: Message::user("second question"),
+            is_summary: false,
+        },
+        StoredMessage {
+            id: 4,
+            seq: 4,
+            message: Message {
+                role: Role::Assistant,
+                content: None,
+                reasoning: Some("thinking...".to_string()),
+                tool_calls: vec![harness_core::ToolCall {
+                    id: "c1".to_string(),
+                    name: "terminal".to_string(),
+                    arguments: json!({ "command": "ls" }),
+                    signature: None,
+                }],
+                tool_result: None,
+                usage: None,
+            },
+            is_summary: false,
+        },
+        StoredMessage {
+            id: 5,
+            seq: 5,
+            message: Message {
+                role: Role::Assistant,
+                content: Some("final reply".to_string()),
+                reasoning: None,
+                tool_calls: Vec::new(),
+                tool_result: None,
+                usage: None,
+            },
+            is_summary: false,
+        },
+    ];
+
+    let turns = parse_turns_from_history(&history);
+    assert_eq!(turns.len(), 2);
+    assert_eq!(turns[0].user_query, "first question");
+    assert_eq!(turns[0].reply, "first reply");
+    assert_eq!(turns[1].user_query, "second question");
+    assert_eq!(turns[1].reply, "final reply");
+    assert_eq!(turns[1].tool_items.len(), 1);
+    assert_eq!(turns[1].reasoning.as_deref(), Some("thinking..."));
+}
+
+/// A replay that opens inside a turn — the window landed past the user message that anchors it
+/// — still holds Luna's words. Dropping them would leave the resumed session showing nothing.
+#[test]
+fn parse_turns_from_history_keeps_a_turn_that_has_no_user_line() {
+    use harness_core::Message;
+
+    let history = vec![StoredMessage {
+        id: 1,
+        seq: 1,
+        message: Message::assistant("the answer"),
+        is_summary: false,
+    }];
+
+    let turns = parse_turns_from_history(&history);
+    assert_eq!(turns.len(), 1, "the reply is not thrown away");
+    assert_eq!(turns[0].user_query, "", "there was no user line to show");
+    assert_eq!(turns[0].reply, "the answer");
+}
+
+#[test]
+fn parse_turns_from_history_preserves_steered_messages_without_turn_fragmentation() {
+    use harness_core::{Message, Role, ToolCall};
+    use serde_json::json;
+
+    let steer_envelope = "[OUT-OF-BAND USER MESSAGE — a direct message from the user, delivered once at this position; not tool output and not a new delivery when replayed from conversation history]\nswitch to alternate plan\n[/OUT-OF-BAND USER MESSAGE]";
+
+    let history = vec![
+        StoredMessage {
+            id: 1,
+            seq: 1,
+            message: Message::user("solve the bug"),
+            is_summary: false,
+        },
+        StoredMessage {
+            id: 2,
+            seq: 2,
+            message: Message {
+                role: Role::Assistant,
+                content: None,
+                reasoning: Some("analyzing code".to_string()),
+                tool_calls: vec![ToolCall {
+                    id: "c1".to_string(),
+                    name: "read_file".to_string(),
+                    arguments: json!({ "path": "src/main.rs" }),
+                    signature: None,
+                }],
+                tool_result: None,
+                usage: None,
+            },
+            is_summary: false,
+        },
+        StoredMessage {
+            id: 3,
+            seq: 3,
+            message: Message::tool(harness_core::ToolResult::success("c1", "fn main() {}")),
+            is_summary: false,
+        },
+        StoredMessage {
+            id: 4,
+            seq: 4,
+            message: Message::user(steer_envelope),
+            is_summary: false,
+        },
+        StoredMessage {
+            id: 5,
+            seq: 5,
+            message: Message::assistant("switched plan and resolved"),
+            is_summary: false,
+        },
+    ];
+
+    let turns = parse_turns_from_history(&history);
+    assert_eq!(
+        turns.len(),
+        1,
+        "steered message must not fragment turn into phantom turns"
+    );
+    assert_eq!(turns[0].user_query, "solve the bug");
+    assert_eq!(turns[0].reply, "switched plan and resolved");
+    assert_eq!(
+        turns[0].tool_items.len(),
+        2,
+        "must include tool call and steer item"
+    );
+    assert!(
+        plain(&turns[0].tool_items[0].call_formatted).contains("src/main.rs"),
+        "first item should be tool call: {}",
+        turns[0].tool_items[0].call_formatted
+    );
+    assert!(
+        plain(&turns[0].tool_items[1].call_formatted)
+            .contains("Steered into active turn: switch to alternate plan"),
+        "second item should be steer process item: {}",
+        turns[0].tool_items[1].call_formatted
+    );
+}
+
+#[test]
+fn steer_process_items_are_not_counted_as_tools_in_header() {
+    use harness_core::Message;
+
+    let steer_envelope = "[OUT-OF-BAND USER MESSAGE]\nredirect focus\n[/OUT-OF-BAND USER MESSAGE]";
+    let history = vec![
+        StoredMessage {
+            id: 1,
+            seq: 1,
+            message: Message::user("solve it"),
+            is_summary: false,
+        },
+        StoredMessage {
+            id: 2,
+            seq: 2,
+            message: Message::user(steer_envelope),
+            is_summary: false,
+        },
+        StoredMessage {
+            id: 3,
+            seq: 3,
+            message: Message::assistant("done"),
+            is_summary: false,
+        },
+    ];
+
+    let turns = parse_turns_from_history(&history);
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0].tools.len(), 0);
+    assert_eq!(turns[0].tool_items.len(), 1);
+    assert!(plain(&turns[0].tool_items[0].call_formatted)
+        .contains("Steered into active turn: redirect focus"));
+}
+
+/// `colored` decides on escapes by whether stdout is a tty, which it never is under
+/// `cargo test`, so colour has to be forced. The override is process-global and these tests
+/// run in parallel — hence unset in a guard, and hence the geometry tests below reading
+/// through `plain` so a concurrent override cannot perturb them.
+struct ColorOverride;
+impl ColorOverride {
+    fn force_on() -> Self {
+        colored::control::set_override(true);
+        Self
+    }
+}
+impl Drop for ColorOverride {
+    fn drop(&mut self) {
+        colored::control::unset_override();
+    }
+}
+
+/// Every row of a user message — wrapped rows included — carries the blue foreground, so a
+/// long message reads as one block on the user's side rather than alternating with plain text.
+#[test]
+fn every_row_of_a_user_message_is_blue() {
+    let _color = ColorOverride::force_on();
+
+    // `colored` merges the attributes it is given, so blue+bold arrives as one sequence
+    // rather than two separate ones.
+    const BLUE_FG: &str = "\u{1b}[1;34m";
+    let msg = right_aligned_user_message("alpha beta gamma delta epsilon zeta eta theta", 60);
+    let rows: Vec<&str> = msg.lines().collect();
+    assert!(rows.len() > 1, "expected a wrap at width 60");
+    for row in &rows {
+        assert!(
+            row.contains(BLUE_FG),
+            "row is missing the blue foreground: {row:?}"
+        );
+    }
+}
+
+#[test]
+fn the_empty_input_prompt_is_blue_too() {
+    let _color = ColorOverride::force_on();
+
+    let msg = right_aligned_user_message("   ", 80);
+    assert!(msg.contains("\u{1b}[1;34m"), "got: {msg:?}");
+    assert!(msg.ends_with("\u{1b}[0m"), "style is closed: {msg:?}");
+}
+
+#[test]
+fn the_transcript_rows_are_the_cli_ui_and_hold_one_line_each() {
+    use harness_core::{Message, ToolResult};
+
+    let history = vec![
+        StoredMessage {
+            id: 0,
+            seq: 0,
+            message: Message::user("audit the delegate viewer"),
+            is_summary: false,
+        },
+        StoredMessage {
+            id: 1,
+            seq: 1,
+            message: Message {
+                role: Role::Assistant,
+                content: None,
+                reasoning: Some("I should read the viewer first.".to_string()),
+                tool_calls: vec![harness_core::ToolCall {
+                    id: "c1".to_string(),
+                    name: "read_file".to_string(),
+                    arguments: json!({ "path": "viewer.rs" }),
+                    signature: None,
+                }],
+                tool_result: None,
+                usage: None,
+            },
+            is_summary: false,
+        },
+        StoredMessage {
+            id: 2,
+            seq: 2,
+            message: Message::tool(ToolResult::success("c1", "fn viewer() {}")),
+            is_summary: false,
+        },
+        StoredMessage {
+            id: 3,
+            seq: 3,
+            message: Message::assistant("The viewer now uses the CLI transcript."),
+            is_summary: false,
+        },
+    ];
+
+    let turns = parse_turns_from_history(&history);
+    let rows = render_turn_lines(&turns, true, 100);
+
+    assert!(
+        rows.iter().all(|row| !row.contains('\n')),
+        "each entry is one physical row: {rows:?}"
+    );
+    let text = rows
+        .iter()
+        .map(|row| plain(row))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("audit the delegate viewer"), "{text}");
+    assert!(
+        text.contains("read") && text.contains("viewer.rs"),
+        "{text}"
+    );
+    assert!(text.contains("I should read the viewer first."), "{text}");
+    assert!(text.contains(LUNA_LABEL), "{text}");
+    assert!(
+        text.contains("The viewer now uses the CLI transcript."),
+        "{text}"
+    );
+}
+
+/// `colored::control::set_override` is process-global and these tests run in parallel, so the
+/// blue tests can flip it on while a width test is mid-assertion. Anything that measures
+/// geometry must therefore strip escapes first — the same way `ui::visible_width` does in the
+/// live region, which sees both colored and plain rows.
+// The dimension of the live region is computed from visible characters, so a colour escape
+// must not be counted. `strip_ansi_codes` is what the live activity row already relies on;
+// reusing it keeps the test and the code looking at the same definition of "visible".
+fn plain(s: &str) -> String {
+    dialoguer::console::strip_ansi_codes(s).to_string()
+}
+
+#[test]
+fn plain_strips_colored_escapes() {
+    assert_eq!(plain("\u{1b}[1;34mfoo\u{1b}[0m"), "foo");
+}
+
+#[test]
+fn right_aligned_user_message_handles_multiline() {
+    let msg = right_aligned_user_message("hello\nworld", 80);
+    let lines: Vec<&str> = msg.lines().collect();
+    assert_eq!(lines.len(), 2);
+    assert!(plain(lines[0]).ends_with("hello"));
+    assert!(plain(lines[1]).ends_with(PROMPT.trim_end()));
+}
+
+/// Regression: a message wider than the terminal padded to zero, so it started at column 0 and
+/// the terminal soft-wrapped its tail back to column 0 — the continuation then sat in the
+/// same column as Luna's replies and read as assistant text.
+#[test]
+fn a_long_message_wraps_on_the_user_side_and_never_at_the_left_margin() {
+    let width = 103; // the narrow terminal this was reported on
+    let long = "oohhhhh also, i have an idea, in admin abuse, players will also get encantations \
+                and mutations on a plant!";
+    let msg = right_aligned_user_message(long, width);
+    let rows: Vec<&str> = msg.lines().collect();
+
+    // Printed under `--nocapture` so the layout can be eyeballed without launching the TUI.
+    println!("--- user message at width {width} ---\n{msg}\n---");
+
+    assert!(rows.len() > 1, "a message this long must wrap: {msg}");
+    for row in &rows {
+        let row = plain(row);
+        let leading = row.chars().take_while(|c| *c == ' ').count();
+        let visible = row.chars().count();
+        assert!(leading > 0, "no row may start at the left margin: {row:?}");
+        assert!(
+            visible <= width,
+            "row overflows the terminal: {visible} > {width}"
+        );
+    }
+    assert!(
+        plain(rows.last().unwrap()).ends_with(PROMPT.trim_end()),
+        "the prompt glyph closes the last row: {msg}"
+    );
+}
+
+/// The wrapped rows belong to one right-anchored block: every row ends at the same column.
+#[test]
+fn wrapped_rows_of_a_message_share_the_right_edge() {
+    let width = 100;
+    let msg = right_aligned_user_message(&"word ".repeat(60), width);
+    let rows: Vec<&str> = msg.lines().collect();
+    assert!(rows.len() > 2, "expected several rows, got {}", rows.len());
+    for row in &rows {
+        assert_eq!(
+            plain(row).chars().count(),
+            width - 1,
+            "each row is padded to the right edge: {row:?}"
+        );
+    }
+}
+
+#[test]
+fn a_short_message_stays_one_right_aligned_row() {
+    let msg = right_aligned_user_message("hi", 80);
+    let rows: Vec<&str> = msg.lines().collect();
+    assert_eq!(rows.len(), 1, "short messages must not be wrapped");
+    assert_eq!(plain(rows[0]).chars().count(), 79);
+    assert!(plain(rows[0]).starts_with(' '), "still pushed to the right");
+}
+
+#[test]
+fn patch_diff_formatting_colors_additions_and_deletions() {
+    let old = "fn hello() {\n    println!(\"old\");\n}\n";
+    let new = "fn hello() {\n    println!(\"new\");\n}\n";
+    let diff = format_patch_diff(old, new);
+
+    assert_eq!(diff.len(), 4);
+    // Equal line
+    assert!(diff[0].contains("fn hello()"));
+    // Deleted line should have '-' and pure red background (200;0;0) with white text (255;255;255)
+    assert!(diff[1].contains("-"));
+    assert!(diff[1].contains("println!(\"old\")"));
+    assert!(
+        diff[1].contains("200;0;0"),
+        "expected pure red background in deletion: {:?}",
+        diff[1]
+    );
+    assert!(
+        diff[1].contains("255;255;255"),
+        "expected white text in deletion: {:?}",
+        diff[1]
+    );
+    // Added line should have '+' and pure green background (0;160;0) with white text (255;255;255)
+    assert!(diff[2].contains("+"));
+    assert!(diff[2].contains("println!(\"new\")"));
+    assert!(
+        diff[2].contains("0;160;0"),
+        "expected pure green background in addition: {:?}",
+        diff[2]
+    );
+    assert!(
+        diff[2].contains("255;255;255"),
+        "expected white text in addition: {:?}",
+        diff[2]
+    );
+    // Equal line
+    assert!(diff[3].contains("}"));
+}
+
+#[test]
+fn patch_diff_included_in_history_parsing() {
+    let history = vec![
+        StoredMessage {
+            id: 1,
+            seq: 1,
+            message: harness_core::Message {
+                role: Role::User,
+                content: Some("fix it".to_string()),
+                reasoning: None,
+                tool_calls: Vec::new(),
+                tool_result: None,
+                usage: None,
+            },
+            is_summary: false,
+        },
+        StoredMessage {
+            id: 2,
+            seq: 2,
+            message: harness_core::Message {
+                role: Role::Assistant,
+                content: None,
+                reasoning: None,
+                tool_calls: vec![harness_core::ToolCall {
+                    id: "call_1".to_string(),
+                    name: "patch".to_string(),
+                    arguments: serde_json::json!({
+                        "path": "src/main.rs",
+                        "old_string": "let a = 1;",
+                        "new_string": "let a = 2;"
+                    }),
+                    signature: None,
+                }],
+                tool_result: None,
+                usage: None,
+            },
+            is_summary: false,
+        },
+    ];
+
+    let turns = parse_turns_from_history(&history);
+    assert_eq!(turns.len(), 1);
+    let turn = &turns[0];
+    assert_eq!(turn.tool_items.len(), 1);
+    let tool = &turn.tool_items[0];
+    assert_eq!(tool.diff_lines.len(), 2);
+    assert!(tool.diff_lines[0].contains("-"));
+    assert!(tool.diff_lines[0].contains("200;0;0"));
+    assert!(tool.diff_lines[1].contains("+"));
+    assert!(tool.diff_lines[1].contains("0;160;0"));
+}
+
+#[test]
+fn write_file_shows_diff_lines_in_transcript_and_tui() {
+    use harness_core::{Message, Role, StoredMessage};
+
+    let history = vec![
+        StoredMessage {
+            id: 0,
+            seq: 0,
+            message: Message::user("write terrain"),
+            is_summary: false,
+        },
+        StoredMessage {
+            id: 1,
+            seq: 1,
+            message: Message {
+                role: Role::Assistant,
+                content: None,
+                reasoning: None,
+                tool_calls: vec![harness_core::ToolCall {
+                    id: "call_write_1".to_string(),
+                    name: "write_file".to_string(),
+                    arguments: serde_json::json!({
+                        "path": "src/world/terrain.rs",
+                        "content": "pub struct Terrain;\nimpl Terrain {\n    pub fn new() -> Self {\n        Self\n    }\n}\n"
+                    }),
+                    signature: None,
+                }],
+                tool_result: None,
+                usage: None,
+            },
+            is_summary: false,
+        },
+    ];
+
+    let turns = parse_turns_from_history(&history);
+    assert_eq!(turns.len(), 1);
+    let turn = &turns[0];
+    assert_eq!(turn.tool_items.len(), 1);
+    let tool = &turn.tool_items[0];
+    assert!(
+        !tool.diff_lines.is_empty(),
+        "write_file must populate diff_lines"
+    );
+    assert!(tool
+        .diff_lines
+        .iter()
+        .any(|line| line.contains("+") && line.contains("pub struct Terrain")));
+}
+
+#[test]
+fn extract_write_diff_unified_diff_against_existing_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("code.rs");
+    std::fs::write(&file_path, "fn old_func() {\n    let x = 1;\n}\n").unwrap();
+
+    let diff = extract_write_diff(&serde_json::json!({
+        "path": file_path.to_str().unwrap(),
+        "content": "fn new_func() {\n    let x = 2;\n}\n"
+    }));
+
+    assert!(!diff.is_empty());
+    assert!(diff
+        .iter()
+        .any(|line| line.contains("-") && line.contains("old_func")));
+    assert!(diff
+        .iter()
+        .any(|line| line.contains("+") && line.contains("new_func")));
+}
+
+#[tokio::test]
+async fn resumed_compacted_session_replays_all_prompts_and_replies() {
+    use harness_core::{Message, SessionStore, SqliteSessionStore};
+
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("sessions.db");
+    let store = SqliteSessionStore::new(Some(db_path)).unwrap();
+    store.ensure_session("s_test").await.unwrap();
+
+    // Turn 1
+    store
+        .append("s_test", &Message::user("first question"), false)
+        .await
+        .unwrap();
+    store
+        .append("s_test", &Message::assistant("first answer"), false)
+        .await
+        .unwrap();
+
+    // Turn 2
+    store
+        .append("s_test", &Message::user("second question"), false)
+        .await
+        .unwrap();
+    store
+        .append("s_test", &Message::assistant("second answer"), false)
+        .await
+        .unwrap();
+
+    // Compaction folds Turn 1 into a summary
+    store
+        .record_compaction("s_test", &[1, 2], "User asked first question")
+        .await
+        .unwrap();
+
+    // Loading via replay_transcript (used by the CLI UI) preserves both turns with agent replies
+    let replayed = store.replay_transcript("s_test", 200).await.unwrap();
+    let turns = parse_turns_from_history(&replayed.history);
+
+    assert_eq!(turns.len(), 2, "both turns are shown on resume");
+    assert_eq!(turns[0].user_query, "first question");
+    assert_eq!(turns[0].reply, "first answer");
+    assert_eq!(turns[1].user_query, "second question");
+    assert_eq!(turns[1].reply, "second answer");
+}
+
+#[test]
+fn user_message_process_item_renders_as_user_card() {
+    let item = TurnProcessItem::user_message("change of direction");
+    assert!(item.is_user_message());
+    assert_eq!(item.output, "change of direction");
+}
+
+#[test]
+fn a_finished_job_reads_as_a_notice_and_a_model_message() {
+    use harness_core::tasks::JobCompletion;
+
+    let completion = JobCompletion {
+        id: "job_000001".to_string(),
+        command: "cargo build --release\nsecond line".to_string(),
+        status: "completed (exit 0)".to_string(),
+        elapsed_secs: 316,
+        log_path: "/tmp/job_000001.log".to_string(),
+        output_tail: "line one\nline two\n".to_string(),
+    };
+
+    let notice = format_job_notification(
+        "✔",
+        &completion.id,
+        &completion.command,
+        &completion.status,
+        &format_elapsed_secs(completion.elapsed_secs),
+    );
+    assert_eq!(
+        notice,
+        "✔ job_000001: cargo build --release — completed (exit 0), 5m 16s"
+    );
+    assert!(
+        !notice.contains("second line"),
+        "the notice is one line: {notice}"
+    );
+
+    let message = format_job_system_message(&completion);
+    assert!(
+        message.starts_with(BACKGROUND_JOB_RESUME_PREFIX),
+        "{message}"
+    );
+    for expected in [
+        "job_000001",
+        "cargo build --release",
+        "completed (exit 0)",
+        "5m 16s",
+        "/tmp/job_000001.log",
+        "line one",
+        "line two",
+    ] {
+        assert!(
+            message.contains(expected),
+            "missing {expected:?}: {message}"
+        );
+    }
+}
+
+#[test]
+fn a_job_with_no_output_says_so_instead_of_leaving_a_blank() {
+    use harness_core::tasks::JobCompletion;
+
+    let completion = JobCompletion {
+        id: "job_000002".to_string(),
+        command: "true".to_string(),
+        status: "completed (exit 0)".to_string(),
+        elapsed_secs: 0,
+        log_path: "/tmp/job_000002.log".to_string(),
+        output_tail: "   \n".to_string(),
+    };
+    let message = format_job_system_message(&completion);
+    assert!(message.contains("(no output)"), "{message}");
+}
+
+#[test]
+fn a_huge_tail_is_trimmed_to_its_newest_characters() {
+    use harness_core::tasks::JobCompletion;
+
+    let completion = JobCompletion {
+        id: "job_000003".to_string(),
+        command: "generate-report".to_string(),
+        status: "completed (exit 0)".to_string(),
+        elapsed_secs: 1,
+        log_path: "/tmp/job_000003.log".to_string(),
+        output_tail: format!("{}THE-END", "x".repeat(10_000)),
+    };
+    let message = format_job_system_message(&completion);
+    assert!(message.contains("earlier characters trimmed"), "{message}");
+    assert!(message.ends_with("THE-END"), "the newest output is kept");
+    assert!(
+        message.chars().count() < 5_000,
+        "the stored message is bounded: {} chars",
+        message.chars().count()
+    );
+}
+
+#[test]
+fn a_harness_owned_turn_is_hidden_from_replay() {
+    let prompt = background_job_resume_prompt();
+    assert!(prompt.starts_with(BACKGROUND_JOB_RESUME_PREFIX), "{prompt}");
+    assert_eq!(clean_user_query_for_transcript(&prompt), "");
+
+    // Ordinary prose that happens to contain the words is still a user message.
+    assert_eq!(
+        clean_user_query_for_transcript("the background job finished"),
+        "the background job finished"
+    );
+}
+
+#[test]
+fn a_long_job_command_is_bounded_in_the_notice() {
+    let long = "x".repeat(200);
+    let short = format_job_command(&long);
+    assert!(short.chars().count() <= 60, "{short}");
+    assert!(short.ends_with('…'), "{short}");
+}
+
+#[test]
+fn clean_user_query_for_transcript_strips_plan_mode_and_data_urls() {
+    use super::super::clean_user_query_for_transcript;
+
+    // Normal text unchanged
+    assert_eq!(
+        clean_user_query_for_transcript("just a regular question"),
+        "just a regular question"
+    );
+
+    // Multiline normal text
+    assert_eq!(
+        clean_user_query_for_transcript("line 1\nline 2"),
+        "line 1\nline 2"
+    );
+
+    // Plan mode banner stripped
+    let plan_prompt = "[PLAN MODE ACTIVE: Formulate a detailed, step-by-step plan/blueprint. Do not attempt to modify files or execute mutating commands until the plan is approved.]\n\nactual question here";
+    assert_eq!(
+        clean_user_query_for_transcript(plan_prompt),
+        "actual question here"
+    );
+
+    // Attached image with marker drops whole-line base64 data URL
+    let attached_image = "[image: 948x1058] look at this UI bug\n\ndata:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAcAAAAPoCAYAAAC";
+    assert_eq!(
+        clean_user_query_for_transcript(attached_image),
+        "[image: 948x1058] look at this UI bug"
+    );
+
+    // Attached image with saved-to path in marker
+    let attached_saved = "[image: 948x1058 saved to /tmp/screenshot_1.png] look at this\n\ndata:image/png;base64,AAAA";
+    assert_eq!(
+        clean_user_query_for_transcript(attached_saved),
+        "[image: 948x1058] look at this"
+    );
+
+    // Plan mode + attached image
+    let plan_image = "[PLAN MODE ACTIVE: Formulate a blueprint.]\n\n[image: 800x600] what is broken?\n\ndata:image/jpeg;base64,BBBB";
+    assert_eq!(
+        clean_user_query_for_transcript(plan_image),
+        "[image: 800x600] what is broken?"
+    );
+
+    // Mid-line inlined data URL without image marker
+    let inline_url = "inspect data:image/png;base64,CCCC and report";
+    assert_eq!(
+        clean_user_query_for_transcript(inline_url),
+        "inspect [image] and report"
+    );
+
+    // Standalone data URL without marker becomes [image]
+    let bare_url = "data:image/png;base64,DDDD";
+    assert_eq!(clean_user_query_for_transcript(bare_url), "[image]");
+}
+
+#[test]
+fn parse_turns_from_history_cleans_historical_image_data_urls() {
+    use harness_core::{Message, Role};
+
+    let history = vec![
+        StoredMessage {
+            id: 1,
+            seq: 1,
+            message: Message {
+                role: Role::User,
+                content: Some(
+                    "[image: 948x1058] investigate this issue\n\ndata:image/png;base64,hxbMY87NCWUEZa3j5+PtQ1H7VD+7J/pgu/00V6/PWdodoAtS4k+/4b5Bydg/lyuE9s+x\n6e7d8dno/ER7UFF4sQc9bkf9AdCPRL+N8BxVFY0sAv6IoAAAAASUVORK5CYII="
+                        .to_string(),
+                ),
+                reasoning: None,
+                tool_calls: Vec::new(),
+                tool_result: None,
+                usage: None,
+            },
+            is_summary: false,
+        },
+        StoredMessage {
+            id: 2,
+            seq: 2,
+            message: Message {
+                role: Role::Assistant,
+                content: Some("I fixed the issue.".to_string()),
+                reasoning: None,
+                tool_calls: Vec::new(),
+                tool_result: None,
+                usage: None,
+            },
+            is_summary: false,
+        },
+    ];
+
+    let turns = parse_turns_from_history(&history);
+    assert_eq!(turns.len(), 1);
+    assert_eq!(
+        turns[0].user_query,
+        "[image: 948x1058] investigate this issue"
+    );
+    assert_eq!(turns[0].reply, "I fixed the issue.");
+
+    let rendered = right_aligned_user_message(&turns[0].user_query, 80);
+    assert!(
+        !rendered.contains("base64"),
+        "rendered user turn must not contain base64 text"
+    );
+    assert!(
+        !rendered.contains("hxbMY87NCWUE"),
+        "rendered user turn must not contain base64 bytes"
+    );
+    assert!(
+        rendered.contains("[image: 948x1058]"),
+        "rendered user turn retains the image marker"
+    );
+}
+
+#[test]
+fn the_no_text_placeholder_gets_the_host_hint_only_at_render_time() {
+    assert_eq!(
+        reply_for_display(harness_core::types::NO_TEXT_RESPONSE),
+        "(The model completed reasoning but produced no text output. Press Ctrl+O to inspect reasoning.)"
+    );
+    assert_eq!(reply_for_display("a real answer"), "a real answer");
+}
+
+#[test]
+fn parse_turns_from_history_preserves_interleaved_thinking_after_tools() {
+    use harness_core::{Message, Role, ToolCall, ToolResult};
+
+    let history = vec![
+        StoredMessage {
+            id: 1,
+            seq: 1,
+            message: Message::user("what is this repo about"),
+            is_summary: false,
+        },
+        StoredMessage {
+            id: 2,
+            seq: 2,
+            message: Message {
+                role: Role::Assistant,
+                content: None,
+                reasoning: Some("round 1 thought".to_string()),
+                tool_calls: vec![ToolCall {
+                    id: "c1".to_string(),
+                    name: "list_files".to_string(),
+                    arguments: json!({ "path": "" }),
+                    signature: None,
+                }],
+                tool_result: None,
+                usage: None,
+            },
+            is_summary: false,
+        },
+        StoredMessage {
+            id: 3,
+            seq: 3,
+            message: Message::tool(ToolResult::success("c1", "Cargo.toml")),
+            is_summary: false,
+        },
+        StoredMessage {
+            id: 4,
+            seq: 4,
+            message: Message {
+                role: Role::Assistant,
+                content: None,
+                reasoning: Some("round 2 thought".to_string()),
+                tool_calls: vec![ToolCall {
+                    id: "c2".to_string(),
+                    name: "read_file".to_string(),
+                    arguments: json!({ "path": "Cargo.toml" }),
+                    signature: None,
+                }],
+                tool_result: None,
+                usage: None,
+            },
+            is_summary: false,
+        },
+        StoredMessage {
+            id: 5,
+            seq: 5,
+            message: Message::tool(ToolResult::success("c2", "[workspace]")),
+            is_summary: false,
+        },
+        StoredMessage {
+            id: 6,
+            seq: 6,
+            message: Message {
+                role: Role::Assistant,
+                content: Some("It is a Rust workspace.".to_string()),
+                reasoning: Some("round 3 thought".to_string()),
+                tool_calls: Vec::new(),
+                tool_result: None,
+                usage: None,
+            },
+            is_summary: false,
+        },
+    ];
+
+    let turns = parse_turns_from_history(&history);
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0].reasoning.as_deref(), Some("round 1 thought"));
+    assert_eq!(turns[0].tool_items.len(), 4);
+    assert!(!turns[0].tool_items[0].is_thinking());
+    assert_eq!(turns[0].tool_items[0].tool_name, "list_files");
+    assert!(turns[0].tool_items[1].is_thinking());
+    assert_eq!(turns[0].tool_items[1].output, "round 2 thought");
+    assert!(!turns[0].tool_items[2].is_thinking());
+    assert_eq!(turns[0].tool_items[2].tool_name, "read_file");
+    assert!(turns[0].tool_items[3].is_thinking());
+    assert_eq!(turns[0].tool_items[3].output, "round 3 thought");
+
+    let collapsed = render_turn_lines(&turns, false, 100)
+        .into_iter()
+        .map(|l| plain(&l))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        collapsed.contains("2 tools: list, read · thinking"),
+        "{collapsed}"
+    );
+
+    let expanded = render_turn_lines(&turns, true, 100)
+        .into_iter()
+        .map(|l| plain(&l))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let p1 = expanded.find("round 1 thought").unwrap();
+    let t1 = expanded.find("📂 list").unwrap();
+    let p2 = expanded.find("round 2 thought").unwrap();
+    let t2 = expanded.find("📖 read").unwrap();
+    let p3 = expanded.find("round 3 thought").unwrap();
+    assert!(p1 < t1 && t1 < p2 && p2 < t2 && t2 < p3, "{expanded}");
+}
