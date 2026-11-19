@@ -23,6 +23,7 @@ fn voice_http_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
+            .user_agent(concat!("luna/", env!("CARGO_PKG_VERSION")))
             .timeout(std::time::Duration::from_secs(25))
             .connect_timeout(std::time::Duration::from_secs(8))
             .pool_idle_timeout(std::time::Duration::from_secs(90))
@@ -889,22 +890,29 @@ fn is_blank_transcript(text: &str) -> bool {
         || lower == "."
 }
 
-async fn lookup_plain_api_key(provider: &str, cred_manager: &CredentialManager) -> Option<String> {
+async fn lookup_plain_api_keys(provider: &str, cred_manager: &CredentialManager) -> Vec<String> {
     let creds = cred_manager.get_credentials(provider).await;
-    creds
-        .iter()
-        .filter(|c| {
+    let mut out: Vec<String> = Vec::new();
+    for priority_pass in [true, false] {
+        for c in &creds {
+            if c.is_priority != priority_pass {
+                continue;
+            }
             let trimmed = c.api_key.trim();
-            !trimmed.is_empty() && !trimmed.starts_with('{')
-        })
-        .find(|c| c.is_priority)
-        .or_else(|| {
-            creds.iter().find(|c| {
-                let trimmed = c.api_key.trim();
-                !trimmed.is_empty() && !trimmed.starts_with('{')
-            })
-        })
-        .map(|c| c.api_key.clone())
+            if !trimmed.is_empty() && !trimmed.starts_with('{') && !out.iter().any(|k| k == trimmed)
+            {
+                out.push(trimmed.to_string());
+            }
+        }
+    }
+    out
+}
+
+async fn lookup_plain_api_key(provider: &str, cred_manager: &CredentialManager) -> Option<String> {
+    lookup_plain_api_keys(provider, cred_manager)
+        .await
+        .into_iter()
+        .next()
 }
 
 async fn lookup_raw_credential(provider: &str, cred_manager: &CredentialManager) -> Option<String> {
@@ -916,21 +924,29 @@ async fn lookup_raw_credential(provider: &str, cred_manager: &CredentialManager)
         .map(|c| c.api_key.clone())
 }
 
+async fn resolve_gemini_api_keys(cred_manager: &Arc<CredentialManager>) -> Vec<String> {
+    let mut keys = lookup_plain_api_keys("gemini", cred_manager).await;
+    for k in lookup_plain_api_keys("google", cred_manager).await {
+        if !keys.contains(&k) {
+            keys.push(k);
+        }
+    }
+    for env_name in ["GEMINI_API_KEY", "GOOGLE_API_KEY"] {
+        if let Ok(k) = std::env::var(env_name) {
+            let trimmed = k.trim();
+            if !trimmed.is_empty() && !keys.iter().any(|x| x == trimmed) {
+                keys.push(trimmed.to_string());
+            }
+        }
+    }
+    keys
+}
+
 async fn resolve_gemini_api_key(cred_manager: &Arc<CredentialManager>) -> Option<String> {
-    if let Some(k) = lookup_plain_api_key("gemini", cred_manager).await {
-        return Some(k);
-    }
-    if let Some(k) = lookup_plain_api_key("google", cred_manager).await {
-        return Some(k);
-    }
-    std::env::var("GEMINI_API_KEY")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .or_else(|| {
-            std::env::var("GOOGLE_API_KEY")
-                .ok()
-                .filter(|s| !s.trim().is_empty())
-        })
+    resolve_gemini_api_keys(cred_manager)
+        .await
+        .into_iter()
+        .next()
 }
 
 async fn resolve_groq_api_key(cred_manager: &Arc<CredentialManager>) -> Option<String> {
@@ -975,7 +991,9 @@ async fn transcribe_audio_bytes(
                 return Ok(t);
             }
             if let Some(key) = resolve_gemini_api_key(cred_manager).await {
-                if let Ok(t) = transcribe_gemini_audio(wav_bytes, &key, "").await {
+                let _ = key;
+                let g_keys = resolve_gemini_api_keys(cred_manager).await;
+                if let Ok(t) = transcribe_gemini_audio_with_keys(wav_bytes, &g_keys, "").await {
                     return Ok(t);
                 }
             }
@@ -1014,8 +1032,9 @@ async fn transcribe_audio_bytes(
                 Err(e) => errors.push(format!("antigravity: {e}")),
             }
 
-            if let Some(key) = resolve_gemini_api_key(cred_manager).await {
-                match transcribe_gemini_audio(wav_bytes, &key, stt_model).await {
+            let g_keys = resolve_gemini_api_keys(cred_manager).await;
+            if !g_keys.is_empty() {
+                match transcribe_gemini_audio_with_keys(wav_bytes, &g_keys, stt_model).await {
                     Ok(t) => return Ok(t),
                     Err(e) => errors.push(format!("gemini: {e}")),
                 }
@@ -1142,9 +1161,9 @@ async fn transcribe_antigravity_audio(
     Ok(transcript.trim().to_string())
 }
 
-async fn transcribe_gemini_audio(
+async fn transcribe_gemini_audio_with_keys(
     wav_bytes: &[u8],
-    api_key: &str,
+    api_keys: &[String],
     model: &str,
 ) -> Result<String, HarnessError> {
     use base64::Engine;
@@ -1179,29 +1198,36 @@ async fn transcribe_gemini_audio(
 
     let mut last_err = String::new();
     for m in candidates {
-        let url = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={api_key}"
-        );
-        match client.post(&url).json(&payload).send().await {
-            Ok(res) if res.status().is_success() => {
-                let val: serde_json::Value = res.json().await.unwrap_or_default();
-                let txt = val["candidates"][0]["content"]["parts"][0]["text"]
-                    .as_str()
-                    .unwrap_or("")
-                    .trim()
-                    .to_string();
-                return Ok(txt);
-            }
-            Ok(res) => {
-                let status = res.status();
-                let body = res.text().await.unwrap_or_default();
-                last_err = format!(
-                    "{m} HTTP {status}: {}",
-                    body.chars().take(160).collect::<String>()
-                );
-            }
-            Err(e) => {
-                last_err = format!("{m}: {e}");
+        for api_key in api_keys {
+            let url = format!(
+                "https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={api_key}"
+            );
+            match client.post(&url).json(&payload).send().await {
+                Ok(res) if res.status().is_success() => {
+                    let val: serde_json::Value = res.json().await.unwrap_or_default();
+                    let txt = val["candidates"][0]["content"]["parts"][0]["text"]
+                        .as_str()
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+                    return Ok(txt);
+                }
+                Ok(res) => {
+                    let status = res.status();
+                    let body = res.text().await.unwrap_or_default();
+                    last_err = format!(
+                        "{m} HTTP {status}: {}",
+                        body.chars().take(160).collect::<String>()
+                    );
+                    if status.as_u16() == 429 || status.as_u16() == 403 {
+                        continue;
+                    }
+                    break;
+                }
+                Err(e) => {
+                    last_err = format!("{m}: {e}");
+                    break;
+                }
             }
         }
     }
@@ -1339,9 +1365,12 @@ async fn stream_tts_sentence_to_audio(
             }
         }
         "antigravity" | "agy" | "google" | "gemini" => {
-            if let Some(key) = resolve_gemini_api_key(cred_manager).await {
-                match stream_gemini_tts_sse(&cleaned, &key, voice_name, tts_model, audio_tx, cancel)
-                    .await
+            let g_keys = resolve_gemini_api_keys(cred_manager).await;
+            if !g_keys.is_empty() {
+                match stream_gemini_tts_sse(
+                    &cleaned, &g_keys, voice_name, tts_model, audio_tx, cancel,
+                )
+                .await
                 {
                     Ok(()) => streamed = true,
                     Err(e) => {
@@ -1363,13 +1392,13 @@ async fn stream_tts_sentence_to_audio(
             }
         }
         _ => {
-            if let Some(key) = resolve_gemini_api_key(cred_manager).await {
-                if stream_gemini_tts_sse(&cleaned, &key, voice_name, tts_model, audio_tx, cancel)
+            let g_keys = resolve_gemini_api_keys(cred_manager).await;
+            if !g_keys.is_empty()
+                && stream_gemini_tts_sse(&cleaned, &g_keys, voice_name, tts_model, audio_tx, cancel)
                     .await
                     .is_ok()
-                {
-                    streamed = true;
-                }
+            {
+                streamed = true;
             }
             if !streamed && !cancel.is_cancelled() {
                 match generate_edge_tts(&cleaned, voice_name).await {
@@ -1458,28 +1487,17 @@ async fn stream_openai_tts_pcm(
     Ok(())
 }
 
-/// Stream Gemini TTS via `streamGenerateContent?alt=sse`, pushing PCM chunks directly into `audio_tx`
-/// as each SSE `data:` frame arrives (~0.8s time-to-first-audio).
-async fn stream_gemini_tts_sse(
-    text: &str,
-    api_key: &str,
-    voice: &str,
-    model: &str,
-    audio_tx: &std::sync::mpsc::Sender<AudioThreadCmd>,
-    cancel: &CancellationToken,
-) -> Result<(), HarnessError> {
-    let client = voice_http_client();
+/// Build the Gemini TTS payload sending bare text directly so the model never speaks
+/// instruction prefixes like "Read aloud...".
+pub fn build_gemini_tts_payload(text: &str, voice: &str) -> serde_json::Value {
     let voice_name = if voice.is_empty() || voice.contains("Neural") {
         "Aoede"
     } else {
         voice
     };
-    let framed_prompt = format!(
-        "Read aloud the following text verbatim without adding or changing anything:\n\n{text}"
-    );
-    let payload = serde_json::json!({
+    serde_json::json!({
         "contents": [{
-            "parts": [{ "text": framed_prompt }]
+            "parts": [{ "text": text }]
         }],
         "generationConfig": {
             "responseModalities": ["AUDIO"],
@@ -1491,14 +1509,30 @@ async fn stream_gemini_tts_sse(
                 }
             }
         }
-    });
+    })
+}
 
-    // Fastest streaming-capable Gemini TTS model first (`gemini-3.8-flash-lite-tts` = ~0.8s TTFA).
+/// Stream Gemini TTS via `streamGenerateContent?alt=sse`, pushing PCM chunks directly into `audio_tx`
+/// as each SSE `data:` frame arrives (~0.8s time-to-first-audio), rotating across Gemini keys on
+/// quota/rate limits.
+async fn stream_gemini_tts_sse(
+    text: &str,
+    api_keys: &[String],
+    voice: &str,
+    model: &str,
+    audio_tx: &std::sync::mpsc::Sender<AudioThreadCmd>,
+    cancel: &CancellationToken,
+) -> Result<(), HarnessError> {
+    let client = voice_http_client();
+    let payload = build_gemini_tts_payload(text, voice);
+
+    // Fastest streaming-capable Gemini 3.x TTS models first (`gemini-3.8-flash-lite-tts` = ~0.8s TTFA).
     let candidates: Vec<&str> = if !model.is_empty() {
         vec![model]
     } else {
         vec![
             "gemini-3.8-flash-lite-tts",
+            "gemini-3.1-flash-tts-preview",
             "gemini-3.8-flash-tts",
             "gemini-2.5-flash-preview-tts",
         ]
@@ -1506,46 +1540,62 @@ async fn stream_gemini_tts_sse(
 
     let mut last_err = String::new();
     for m in candidates {
-        if cancel.is_cancelled() {
-            return Ok(());
-        }
-        let url = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/{m}:streamGenerateContent?alt=sse&key={api_key}"
-        );
-        let res = match client.post(&url).json(&payload).send().await {
-            Ok(r) => r,
-            Err(e) => {
-                last_err = format!("Gemini TTS ({m}) request failed: {e}");
-                continue;
-            }
-        };
-
-        if !res.status().is_success() {
-            let status = res.status();
-            let err_text = res.text().await.unwrap_or_default();
-            last_err = format!(
-                "Gemini TTS ({m}) HTTP {status}: {}",
-                err_text.chars().take(160).collect::<String>()
-            );
-            continue;
-        }
-
-        let mut stream = res.bytes_stream();
-        let mut line_buf: Vec<u8> = Vec::new();
-        let mut got_audio = false;
-
-        while let Some(chunk_res) = stream.next().await {
+        for api_key in api_keys {
             if cancel.is_cancelled() {
                 return Ok(());
             }
-            let Ok(chunk) = chunk_res else {
-                break;
+            let url = format!(
+                "https://generativelanguage.googleapis.com/v1beta/models/{m}:streamGenerateContent?alt=sse&key={api_key}"
+            );
+            let res = match client.post(&url).json(&payload).send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    last_err = format!("Gemini TTS ({m}) request failed: {e}");
+                    break;
+                }
             };
-            line_buf.extend_from_slice(&chunk);
 
-            while let Some(nl_pos) = line_buf.iter().position(|&b| b == b'\n') {
-                let raw_line: Vec<u8> = line_buf.drain(..=nl_pos).collect();
-                let line_str = String::from_utf8_lossy(&raw_line);
+            if !res.status().is_success() {
+                let status = res.status();
+                let err_text = res.text().await.unwrap_or_default();
+                last_err = format!(
+                    "Gemini TTS ({m}) HTTP {status}: {}",
+                    err_text.chars().take(160).collect::<String>()
+                );
+                if status.as_u16() == 429 || status.as_u16() == 403 {
+                    // Fail over to next Gemini API key in pool before switching model
+                    continue;
+                }
+                break;
+            }
+
+            let mut stream = res.bytes_stream();
+            let mut line_buf: Vec<u8> = Vec::new();
+            let mut got_audio = false;
+
+            while let Some(chunk_res) = stream.next().await {
+                if cancel.is_cancelled() {
+                    return Ok(());
+                }
+                let Ok(chunk) = chunk_res else {
+                    break;
+                };
+                line_buf.extend_from_slice(&chunk);
+
+                while let Some(nl_pos) = line_buf.iter().position(|&b| b == b'\n') {
+                    let raw_line: Vec<u8> = line_buf.drain(..=nl_pos).collect();
+                    let line_str = String::from_utf8_lossy(&raw_line);
+                    let trimmed = line_str.trim();
+                    if let Some(json_str) = trimmed.strip_prefix("data: ") {
+                        if push_gemini_sse_audio_chunk(json_str, audio_tx) {
+                            got_audio = true;
+                        }
+                    }
+                }
+            }
+
+            if !line_buf.is_empty() && !cancel.is_cancelled() {
+                let line_str = String::from_utf8_lossy(&line_buf);
                 let trimmed = line_str.trim();
                 if let Some(json_str) = trimmed.strip_prefix("data: ") {
                     if push_gemini_sse_audio_chunk(json_str, audio_tx) {
@@ -1553,22 +1603,13 @@ async fn stream_gemini_tts_sse(
                     }
                 }
             }
-        }
 
-        if !line_buf.is_empty() && !cancel.is_cancelled() {
-            let line_str = String::from_utf8_lossy(&line_buf);
-            let trimmed = line_str.trim();
-            if let Some(json_str) = trimmed.strip_prefix("data: ") {
-                if push_gemini_sse_audio_chunk(json_str, audio_tx) {
-                    got_audio = true;
-                }
+            if got_audio {
+                return Ok(());
             }
+            last_err = format!("No inline audio data in Gemini ({m}) SSE stream");
+            break;
         }
-
-        if got_audio {
-            return Ok(());
-        }
-        last_err = format!("No inline audio data in Gemini ({m}) SSE stream");
     }
 
     Err(HarnessError::VoiceError(last_err))
@@ -1842,6 +1883,20 @@ fn strip_markdown_links(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_build_gemini_tts_payload_sends_bare_text_without_read_aloud_prefix() {
+        let payload = build_gemini_tts_payload("Hello, how are you?", "");
+        let sent = payload["contents"][0]["parts"][0]["text"].as_str().unwrap();
+        assert_eq!(sent, "Hello, how are you?");
+        assert!(!sent.to_lowercase().contains("read aloud"));
+        assert_eq!(
+            payload["generationConfig"]["speechConfig"]["voiceConfig"]["prebuiltVoiceConfig"]
+                ["voiceName"]
+                .as_str(),
+            Some("Aoede")
+        );
+    }
 
     #[test]
     fn test_clean_text_for_speech_strips_code_blocks_and_markdown() {
