@@ -3,7 +3,7 @@
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::Frame;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -24,10 +24,11 @@ use super::state::{
     TranscriptClickTarget, TranscriptHitBox, TuiState, TurnMeta,
 };
 use super::theme::{
-    accent_coral, bg_canvas, bg_code, bg_elevated, bg_selected, bg_selection, bg_surface,
-    border_subtle, cyan_link, friendly_model_name, friendly_provider_name, green_ok,
-    humanize_tokens, logo_gray, mode_accent, note_accent, red_err, scanner_color, text_dim,
-    text_muted, text_primary, yellow_warn, LUNA_LOGO_LEFT, LUNA_LOGO_RIGHT,
+    accent_coral, bg_approval, bg_approval_selected, bg_canvas, bg_code, bg_elevated, bg_selected,
+    bg_selection, bg_surface, border_subtle, cyan_link, friendly_model_name,
+    friendly_provider_name, green_ok, humanize_tokens, logo_gray, mode_accent, note_accent,
+    red_err, scanner_color, text_dim, text_muted, text_primary, yellow_warn, LUNA_LOGO_LEFT,
+    LUNA_LOGO_RIGHT,
 };
 use ratatui::style::Color;
 
@@ -3756,7 +3757,7 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
             let h = desired_h.clamp(10.min(max_h), max_h);
             let rect = centered_rect(screen, max_w, h);
             st.modal_rect = Some(rect);
-            let inner = draw_modal_frame(frame, rect, "Approve Tool Call", hint);
+            let inner = draw_approval_frame(frame, rect, hint);
 
             let inner_w = inner.width as usize;
             let inner_h = inner.height as usize;
@@ -3814,40 +3815,44 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
                 .filter(|t| !(req.tool == "terminal" && !preview_lines.is_empty() && t.len() > 40))
                 .map(shorten_path)
                 .unwrap_or_default();
-            let left_prefix_w = 1 + req.tool.width() + if target_part.is_empty() { 0 } else { 3 };
+            let tool_badge = format!(" {} ", truncate_str(&req.tool, inner_w.saturating_sub(4)));
+            let left_prefix_w = 1 + tool_badge.width() + if target_part.is_empty() { 0 } else { 2 };
             let target_avail = inner_w.saturating_sub(left_prefix_w + range_badge.width() + 1);
             let mut hdr_spans = vec![
-                Span::styled(" ", Style::default().bg(bg_elevated())),
+                Span::styled(" ", Style::default().bg(bg_approval())),
                 Span::styled(
-                    truncate_str(&req.tool, inner_w.saturating_sub(2)),
+                    tool_badge.clone(),
                     Style::default()
-                        .fg(accent_coral())
-                        .bg(bg_elevated())
+                        .fg(bg_canvas())
+                        .bg(accent_coral())
                         .add_modifier(Modifier::BOLD),
                 ),
             ];
-            let mut hdr_used = 1 + req.tool.width().min(inner_w.saturating_sub(2));
+            let mut hdr_used = 1 + tool_badge.width();
             if !target_part.is_empty() && target_avail > 4 {
                 let target_disp = truncate_str(&target_part, target_avail);
-                hdr_used += 3 + target_disp.width();
-                hdr_spans.push(Span::styled(
-                    " · ",
-                    Style::default().fg(text_dim()).bg(bg_elevated()),
-                ));
+                hdr_used += 2 + target_disp.width();
+                hdr_spans.push(Span::styled("  ", Style::default().bg(bg_approval())));
                 hdr_spans.push(Span::styled(
                     target_disp,
-                    Style::default().fg(text_primary()).bg(bg_elevated()),
+                    Style::default()
+                        .fg(text_primary())
+                        .bg(bg_approval())
+                        .add_modifier(Modifier::BOLD),
                 ));
             }
             if !range_badge.is_empty() && hdr_used + range_badge.width() <= inner_w {
                 let pad = inner_w.saturating_sub(hdr_used + range_badge.width());
                 hdr_spans.push(Span::styled(
                     " ".repeat(pad),
-                    Style::default().bg(bg_elevated()),
+                    Style::default().bg(bg_approval()),
                 ));
                 hdr_spans.push(Span::styled(
                     range_badge,
-                    Style::default().fg(text_muted()).bg(bg_elevated()),
+                    Style::default()
+                        .fg(yellow_warn())
+                        .bg(bg_approval())
+                        .add_modifier(Modifier::BOLD),
                 ));
             }
             lines.push(Line::from(hdr_spans));
@@ -3877,11 +3882,11 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
                     let shown = truncate_str(dline, box_inner_w);
                     let pad = box_w.saturating_sub(2 + shown.width());
                     lines.push(Line::from(vec![
-                        Span::styled(" ", Style::default().bg(bg_elevated())),
-                        Span::styled("│ ", Style::default().fg(border_subtle()).bg(box_bg)),
+                        Span::styled(" ", Style::default().bg(bg_approval())),
+                        Span::styled("┃ ", Style::default().fg(yellow_warn()).bg(box_bg)),
                         Span::styled(shown, Style::default().fg(color).bg(box_bg)),
                         Span::styled(" ".repeat(pad), Style::default().bg(box_bg)),
-                        Span::styled(" ", Style::default().bg(bg_elevated())),
+                        Span::styled(" ", Style::default().bg(bg_approval())),
                     ]));
                 }
                 lines.push(Line::default());
@@ -3891,14 +3896,14 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
                 let spinner = SPINNER_FRAMES[spinner_tick % SPINNER_FRAMES.len()];
                 lines.push(Line::from(Span::styled(
                     format!(" {spinner} Asking…"),
-                    Style::default().fg(accent_coral()).bg(bg_elevated()),
+                    Style::default().fg(accent_coral()).bg(bg_approval()),
                 )));
                 lines.push(Line::default());
             } else if let Some(ref err) = error {
                 if status_rows > 0 {
                     lines.push(Line::from(Span::styled(
                         format!(" ⚠ {}", truncate_str(err, inner_w.saturating_sub(4))),
-                        Style::default().fg(red_err()).bg(bg_elevated()),
+                        Style::default().fg(red_err()).bg(bg_approval()),
                     )));
                     lines.push(Line::default());
                 }
@@ -3910,7 +3915,7 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
                 let scroll = (*reply_scroll).min(max_scroll);
                 for rline in reply_rendered.iter().skip(scroll).take(reply_budget) {
                     let mut spans = vec![
-                        Span::styled(" ", Style::default().bg(bg_elevated())),
+                        Span::styled(" ", Style::default().bg(bg_approval())),
                         Span::styled("│ ", Style::default().fg(accent_coral()).bg(box_bg)),
                     ];
                     let mut used = 0usize;
@@ -3938,30 +3943,51 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
                     }
                     let pad = box_w.saturating_sub(2 + used);
                     spans.push(Span::styled(" ".repeat(pad), Style::default().bg(box_bg)));
-                    spans.push(Span::styled(" ", Style::default().bg(bg_elevated())));
+                    spans.push(Span::styled(" ", Style::default().bg(bg_approval())));
                     lines.push(Line::from(spans));
                 }
                 lines.push(Line::default());
             }
 
             let choices = [
-                ("[y] Allow once", green_ok()),
-                ("[a] Allow for this session (Auto mode)", yellow_warn()),
-                ("[n] Deny", red_err()),
-                ("[q] Ask a question / add a suggestion", text_primary()),
+                ("[y]", " Allow once", green_ok()),
+                ("[a]", " Allow for this session (Auto mode)", yellow_warn()),
+                ("[n]", " Deny", red_err()),
+                ("[q]", " Ask a question / add a suggestion", cyan_link()),
             ];
-            for (idx, (ch, base_fg)) in choices.iter().enumerate() {
+            for (idx, (key, label, base_fg)) in choices.iter().enumerate() {
                 let is_sel = !*editing_input && idx == *selected;
-                let bg = if is_sel { bg_selected() } else { bg_elevated() };
+                let bg = if is_sel {
+                    bg_approval_selected()
+                } else {
+                    bg_approval()
+                };
                 let prefix = if is_sel { " ▸ " } else { "   " };
-                let line = truncate_str(&format!("{prefix}{ch}"), inner_w);
-                let pad = inner_w.saturating_sub(line.width());
-                let mut style = Style::default().fg(*base_fg).bg(bg);
+                let full_len = prefix.width() + key.width() + label.width();
+                let label_avail = inner_w.saturating_sub(prefix.width() + key.width());
+                let shown_label = truncate_str(label, label_avail);
+                let pad = inner_w.saturating_sub(full_len.min(inner_w));
+                let mut key_style = Style::default()
+                    .fg(*base_fg)
+                    .bg(bg)
+                    .add_modifier(Modifier::BOLD);
+                let mut label_style = Style::default()
+                    .fg(if is_sel { text_primary() } else { *base_fg })
+                    .bg(bg);
                 if is_sel {
-                    style = style.add_modifier(Modifier::BOLD);
+                    label_style = label_style.add_modifier(Modifier::BOLD);
+                    key_style = key_style.add_modifier(Modifier::BOLD);
                 }
                 lines.push(Line::from(vec![
-                    Span::styled(line, style),
+                    Span::styled(
+                        prefix,
+                        Style::default()
+                            .fg(if is_sel { yellow_warn() } else { text_dim() })
+                            .bg(bg)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(*key, key_style),
+                    Span::styled(shown_label, label_style),
                     Span::styled(" ".repeat(pad), Style::default().bg(bg)),
                 ]));
             }
@@ -3989,13 +4015,18 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
                 lines.push(Line::from(vec![
                     Span::styled(
                         prompt_prefix,
-                        Style::default().fg(accent_coral()).bg(bg_selected()),
+                        Style::default()
+                            .fg(yellow_warn())
+                            .bg(bg_approval_selected())
+                            .add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(
                         shown.clone(),
-                        Style::default().fg(text_primary()).bg(bg_selected()),
+                        Style::default()
+                            .fg(text_primary())
+                            .bg(bg_approval_selected()),
                     ),
-                    Span::styled(" ".repeat(pad), Style::default().bg(bg_selected())),
+                    Span::styled(" ".repeat(pad), Style::default().bg(bg_approval_selected())),
                 ]));
                 if inner.height > 0 {
                     let cur_x = (inner.x + prompt_prefix.width() as u16 + shown.width() as u16)
@@ -4014,7 +4045,7 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
                 );
                 lines.push(Line::from(Span::styled(
                     truncate_str(&note_line, inner_w),
-                    Style::default().fg(text_muted()).bg(bg_elevated()),
+                    Style::default().fg(text_muted()).bg(bg_approval()),
                 )));
             }
 
@@ -4406,6 +4437,57 @@ fn draw_modal_frame(frame: &mut Frame, rect: Rect, title: &str, hint: &str) -> R
             Line::from(Span::styled(
                 format!(" {hint_disp} "),
                 Style::default().fg(text_muted()).bg(bg_elevated()),
+            ))
+            .right_aligned(),
+        );
+    }
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    inner
+}
+
+fn draw_approval_frame(frame: &mut Frame, rect: Rect, hint: &str) -> Rect {
+    frame.render_widget(Clear, rect);
+    let border_text_w = rect.width.saturating_sub(4) as usize;
+    let badge = " ⚠ APPROVAL REQUIRED ";
+    let title_line = if border_text_w >= badge.width() + 20 {
+        Line::from(vec![
+            Span::styled(
+                badge,
+                Style::default()
+                    .fg(bg_canvas())
+                    .bg(yellow_warn())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " Approve Tool Call ",
+                Style::default()
+                    .fg(yellow_warn())
+                    .bg(bg_approval())
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])
+    } else {
+        Line::from(Span::styled(
+            truncate_str(badge, border_text_w),
+            Style::default()
+                .fg(bg_canvas())
+                .bg(yellow_warn())
+                .add_modifier(Modifier::BOLD),
+        ))
+    };
+    let mut block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Thick)
+        .border_style(Style::default().fg(yellow_warn()).bg(bg_approval()))
+        .style(Style::default().bg(bg_approval()))
+        .title(title_line);
+    if border_text_w >= 8 && !hint.is_empty() {
+        let hint_disp = truncate_str(hint, border_text_w);
+        block = block.title_bottom(
+            Line::from(Span::styled(
+                format!(" {hint_disp} "),
+                Style::default().fg(text_muted()).bg(bg_approval()),
             ))
             .right_aligned(),
         );

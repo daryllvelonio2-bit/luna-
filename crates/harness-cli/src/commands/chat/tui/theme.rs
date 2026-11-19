@@ -15,6 +15,8 @@ pub struct ThemePalette {
     pub bg_code: Color,
     pub bg_selected: Color,
     pub bg_selection: Color,
+    pub bg_approval: Color,
+    pub bg_approval_selected: Color,
     pub border_subtle: Color,
     pub accent_coral: Color,
     pub accent_plan: Color,
@@ -45,6 +47,8 @@ pub const DARK_PALETTE: ThemePalette = ThemePalette {
     bg_code: Color::Rgb(22, 22, 24),
     bg_selected: Color::Rgb(47, 47, 53),
     bg_selection: Color::Rgb(92, 92, 110),
+    bg_approval: Color::Rgb(36, 31, 24),
+    bg_approval_selected: Color::Rgb(68, 56, 34),
     border_subtle: Color::Rgb(52, 52, 58),
     accent_coral: Color::Rgb(234, 118, 82),
     accent_plan: Color::Rgb(106, 166, 232),
@@ -79,6 +83,8 @@ pub const LIGHT_PALETTE: ThemePalette = ThemePalette {
     bg_code: Color::Rgb(232, 234, 239),
     bg_selected: Color::Rgb(214, 219, 230),
     bg_selection: Color::Rgb(182, 204, 238),
+    bg_approval: Color::Rgb(253, 246, 232),
+    bg_approval_selected: Color::Rgb(245, 228, 188),
     border_subtle: Color::Rgb(200, 204, 214),
     accent_coral: Color::Rgb(208, 84, 48),
     accent_plan: Color::Rgb(42, 110, 194),
@@ -160,6 +166,14 @@ pub fn bg_selected() -> Color {
 #[inline]
 pub fn bg_selection() -> Color {
     palette().bg_selection
+}
+#[inline]
+pub fn bg_approval() -> Color {
+    palette().bg_approval
+}
+#[inline]
+pub fn bg_approval_selected() -> Color {
+    palette().bg_approval_selected
 }
 #[inline]
 pub fn border_subtle() -> Color {
