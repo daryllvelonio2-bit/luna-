@@ -7,7 +7,10 @@ use harness_providers::CredentialManager;
 
 use super::voice_http_client;
 
-pub async fn lookup_plain_api_keys(provider: &str, cred_manager: &CredentialManager) -> Vec<String> {
+pub async fn lookup_plain_api_keys(
+    provider: &str,
+    cred_manager: &CredentialManager,
+) -> Vec<String> {
     let creds = cred_manager.get_credentials(provider).await;
     let mut out: Vec<String> = Vec::new();
     for priority_pass in [true, false] {
@@ -16,7 +19,8 @@ pub async fn lookup_plain_api_keys(provider: &str, cred_manager: &CredentialMana
                 continue;
             }
             let trimmed = c.api_key.trim();
-            if !trimmed.is_empty() && !trimmed.starts_with('{') && !out.iter().any(|k| k == trimmed) {
+            if !trimmed.is_empty() && !trimmed.starts_with('{') && !out.iter().any(|k| k == trimmed)
+            {
                 out.push(trimmed.to_string());
             }
         }
@@ -24,14 +28,20 @@ pub async fn lookup_plain_api_keys(provider: &str, cred_manager: &CredentialMana
     out
 }
 
-pub async fn lookup_plain_api_key(provider: &str, cred_manager: &CredentialManager) -> Option<String> {
+pub async fn lookup_plain_api_key(
+    provider: &str,
+    cred_manager: &CredentialManager,
+) -> Option<String> {
     lookup_plain_api_keys(provider, cred_manager)
         .await
         .into_iter()
         .next()
 }
 
-pub async fn lookup_raw_credential(provider: &str, cred_manager: &CredentialManager) -> Option<String> {
+pub async fn lookup_raw_credential(
+    provider: &str,
+    cred_manager: &CredentialManager,
+) -> Option<String> {
     let creds = cred_manager.get_credentials(provider).await;
     creds
         .iter()
@@ -49,7 +59,12 @@ pub async fn resolve_gemini_api_keys(cred_manager: &Arc<CredentialManager>) -> V
             }
         }
     }
-    for env_name in ["GEMINI_API_KEY", "GOOGLE_API_KEY", "ANTIGRAVITY_API_KEY", "AGY_API_KEY"] {
+    for env_name in [
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "ANTIGRAVITY_API_KEY",
+        "AGY_API_KEY",
+    ] {
         if let Ok(k) = std::env::var(env_name) {
             let trimmed = k.trim();
             if !trimmed.is_empty() && !keys.iter().any(|x| x == trimmed) {

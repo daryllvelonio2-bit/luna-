@@ -41,9 +41,9 @@ use super::state::{
     SubagentUiEntry, SystemNotice, TuiState, TurnMeta,
 };
 use super::theme::{friendly_model_name, friendly_provider_name};
+use super::trace_event;
 use crate::commands::context_window::context_window;
 use crate::commands::sessions::{resolve_session, SessionSelection};
-use super::trace_event;
 
 pub mod approval;
 pub mod composer;

@@ -2,7 +2,12 @@
 
 use super::*;
 
-pub(crate) fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &FooterInfo<'_>) {
+pub(crate) fn render_modal(
+    frame: &mut Frame,
+    screen: Rect,
+    st: &mut TuiState,
+    info: &FooterInfo<'_>,
+) {
     st.modal_rect = None;
     let spinner_tick = st.spinner_tick;
     match &mut st.modal {
@@ -313,7 +318,10 @@ pub(crate) fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, i
             let (w, h) = responsive_modal_size(screen, 6, 4, 46, 76, 6, desired_h);
             let rect = centered_rect(screen, w, h);
             st.modal_rect = Some(rect);
-            let hint = if matches!(action, crate::commands::chat::tui::state::SelectAction::SettingsMain) {
+            let hint = if matches!(
+                action,
+                crate::commands::chat::tui::state::SelectAction::SettingsMain
+            ) {
                 "↑/↓ · space toggle · enter · esc"
             } else if matches!(
                 action,
@@ -1407,4 +1415,3 @@ pub(crate) fn centered_rect(area: Rect, w: u16, h: u16) -> Rect {
         height,
     }
 }
-

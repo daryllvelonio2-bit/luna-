@@ -784,4 +784,3 @@ pub async fn interrupt_turn(env: &Env<'_>, st: &mut TuiState) {
     .await;
     sync_turn_meta_len(env, st);
 }
-

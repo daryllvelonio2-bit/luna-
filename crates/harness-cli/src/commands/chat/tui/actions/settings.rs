@@ -301,7 +301,11 @@ pub(crate) async fn open_connect_remove_provider(env: &Env<'_>, st: &mut TuiStat
     };
 }
 
-pub(crate) async fn open_connect_remove_credential(env: &Env<'_>, st: &mut TuiState, provider: String) {
+pub(crate) async fn open_connect_remove_credential(
+    env: &Env<'_>,
+    st: &mut TuiState,
+    provider: String,
+) {
     let creds = env.cred_manager.get_credentials(&provider).await;
     if creds.is_empty() {
         env.ui
@@ -527,4 +531,3 @@ pub(crate) async fn sync_delegate_wiring(env: &Env<'_>) {
         }
     }
 }
-

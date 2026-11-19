@@ -3,9 +3,7 @@ use std::sync::Arc;
 use tempfile::tempdir;
 use tokio_util::sync::CancellationToken;
 
-use harness_core::tools::{
-    PatchTool, ReadCache, TerminalTool, TodoScope,
-};
+use harness_core::tools::{PatchTool, ReadCache, TerminalTool, TodoScope};
 use harness_core::{Config, DefaultToolRegistry, Tool, ToolRegistry};
 
 #[tokio::test]
@@ -1099,4 +1097,3 @@ fn an_allowed_network_is_left_alone() {
         "the probe reached the kernel's own answer (ECONNREFUSED): {output}"
     );
 }
-

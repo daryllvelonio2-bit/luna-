@@ -13,7 +13,10 @@ pub(crate) struct PreviewPlacement {
 }
 
 /// Lay thumbnails out left to right, wrapping when they run past the card.
-pub(crate) fn layout_preview_sizes(sizes: &[(u16, u16)], max_width: u16) -> (Vec<PreviewPlacement>, u16) {
+pub(crate) fn layout_preview_sizes(
+    sizes: &[(u16, u16)],
+    max_width: u16,
+) -> (Vec<PreviewPlacement>, u16) {
     let max_width = max_width.max(1);
     let mut placements = Vec::with_capacity(sizes.len());
     let mut x = 0u16;
@@ -73,7 +76,13 @@ pub(crate) fn composer_preview_height(st: &TuiState, max_width: u16) -> u16 {
 }
 
 /// Whether the pointer sits inside a rectangle, used to gate hover-only controls.
-pub(crate) fn pointer_inside(pointer: Option<(u16, u16)>, x: u16, y: u16, width: u16, height: u16) -> bool {
+pub(crate) fn pointer_inside(
+    pointer: Option<(u16, u16)>,
+    x: u16,
+    y: u16,
+    width: u16,
+    height: u16,
+) -> bool {
     pointer.is_some_and(|(px, py)| {
         px >= x && px < x.saturating_add(width) && py >= y && py < y.saturating_add(height)
     })
@@ -775,7 +784,11 @@ pub(crate) fn styled_composer_line_spans(line: &str) -> Vec<Span<'static>> {
     spans
 }
 
-pub(crate) fn wrap_composer_lines(text: &str, cursor_byte: usize, max_width: usize) -> WrappedComposer {
+pub(crate) fn wrap_composer_lines(
+    text: &str,
+    cursor_byte: usize,
+    max_width: usize,
+) -> WrappedComposer {
     let width = max_width.max(8);
     let mut lines = Vec::new();
     let mut cursor_line = 0usize;
@@ -835,4 +848,3 @@ pub(crate) fn wrap_composer_lines(text: &str, cursor_byte: usize, max_width: usi
         cursor_col,
     }
 }
-

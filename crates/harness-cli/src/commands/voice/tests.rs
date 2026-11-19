@@ -148,8 +148,9 @@ fn test_needs_separate_voice_summary_detects_tables_code_and_long_replies() {
         "All build artifacts have been cleaned up successfully."
     ));
 
-    let fallback =
-        fallback_voice_summary("Cleaned up everything.\n| Path | Freed |\n|---|---|\n| target | 2 GB |");
+    let fallback = fallback_voice_summary(
+        "Cleaned up everything.\n| Path | Freed |\n|---|---|\n| target | 2 GB |",
+    );
     assert!(fallback.contains("Cleaned up everything."));
     assert!(fallback.contains("full details in the chat"));
 }

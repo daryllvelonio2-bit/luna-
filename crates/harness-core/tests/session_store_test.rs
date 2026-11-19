@@ -1,6 +1,6 @@
+use harness_core::*;
 use rusqlite::Connection;
 use tempfile::TempDir;
-use harness_core::*;
 
 mod common;
 use common::*;
@@ -655,4 +655,3 @@ async fn estimate_prefers_reported_usage_and_adds_the_heuristic_tail() {
         image_estimate.tokens
     );
 }
-

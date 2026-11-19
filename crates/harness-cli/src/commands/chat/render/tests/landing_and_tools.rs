@@ -1,5 +1,5 @@
-use super::plain;
 use super::super::*;
+use super::plain;
 use serde_json::json;
 
 fn plain_rows(rows: &[String]) -> Vec<String> {
@@ -1206,4 +1206,3 @@ fn harness_cli_todo_snapshot() -> harness_core::tools::todo::TodoSnapshot {
         }],
     }
 }
-

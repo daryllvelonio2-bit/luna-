@@ -179,7 +179,11 @@ pub(crate) async fn park_or_discard_current_session(env: &Env<'_>, st: &mut TuiS
     }
 }
 
-pub(crate) fn restore_background_session(env: &mut Env<'_>, st: &mut TuiState, slot: BackgroundSession) {
+pub(crate) fn restore_background_session(
+    env: &mut Env<'_>,
+    st: &mut TuiState,
+    slot: BackgroundSession,
+) {
     *env.session_id = slot.session_id;
     env.agent = slot.agent;
     env.ui = slot.ui;
@@ -617,4 +621,3 @@ pub async fn open_session_picker(env: &Env<'_>, st: &mut TuiState) {
         selected,
     };
 }
-

@@ -1,8 +1,8 @@
+use async_trait::async_trait;
+use harness_core::*;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
-use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
-use harness_core::*;
 
 mod common;
 use common::*;

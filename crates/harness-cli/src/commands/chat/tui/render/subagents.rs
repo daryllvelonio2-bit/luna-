@@ -279,7 +279,10 @@ pub(crate) fn push_subagent_log_lines(
     }
 }
 
-pub(crate) fn build_subagent_inspector_lines(item: &SubagentUiEntry, width: usize) -> Vec<Line<'static>> {
+pub(crate) fn build_subagent_inspector_lines(
+    item: &SubagentUiEntry,
+    width: usize,
+) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let card_inner_w = width.saturating_sub(4).max(10);
 
@@ -490,4 +493,3 @@ pub(crate) fn build_subagent_inspector_lines(item: &SubagentUiEntry, width: usiz
 
     lines
 }
-

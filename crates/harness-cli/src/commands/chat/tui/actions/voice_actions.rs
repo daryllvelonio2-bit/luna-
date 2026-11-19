@@ -391,4 +391,3 @@ pub(crate) fn dispatch_voice_turn_direct(env: &Env<'_>, st: &mut TuiState, trimm
         );
     }
 }
-

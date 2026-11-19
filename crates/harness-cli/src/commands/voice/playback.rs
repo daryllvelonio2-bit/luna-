@@ -151,9 +151,8 @@ impl VoiceSpeechQueue {
                                         continue;
                                     }
                                     if let Some(ref s) = sink {
-                                        let source = rodio::buffer::SamplesBuffer::new(
-                                            1, rate, samples,
-                                        );
+                                        let source =
+                                            rodio::buffer::SamplesBuffer::new(1, rate, samples);
                                         s.append(source);
                                         if s.is_paused() {
                                             s.play();
@@ -218,7 +217,9 @@ impl VoiceSpeechQueue {
                 }
 
                 let cancel = {
-                    let guard = active_cancel_worker.lock().unwrap_or_else(|e| e.into_inner());
+                    let guard = active_cancel_worker
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
                     guard.clone()
                 };
                 if cancel.is_cancelled() {

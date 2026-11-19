@@ -40,7 +40,9 @@ pub async fn stream_tts_sentence_to_audio(
     // If OpenAI is explicitly selected or an OpenAI voice name is picked:
     if provider == "openai" || is_openai_voice(voice_name) {
         if let Some(key) = resolve_openai_api_key(cred_manager).await {
-            if let Err(e) = stream_openai_tts_pcm(&cleaned, &key, voice_name, tts_model, audio).await {
+            if let Err(e) =
+                stream_openai_tts_pcm(&cleaned, &key, voice_name, tts_model, audio).await
+            {
                 tracing::warn!("OpenAI TTS failed: {e}");
                 if let Some(tx) = voice_tx {
                     let _ = tx.send(VoiceEvent::Error(format!("OpenAI TTS error: {e}")));
@@ -173,10 +175,7 @@ pub async fn stream_gemini_tts_sse(
     let candidates: Vec<&str> = if !model.is_empty() {
         vec![model]
     } else {
-        vec![
-            "gemini-2.5-flash-preview-tts",
-            "gemini-2.5-pro-preview-tts",
-        ]
+        vec!["gemini-2.5-flash-preview-tts", "gemini-2.5-pro-preview-tts"]
     };
 
     let start_idx =

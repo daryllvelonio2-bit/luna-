@@ -165,7 +165,9 @@ pub async fn open_provider_picker_with_target(
     tokio::spawn(async move {
         let items =
             build_provider_items(cred_manager, Some(&config_providers), &highlight_provider).await;
-        let _ = tx.send(crate::commands::chat::tui::state::PickerLoad::Providers(items));
+        let _ = tx.send(crate::commands::chat::tui::state::PickerLoad::Providers(
+            items,
+        ));
     });
 }
 
@@ -475,4 +477,3 @@ pub async fn apply_model_target(
     }
     .map(|_| ())
 }
-

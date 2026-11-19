@@ -167,7 +167,11 @@ pub(crate) fn line_plain_text(line: &Line<'_>) -> String {
 ///
 /// Spans are split at the selection boundaries so the original foreground colours survive and
 /// wide glyphs are selected as a whole.
-pub(crate) fn highlight_line_selection(line: Line<'static>, from_col: usize, to_col: usize) -> Line<'static> {
+pub(crate) fn highlight_line_selection(
+    line: Line<'static>,
+    from_col: usize,
+    to_col: usize,
+) -> Line<'static> {
     if to_col <= from_col {
         return line;
     }
@@ -239,4 +243,3 @@ pub(crate) fn truncate_str(s: &str, max_cells: usize) -> String {
     }
     out
 }
-

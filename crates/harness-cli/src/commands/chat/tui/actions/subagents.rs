@@ -330,4 +330,3 @@ pub(crate) fn open_profile_create_providers(st: &mut TuiState, name: String, sum
         action: SelectAction::ProfileCreateProviders { name, summary },
     };
 }
-

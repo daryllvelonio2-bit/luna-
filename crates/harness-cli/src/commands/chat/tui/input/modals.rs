@@ -10,18 +10,15 @@ use ratatui::Terminal;
 use super::super::super::interactive::state::{Env, Flow};
 use super::super::actions::{
     self, apply_agent_mode, apply_approval_model_choice, apply_model_target,
-    apply_thinking_selection, ask_approval_model, open_models_for_target,
-    open_provider_picker_for, open_thinking_picker, open_thinking_picker_with_current,
-    run_palette_action, switch_to_session,
+    apply_thinking_selection, ask_approval_model, open_models_for_target, open_provider_picker_for,
+    open_thinking_picker, open_thinking_picker_with_current, run_palette_action, switch_to_session,
 };
 use super::super::render::{
     filtered_models, filtered_palette_items, filtered_providers, filtered_sessions,
 };
-use super::super::state::{
-    self as state, ActiveModal, AgentMode, ModelTarget, TuiState,
-};
-use crate::commands::clarify::{ClarifyAnswer, ClarifyResponse};
+use super::super::state::{self as state, ActiveModal, AgentMode, ModelTarget, TuiState};
 use super::handle_paste;
+use crate::commands::clarify::{ClarifyAnswer, ClarifyResponse};
 
 pub async fn handle_modal_key(
     env: &mut Env<'_>,
@@ -1451,4 +1448,3 @@ pub fn close_modal_with_cancel(st: &mut TuiState) {
         _ => {}
     }
 }
-

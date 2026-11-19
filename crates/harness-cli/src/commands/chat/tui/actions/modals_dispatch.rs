@@ -242,16 +242,19 @@ pub async fn run_select_action(
             3 => open_connect_remove_provider(env, st).await,
             4 => {
                 let result =
-                    crate::commands::chat::connect::import_antigravity(&env.ui, &env.cred_manager).await;
+                    crate::commands::chat::connect::import_antigravity(&env.ui, &env.cred_manager)
+                        .await;
                 finish_connect_action(env, st, result).await;
             }
             5 => {
                 let result =
-                    crate::commands::chat::connect::import_opencode(&env.ui, &env.cred_manager).await;
+                    crate::commands::chat::connect::import_opencode(&env.ui, &env.cred_manager)
+                        .await;
                 finish_connect_action(env, st, result).await;
             }
             6 => {
-                let result = crate::commands::chat::connect::import_codex(&env.ui, &env.cred_manager).await;
+                let result =
+                    crate::commands::chat::connect::import_codex(&env.ui, &env.cred_manager).await;
                 finish_connect_action(env, st, result).await;
             }
             7 => open_connect_strategy_provider(env, st).await,
@@ -1250,4 +1253,3 @@ pub async fn run_palette_action(
     }
     Ok(Flow::Continue)
 }
-

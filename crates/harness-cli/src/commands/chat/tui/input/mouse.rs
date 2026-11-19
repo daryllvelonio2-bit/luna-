@@ -5,8 +5,12 @@ use harness_core::HarnessError;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::super::super::interactive::state::{Env, Flow};
-use super::super::actions::{create_new_session, open_session_picker, switch_to_session, sync_slash_popup};
-use super::super::render::{filtered_models, filtered_palette_items, filtered_providers, filtered_sessions};
+use super::super::actions::{
+    create_new_session, open_session_picker, switch_to_session, sync_slash_popup,
+};
+use super::super::render::{
+    filtered_models, filtered_palette_items, filtered_providers, filtered_sessions,
+};
 use super::super::state::{
     ActiveModal, LiveThinkingView, TabHitTarget, TextSelection, TranscriptClickTarget, TuiState,
 };
@@ -408,7 +412,11 @@ pub fn copy_selection_to_clipboard(env: &Env<'_>, st: &mut TuiState) {
     }
 }
 
-pub async fn apply_transcript_click(env: &Env<'_>, st: &mut TuiState, target: TranscriptClickTarget) {
+pub async fn apply_transcript_click(
+    env: &Env<'_>,
+    st: &mut TuiState,
+    target: TranscriptClickTarget,
+) {
     match target {
         TranscriptClickTarget::OpenSubagents => {
             super::super::actions::open_subagents_list(env, st).await;

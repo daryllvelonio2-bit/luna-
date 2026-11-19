@@ -27,7 +27,7 @@ pub struct CannedProvider {
 }
 
 impl CannedProvider {
-    pub     fn new(summary: &str) -> Self {
+    pub fn new(summary: &str) -> Self {
         Self {
             summary: summary.to_string(),
             calls: AtomicUsize::new(0),
@@ -41,7 +41,7 @@ pub struct FailingProvider {
 }
 
 impl FailingProvider {
-    pub     fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             calls: AtomicUsize::new(0),
         }
@@ -55,14 +55,14 @@ pub struct RecordingProvider {
 }
 
 impl RecordingProvider {
-    pub     fn new(reply: &str) -> Self {
+    pub fn new(reply: &str) -> Self {
         Self {
             reply: reply.to_string(),
             received: Mutex::new(Vec::new()),
         }
     }
 
-    pub     fn last_request(&self) -> Vec<Message> {
+    pub fn last_request(&self) -> Vec<Message> {
         self.received
             .lock()
             .unwrap()
@@ -71,14 +71,14 @@ impl RecordingProvider {
             .unwrap_or_default()
     }
 
-    pub     fn call_count(&self) -> usize {
+    pub fn call_count(&self) -> usize {
         self.received.lock().unwrap().len()
     }
 }
 
 #[async_trait]
 impl ModelProvider for CannedProvider {
-        fn provider_id(&self) -> &str {
+    fn provider_id(&self) -> &str {
         "canned"
     }
 
@@ -103,7 +103,7 @@ impl ModelProvider for CannedProvider {
 
 #[async_trait]
 impl ModelProvider for FailingProvider {
-        fn provider_id(&self) -> &str {
+    fn provider_id(&self) -> &str {
         "unconfigured"
     }
 
@@ -131,7 +131,7 @@ impl ModelProvider for FailingProvider {
 
 #[async_trait]
 impl ModelProvider for RecordingProvider {
-        fn provider_id(&self) -> &str {
+    fn provider_id(&self) -> &str {
         "recording"
     }
 
@@ -164,7 +164,7 @@ pub struct ReasoningProvider {
 }
 
 impl ReasoningProvider {
-    pub     fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             calls: AtomicUsize::new(0),
             budgets: Mutex::new(Vec::new()),
@@ -174,7 +174,7 @@ impl ReasoningProvider {
 
 #[async_trait]
 impl ModelProvider for ReasoningProvider {
-        fn provider_id(&self) -> &str {
+    fn provider_id(&self) -> &str {
         "reasoning"
     }
 
@@ -211,7 +211,7 @@ pub struct SilentProvider {
 }
 
 impl SilentProvider {
-    pub     fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             calls: AtomicUsize::new(0),
         }
@@ -220,7 +220,7 @@ impl SilentProvider {
 
 #[async_trait]
 impl ModelProvider for SilentProvider {
-        fn provider_id(&self) -> &str {
+    fn provider_id(&self) -> &str {
         "silent"
     }
 
@@ -266,7 +266,7 @@ impl MemoryEngine for MockMemory {
     async fn add_note_pointer(&self, _note_id: &str, _pointer: &str) -> Result<(), HarnessError> {
         Ok(())
     }
-        fn format_as_system_prompt(&self, _memories: &[MemoryRecord]) -> String {
+    fn format_as_system_prompt(&self, _memories: &[MemoryRecord]) -> String {
         String::new()
     }
 }
@@ -396,7 +396,6 @@ pub fn stored_with(
 
 // ---------------------------------------------------------------- store
 
-
 pub fn agent_config() -> AgentConfig {
     AgentConfig {
         compact_at_tokens: 1,
@@ -464,4 +463,3 @@ pub async fn seeded_store_with_reported_usage(
     }
     (dir, path, Arc::new(store))
 }
-

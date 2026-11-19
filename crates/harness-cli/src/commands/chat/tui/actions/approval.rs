@@ -413,4 +413,3 @@ pub(crate) fn open_settings_menu(env: &Env<'_>, st: &mut TuiState, selected: usi
         action: SelectAction::SettingsMain,
     };
 }
-

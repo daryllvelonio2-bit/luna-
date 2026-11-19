@@ -333,7 +333,12 @@ pub(crate) fn render_pty_pane(frame: &mut Frame, rect: Rect, pane: &TuiPtyPane) 
     );
 }
 
-pub(crate) fn render_tab_bar(frame: &mut Frame, area: Rect, st: &mut TuiState, active_session_id: &str) {
+pub(crate) fn render_tab_bar(
+    frame: &mut Frame,
+    area: Rect,
+    st: &mut TuiState,
+    active_session_id: &str,
+) {
     st.hit_boxes.clear();
 
     let mut spans: Vec<Span<'static>> = Vec::new();
@@ -378,15 +383,16 @@ pub(crate) fn render_tab_bar(frame: &mut Frame, area: Rect, st: &mut TuiState, a
     };
 
     // Estimate widths and drop earliest tabs if overflowing.
-    let tab_display_width = |tab: &crate::commands::chat::tui::state::SessionTab, is_active: bool| -> u16 {
-        let truncated = truncate_str(&tab.title, 18);
-        let busy_w = if tab_is_busy(&tab.id) { 2 } else { 0 };
-        if is_active {
-            (truncated.width() + busy_w + 4) as u16
-        } else {
-            (truncated.width() + busy_w + 3) as u16
-        }
-    };
+    let tab_display_width =
+        |tab: &crate::commands::chat::tui::state::SessionTab, is_active: bool| -> u16 {
+            let truncated = truncate_str(&tab.title, 18);
+            let busy_w = if tab_is_busy(&tab.id) { 2 } else { 0 };
+            if is_active {
+                (truncated.width() + busy_w + 4) as u16
+            } else {
+                (truncated.width() + busy_w + 3) as u16
+            }
+        };
 
     let mut start_idx = 0usize;
     loop {
@@ -649,7 +655,10 @@ pub(crate) fn render_landing(
     composer_rect
 }
 
-pub(crate) fn feature_status_spans(name: &str, item: FeatureLandingItem) -> (Vec<Span<'static>>, usize) {
+pub(crate) fn feature_status_spans(
+    name: &str,
+    item: FeatureLandingItem,
+) -> (Vec<Span<'static>>, usize) {
     if item.enabled {
         let text_len = 2 + name.width() + 3;
         (
@@ -1017,7 +1026,6 @@ pub(crate) fn render_conversation(
 
     composer_rect
 }
-
 
 pub mod cards;
 pub mod composer;

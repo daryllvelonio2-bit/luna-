@@ -1,8 +1,8 @@
+use harness_core::*;
 use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
-use harness_core::*;
 
 mod common;
 use common::*;

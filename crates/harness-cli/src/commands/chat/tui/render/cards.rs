@@ -2,7 +2,11 @@
 
 use super::*;
 
-pub(crate) fn build_chrome_lines(st: &TuiState, snap: &TuiLiveSnapshot, width: usize) -> Vec<Line<'static>> {
+pub(crate) fn build_chrome_lines(
+    st: &TuiState,
+    snap: &TuiLiveSnapshot,
+    width: usize,
+) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     if let Some(ref err) = snap.transient_error {
         lines.push(Line::from(vec![
@@ -1412,7 +1416,12 @@ pub(crate) fn push_compaction_card(out: &mut Vec<Line<'static>>, width: usize) {
     ]));
 }
 
-pub(crate) fn push_user_card(out: &mut Vec<Line<'static>>, query: &str, width: usize, inner_w: usize) {
+pub(crate) fn push_user_card(
+    out: &mut Vec<Line<'static>>,
+    query: &str,
+    width: usize,
+    inner_w: usize,
+) {
     let blank_fill = " ".repeat(width.saturating_sub(1));
     out.push(Line::from(vec![
         Span::styled("▎", Style::default().fg(accent_coral()).bg(bg_surface())),
@@ -1440,7 +1449,12 @@ pub(crate) fn push_user_card(out: &mut Vec<Line<'static>>, query: &str, width: u
     ]));
 }
 
-pub(crate) fn render_slash_popup(frame: &mut Frame, screen: Rect, composer_rect: Rect, st: &TuiState) {
+pub(crate) fn render_slash_popup(
+    frame: &mut Frame,
+    screen: Rect,
+    composer_rect: Rect,
+    st: &TuiState,
+) {
     let max_items = st.slash_popup.matches.len().min(8);
     if max_items == 0 {
         return;
@@ -1503,4 +1517,3 @@ pub(crate) fn render_slash_popup(frame: &mut Frame, screen: Rect, composer_rect:
         .collect();
     frame.render_widget(Paragraph::new(rows), inner);
 }
-
