@@ -728,27 +728,25 @@ async fn dispatch_command(
             });
             commands::voice::micserve::run_mic_serve(&addr, cancel).await?;
         }
-        Some(Commands::Voice { subcommand, .. }) => {
-            match subcommand {
-                Some(VoiceSubcommand::Setup { value }) => {
-                    setup_voice(layers, value.clone())?;
-                }
-                Some(VoiceSubcommand::MicServe { addr }) => {
-                    let cancel = tokio_util::sync::CancellationToken::new();
-                    tokio::spawn({
-                        let cancel = cancel.clone();
-                        async move {
-                            tokio::signal::ctrl_c().await.ok();
-                            cancel.cancel();
-                        }
-                    });
-                    commands::voice::micserve::run_mic_serve(&addr, cancel).await?;
-                }
-                None => {
-                    run_voice_loop(config, cred_manager, discovery).await?;
-                }
+        Some(Commands::Voice { subcommand, .. }) => match subcommand {
+            Some(VoiceSubcommand::Setup { value }) => {
+                setup_voice(layers, value.clone())?;
             }
-        }
+            Some(VoiceSubcommand::MicServe { addr }) => {
+                let cancel = tokio_util::sync::CancellationToken::new();
+                tokio::spawn({
+                    let cancel = cancel.clone();
+                    async move {
+                        tokio::signal::ctrl_c().await.ok();
+                        cancel.cancel();
+                    }
+                });
+                commands::voice::micserve::run_mic_serve(&addr, cancel).await?;
+            }
+            None => {
+                run_voice_loop(config, cred_manager, discovery).await?;
+            }
+        },
         Some(Commands::Hooks { json }) => {
             commands::hooks::run_hooks(config, commands::hooks::HooksOptions { json })?;
         }

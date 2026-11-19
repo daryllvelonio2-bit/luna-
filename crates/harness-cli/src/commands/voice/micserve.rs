@@ -17,7 +17,12 @@ pub const DEFAULT_SAMPLE_RATE: u32 = 16_000;
 /// Check if a remote mic server daemon is configured via environment variables.
 #[allow(dead_code)]
 pub fn is_mic_server_configured() -> Option<String> {
-    for var in ["MIC_SERVER", "MICS_SERVER", "MIC_ENGINE_ADDR", "AGY_MIC_SERVER"] {
+    for var in [
+        "MIC_SERVER",
+        "MICS_SERVER",
+        "MIC_ENGINE_ADDR",
+        "AGY_MIC_SERVER",
+    ] {
         if let Ok(val) = std::env::var(var) {
             let trimmed = val.trim();
             if !trimmed.is_empty() {
@@ -76,9 +81,11 @@ pub async fn run_mic_serve(addr: &str, cancel: CancellationToken) -> Result<(), 
         HarnessError::VoiceError(format!("Invalid mic-serve address '{addr}': {e}"))
     })?;
 
-    let listener = tokio::net::TcpListener::bind(bind_addr).await.map_err(|e| {
-        HarnessError::VoiceError(format!("Failed to bind mic-serve on '{bind_addr}': {e}"))
-    })?;
+    let listener = tokio::net::TcpListener::bind(bind_addr)
+        .await
+        .map_err(|e| {
+            HarnessError::VoiceError(format!("Failed to bind mic-serve on '{bind_addr}': {e}"))
+        })?;
 
     println!("🎙 Serving microphone and speaker on {bind_addr}");
 
@@ -134,7 +141,8 @@ async fn handle_client_conn(
         writer.write_all(b"OK\n").await?;
 
         // Stream audio frames to local speaker process
-        let player_tool = super::playback::select_player_tool().unwrap_or_else(|| "pw-cat".to_string());
+        let player_tool =
+            super::playback::select_player_tool().unwrap_or_else(|| "pw-cat".to_string());
         let mut player = super::playback::NativePlayerProcess::spawn(&player_tool, rate)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
 

@@ -37,7 +37,9 @@ pub async fn stream_tts_sentence_to_audio(
     match provider.as_str() {
         "openai" => {
             let Some(key) = super::stt::resolve_openai_api_key(cred_manager).await else {
-                let msg = "No OpenAI credentials configured for voice TTS (run `luna auth add openai`)".to_string();
+                let msg =
+                    "No OpenAI credentials configured for voice TTS (run `luna auth add openai`)"
+                        .to_string();
                 tracing::warn!("{msg}");
                 if let Some(tx) = voice_tx {
                     let _ = tx.send(VoiceEvent::Error(msg));
@@ -56,7 +58,9 @@ pub async fn stream_tts_sentence_to_audio(
         "gemini" => {
             let g_keys = super::stt::lookup_plain_api_keys("gemini", cred_manager).await;
             if g_keys.is_empty() {
-                let msg = "No Gemini credentials configured for voice TTS (run `luna auth add gemini`)".to_string();
+                let msg =
+                    "No Gemini credentials configured for voice TTS (run `luna auth add gemini`)"
+                        .to_string();
                 tracing::warn!("{msg}");
                 if let Some(tx) = voice_tx {
                     let _ = tx.send(VoiceEvent::Error(msg));
@@ -297,7 +301,8 @@ pub async fn stream_antigravity_tts(
             .await
             .ok_or_else(|| {
                 HarnessError::VoiceError(
-                    "No Antigravity credentials configured (run `luna auth add antigravity`)".into(),
+                    "No Antigravity credentials configured (run `luna auth add antigravity`)"
+                        .into(),
                 )
             })?,
     };
@@ -447,7 +452,10 @@ pub fn push_gemini_sse_audio_chunk(json_str: &str, audio: GenAudioSender<'_>) ->
     let Some(candidates) = candidates else {
         return false;
     };
-    let Some(parts) = candidates.first().and_then(|c| c["content"]["parts"].as_array()) else {
+    let Some(parts) = candidates
+        .first()
+        .and_then(|c| c["content"]["parts"].as_array())
+    else {
         return false;
     };
     let mut sent_any = false;

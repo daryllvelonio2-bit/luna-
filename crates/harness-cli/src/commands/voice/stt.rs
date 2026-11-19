@@ -271,11 +271,7 @@ pub async fn transcribe_gemini_audio_with_keys(
     let candidates: Vec<&str> = if !model.is_empty() {
         vec![model]
     } else {
-        vec![
-            "gemini-2.5-flash",
-            "gemini-2.0-flash",
-            "gemini-1.5-flash",
-        ]
+        vec!["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
     };
 
     let payload = serde_json::json!({
@@ -398,11 +394,7 @@ pub async fn transcribe_openai_whisper(
     model: &str,
 ) -> Result<String, HarnessError> {
     let client = voice_http_client();
-    let chosen_model = if model.is_empty() {
-        "whisper-1"
-    } else {
-        model
-    };
+    let chosen_model = if model.is_empty() { "whisper-1" } else { model };
 
     let part = reqwest::multipart::Part::bytes(wav_bytes.to_vec())
         .file_name("audio.wav")
