@@ -2604,7 +2604,8 @@ pub fn fallback_voice_summary(reply: &str) -> String {
 }
 
 /// Fast lightweight text completion helper for pre-task voice acknowledgments and separate
-/// spoken summaries. Uses a tight 4-second timeout so live voice never stalls.
+/// spoken summaries using `GenericProviderClient` (handles OAuth refresh, key rotation, and
+/// provider routing cleanly) with a tight 5-second timeout per candidate.
 async fn generate_fast_voice_text(
     system: &str,
     user_prompt: &str,
@@ -2612,206 +2613,100 @@ async fn generate_fast_voice_text(
     config: &Config,
     cred_manager: &Arc<CredentialManager>,
 ) -> Result<String, HarnessError> {
-    let client = reqwest::Client::builder()
-        .user_agent(concat!("luna/", env!("CARGO_PKG_VERSION")))
-        .timeout(std::time::Duration::from_secs(4))
-        .connect_timeout(std::time::Duration::from_secs(3))
-        .build()
-        .unwrap_or_else(|_| voice_http_client().clone());
+    use harness_core::traits::ModelProvider;
+    use harness_core::types::{CompletionOptions, Message, NO_TEXT_RESPONSE};
 
-    let preferred = config.voice.provider.to_ascii_lowercase();
-    let order: Vec<&str> = match preferred.as_str() {
-        "openai" => vec!["openai", "antigravity", "gemini", "groq"],
-        "groq" => vec!["groq", "antigravity", "gemini", "openai"],
-        _ => vec!["antigravity", "gemini", "openai", "groq"],
+    let discovery = Arc::new(ModelDiscovery::new(
+        Some(config.paths.models_cache.clone()),
+        24,
+        config.providers.clone(),
+    ));
+
+    let fast_model_for = |prov: &str, active_default: &str| -> String {
+        match prov.to_ascii_lowercase().as_str() {
+            "antigravity" | "agy" => "gemini-3-flash".to_string(),
+            "gemini" => "gemini-3-flash-preview".to_string(),
+            "openai" => "gpt-4o-mini".to_string(),
+            "groq" => "llama-3.1-8b-instant".to_string(),
+            _ if !active_default.trim().is_empty() => active_default.trim().to_string(),
+            _ => "gpt-4o-mini".to_string(),
+        }
     };
 
+    let mut candidates: Vec<(String, String)> = Vec::new();
+    let active_prov = config.model.provider.trim().to_ascii_lowercase();
+    if !active_prov.is_empty() {
+        candidates.push((
+            active_prov.clone(),
+            fast_model_for(&active_prov, &config.model.default),
+        ));
+    }
+    let voice_prov = config.voice.provider.trim().to_ascii_lowercase();
+    if !voice_prov.is_empty() && voice_prov != "none" && voice_prov != active_prov {
+        candidates.push((
+            voice_prov.clone(),
+            fast_model_for(&voice_prov, &config.model.default),
+        ));
+    }
+    for (prov, model) in [
+        ("groq", "llama-3.1-8b-instant"),
+        ("antigravity", "gemini-3-flash"),
+        ("openai", "gpt-4o-mini"),
+        ("gemini", "gemini-3-flash-preview"),
+    ] {
+        if !candidates.iter().any(|(p, _)| p == prov) {
+            candidates.push((prov.to_string(), model.to_string()));
+        }
+    }
+
+    let messages = vec![Message::system(system), Message::user(user_prompt)];
     let mut last_err = String::new();
-    for backend in order {
-        match backend {
-            "antigravity" => {
-                let secret = match lookup_raw_credential("antigravity", cred_manager).await {
-                    Some(s) => Some(s),
-                    None => lookup_raw_credential("agy", cred_manager).await,
-                };
-                if let Some(raw_secret) = secret {
-                    let (bearer, project_opt) =
-                        harness_providers::antigravity::extract_bearer_token(&raw_secret);
-                    let project = project_opt.unwrap_or_else(|| {
-                        harness_providers::antigravity::DEFAULT_PROJECT.to_string()
-                    });
-                    let payload = serde_json::json!({
-                        "project": project,
-                        "model": "gemini-3.5-flash-lite",
-                        "request": {
-                            "systemInstruction": {
-                                "role": "user",
-                                "parts": [{"text": system}]
-                            },
-                            "contents": [{
-                                "role": "user",
-                                "parts": [{"text": user_prompt}]
-                            }],
-                            "generationConfig": {
-                                "temperature": 0.4,
-                                "maxOutputTokens": max_tokens
-                            }
-                        }
-                    });
-                    match client
-                        .post(harness_providers::antigravity::CODE_ASSIST_ENDPOINT)
-                        .bearer_auth(&bearer)
-                        .header(
-                            reqwest::header::USER_AGENT,
-                            harness_providers::antigravity::user_agent(),
-                        )
-                        .json(&payload)
-                        .send()
-                        .await
-                    {
-                        Ok(res) if res.status().is_success() => {
-                            let body = res.text().await.unwrap_or_default();
-                            let mut text = String::new();
-                            for line in body.lines() {
-                                if let Some(json_str) = line.strip_prefix("data: ") {
-                                    if let Ok(val) =
-                                        serde_json::from_str::<serde_json::Value>(json_str)
-                                    {
-                                        if let Some(parts) = val["response"]["candidates"][0]
-                                            ["content"]["parts"]
-                                            .as_array()
-                                        {
-                                            for p in parts {
-                                                if let Some(t) = p["text"].as_str() {
-                                                    text.push_str(t);
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            let trimmed = text.trim();
-                            if !trimmed.is_empty() {
-                                return Ok(trimmed.to_string());
-                            }
-                        }
-                        Ok(res) => last_err = format!("antigravity HTTP {}", res.status()),
-                        Err(e) => last_err = format!("antigravity: {e}"),
+
+    for (prov, model) in candidates {
+        let has_creds = !cred_manager.get_credentials(&prov).await.is_empty()
+            || (prov == "antigravity" && !cred_manager.get_credentials("agy").await.is_empty());
+        if !has_creds {
+            continue;
+        }
+        let Ok(client) = GenericProviderClient::new(
+            prov.clone(),
+            model.clone(),
+            cred_manager.clone(),
+            discovery.clone(),
+            config.providers.get(&prov),
+        ) else {
+            continue;
+        };
+        let options = CompletionOptions {
+            model: Some(model.clone()),
+            temperature: Some(0.4),
+            max_tokens: Some(max_tokens.max(512)),
+            reasoning_effort: None,
+            ..Default::default()
+        };
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            client.complete(&messages, &[], &options),
+        )
+        .await
+        {
+            Ok(Ok(msg)) => {
+                if let Some(content) = msg.content {
+                    let trimmed = content.trim();
+                    if !trimmed.is_empty() && trimmed != NO_TEXT_RESPONSE {
+                        return Ok(trimmed.to_string());
                     }
                 }
+                last_err = format!("{prov}/{model} returned empty text");
             }
-            "gemini" => {
-                let keys = resolve_gemini_api_keys(cred_manager).await;
-                for api_key in keys {
-                    for model in ["gemini-3.1-flash-lite", "gemini-3-flash-preview"] {
-                        let url = format!(
-                            "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
-                        );
-                        let payload = serde_json::json!({
-                            "systemInstruction": {
-                                "parts": [{"text": system}]
-                            },
-                            "contents": [{
-                                "parts": [{"text": user_prompt}]
-                            }],
-                            "generationConfig": {
-                                "temperature": 0.4,
-                                "maxOutputTokens": max_tokens
-                            }
-                        });
-                        match client.post(&url).json(&payload).send().await {
-                            Ok(res) if res.status().is_success() => {
-                                let val: serde_json::Value = res.json().await.unwrap_or_default();
-                                let txt = val["candidates"][0]["content"]["parts"][0]["text"]
-                                    .as_str()
-                                    .unwrap_or("")
-                                    .trim();
-                                if !txt.is_empty() {
-                                    return Ok(txt.to_string());
-                                }
-                            }
-                            Ok(res) => {
-                                last_err = format!("gemini {model} HTTP {}", res.status());
-                                if res.status().as_u16() == 429 || res.status().as_u16() == 403 {
-                                    continue;
-                                }
-                                break;
-                            }
-                            Err(e) => {
-                                last_err = format!("gemini: {e}");
-                                break;
-                            }
-                        }
-                    }
-                }
+            Ok(Err(e)) => {
+                tracing::debug!(provider = %prov, model = %model, "fast voice text failed: {e}");
+                last_err = format!("{prov}/{model}: {e}");
             }
-            "openai" => {
-                if let Some(key) = resolve_openai_api_key(cred_manager).await {
-                    let payload = serde_json::json!({
-                        "model": "gpt-4o-mini",
-                        "max_tokens": max_tokens,
-                        "temperature": 0.4,
-                        "messages": [
-                            {"role": "system", "content": system},
-                            {"role": "user", "content": user_prompt}
-                        ]
-                    });
-                    match client
-                        .post("https://api.openai.com/v1/chat/completions")
-                        .bearer_auth(&key)
-                        .json(&payload)
-                        .send()
-                        .await
-                    {
-                        Ok(res) if res.status().is_success() => {
-                            let val: serde_json::Value = res.json().await.unwrap_or_default();
-                            let txt = val["choices"][0]["message"]["content"]
-                                .as_str()
-                                .unwrap_or("")
-                                .trim();
-                            if !txt.is_empty() {
-                                return Ok(txt.to_string());
-                            }
-                        }
-                        Ok(res) => last_err = format!("openai HTTP {}", res.status()),
-                        Err(e) => last_err = format!("openai: {e}"),
-                    }
-                }
+            Err(_) => {
+                tracing::debug!(provider = %prov, model = %model, "fast voice text timed out");
+                last_err = format!("{prov}/{model} timed out");
             }
-            "groq" => {
-                if let Some(key) = resolve_groq_api_key(cred_manager).await {
-                    let payload = serde_json::json!({
-                        "model": "llama-3.1-8b-instant",
-                        "max_tokens": max_tokens,
-                        "temperature": 0.4,
-                        "messages": [
-                            {"role": "system", "content": system},
-                            {"role": "user", "content": user_prompt}
-                        ]
-                    });
-                    match client
-                        .post("https://api.groq.com/openai/v1/chat/completions")
-                        .bearer_auth(&key)
-                        .json(&payload)
-                        .send()
-                        .await
-                    {
-                        Ok(res) if res.status().is_success() => {
-                            let val: serde_json::Value = res.json().await.unwrap_or_default();
-                            let txt = val["choices"][0]["message"]["content"]
-                                .as_str()
-                                .unwrap_or("")
-                                .trim();
-                            if !txt.is_empty() {
-                                return Ok(txt.to_string());
-                            }
-                        }
-                        Ok(res) => last_err = format!("groq HTTP {}", res.status()),
-                        Err(e) => last_err = format!("groq: {e}"),
-                    }
-                }
-            }
-            _ => {}
         }
     }
 
@@ -3124,6 +3019,42 @@ mod tests {
         );
         assert!(fallback.contains("Cleaned up everything."));
         assert!(fallback.contains("full details in the chat"));
+    }
+
+    #[tokio::test]
+    #[ignore = "live audio hardware and API diagnostic"]
+    async fn live_dual_voice_diagnostic() {
+        let layers = harness_core::config::process_layers(Config::default()).unwrap();
+        let config = harness_core::config::resolve(&layers)
+            .unwrap()
+            .into_config();
+        let cred_manager =
+            Arc::new(CredentialManager::new(Some(config.paths.credentials.clone())).unwrap());
+
+        let t0 = std::time::Instant::now();
+        let ack = generate_pre_task_voice_ack(
+            "clean up build artifacts",
+            Some("Run terminal: cargo clean"),
+            &config,
+            &cred_manager,
+        )
+        .await;
+        println!("ACK ({:?}): {:?}", t0.elapsed(), ack);
+        assert!(ack.is_some());
+
+        let t1 = std::time::Instant::now();
+        let sample_table = "Here are the workspace crates:\n\n| Crate | Purpose |\n|---|---|\n| harness-core | Agent loop & tools |\n| harness-cli | TUI & CLI |\n| harness-web | Web server |\n";
+        let summary = generate_separate_voice_summary(
+            "List the workspace crates in a table",
+            sample_table,
+            1,
+            &config,
+            &cred_manager,
+        )
+        .await;
+        println!("SUMMARY ({:?}): {:?}", t1.elapsed(), summary);
+        assert!(!summary.is_empty());
+        assert!(!summary.contains('|'));
     }
 
     #[tokio::test]
