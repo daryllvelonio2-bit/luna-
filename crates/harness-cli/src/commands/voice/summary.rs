@@ -57,6 +57,10 @@ pub fn extract_ready_speech_chunks(
 
             for (i, ch) in slice.char_indices() {
                 let next_idx = i + ch.len_utf8();
+                if is_first && ch == ' ' && i >= 42 {
+                    split_at = Some(next_idx);
+                    break;
+                }
                 let next_is_space = next_idx < slice.len() && bytes[local_pos + next_idx] == b' ';
                 if !next_is_space {
                     continue;
@@ -69,7 +73,8 @@ pub fn extract_ready_speech_chunks(
                         split_at = Some(next_idx + 1);
                         break;
                     }
-                } else if is_first && (ch == ',' || ch == ';' || ch == ':') && i >= 45 {
+                } else if is_first && (ch == ',' || ch == ';' || ch == ':' || ch == '—') && i >= 14
+                {
                     split_at = Some(next_idx + 1);
                     break;
                 }

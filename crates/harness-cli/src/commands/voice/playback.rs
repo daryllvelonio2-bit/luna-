@@ -84,7 +84,7 @@ impl NativePlayerProcess {
                     "1".into(),
                     "--format".into(),
                     "s16".into(),
-                    "--latency=40ms".into(),
+                    "--latency=20ms".into(),
                     "--raw".into(),
                     "-".into(),
                 ],
@@ -95,7 +95,7 @@ impl NativePlayerProcess {
                     format!("--rate={rate}"),
                     "--channels=1".into(),
                     "--format=s16le".into(),
-                    "--latency-msec=40".into(),
+                    "--latency-msec=20".into(),
                     "--raw".into(),
                 ],
             ),
@@ -111,7 +111,7 @@ impl NativePlayerProcess {
                     "-c".into(),
                     "1".into(),
                     "-B".into(),
-                    "40000".into(),
+                    "20000".into(),
                     "-q".into(),
                     "-".into(),
                 ],
@@ -150,9 +150,14 @@ impl NativePlayerProcess {
 
     pub fn write_samples(&mut self, samples: &[i16]) -> std::io::Result<()> {
         use std::io::Write;
-        for s in samples {
-            self.stdin.write_all(&s.to_le_bytes())?;
+        if samples.is_empty() {
+            return Ok(());
         }
+        let mut bytes = Vec::with_capacity(samples.len() * 2);
+        for &s in samples {
+            bytes.extend_from_slice(&s.to_le_bytes());
+        }
+        self.stdin.write_all(&bytes)?;
         self.stdin.flush()?;
         self.last_write = std::time::Instant::now();
         Ok(())
@@ -183,7 +188,7 @@ pub enum AudioThreadCmd {
 
 #[derive(Clone, Copy)]
 pub struct GenAudioSender<'a> {
-    pub tx: &'a std::sync::mpsc::Sender<AudioThreadCmd>,
+    pub tx: &'a tokio::sync::mpsc::UnboundedSender<AudioThreadCmd>,
     pub generation: u64,
     pub cancel: &'a CancellationToken,
 }
@@ -439,7 +444,9 @@ impl VoiceSpeechQueue {
             }
         });
 
-        // Dedicated streaming worker: consumes queued sentence tasks in sequential order
+        // Dedicated concurrent pipelining worker:
+        // Spawns up to 3 lookahead synthesis streams in parallel and drains them in strict FIFO order
+        // directly to the warm audio player so inter-sentence gaps drop to ~0ms.
         let active_gen_worker = active_gen.clone();
         let turn_muted_worker = turn_muted.clone();
         let stream_busy_worker = stream_busy.clone();
@@ -447,44 +454,102 @@ impl VoiceSpeechQueue {
         let audio_tx_worker = audio_tx.clone();
         let active_cancel_worker = active_cancel.clone();
 
-        let stream_loop = async move {
-            while let Some(task) = task_rx.recv().await {
-                let cur_gen = active_gen_worker.load(Ordering::SeqCst);
-                if task.generation != cur_gen || turn_muted_worker.load(Ordering::SeqCst) {
-                    continue;
-                }
+        struct OrderedAudioSlot {
+            generation: u64,
+            text: String,
+            voice_tx: Option<tokio::sync::mpsc::UnboundedSender<VoiceEvent>>,
+            rx: tokio::sync::mpsc::UnboundedReceiver<AudioThreadCmd>,
+        }
 
-                let cancel = {
-                    let guard = active_cancel_worker
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner());
-                    guard.clone()
-                };
-                if cancel.is_cancelled() {
+        let stream_loop = async move {
+            let (ordered_tx, mut ordered_rx) =
+                tokio::sync::mpsc::unbounded_channel::<OrderedAudioSlot>();
+            let prefetch_sem = Arc::new(tokio::sync::Semaphore::new(3));
+
+            let active_gen_disp = active_gen_worker.clone();
+            let turn_muted_disp = turn_muted_worker.clone();
+            let active_cancel_disp = active_cancel_worker.clone();
+
+            // Stage 1: Dispatcher — starts synthesizing queued chunks concurrently
+            tokio::spawn(async move {
+                while let Some(task) = task_rx.recv().await {
+                    let cur_gen = active_gen_disp.load(Ordering::SeqCst);
+                    if task.generation != cur_gen || turn_muted_disp.load(Ordering::SeqCst) {
+                        continue;
+                    }
+                    let cancel = {
+                        let guard = active_cancel_disp.lock().unwrap_or_else(|e| e.into_inner());
+                        guard.clone()
+                    };
+                    if cancel.is_cancelled() {
+                        continue;
+                    }
+
+                    let Ok(permit) = prefetch_sem.clone().acquire_owned().await else {
+                        break;
+                    };
+                    let cur_gen_after = active_gen_disp.load(Ordering::SeqCst);
+                    if task.generation != cur_gen_after || cancel.is_cancelled() {
+                        drop(permit);
+                        continue;
+                    }
+
+                    let (chunk_tx, chunk_rx) =
+                        tokio::sync::mpsc::unbounded_channel::<AudioThreadCmd>();
+                    if ordered_tx
+                        .send(OrderedAudioSlot {
+                            generation: task.generation,
+                            text: task.text.clone(),
+                            voice_tx: task.voice_tx.clone(),
+                            rx: chunk_rx,
+                        })
+                        .is_err()
+                    {
+                        drop(permit);
+                        break;
+                    }
+
+                    tokio::spawn(async move {
+                        let _permit = permit;
+                        let audio_sender = GenAudioSender {
+                            tx: &chunk_tx,
+                            generation: task.generation,
+                            cancel: &cancel,
+                        };
+                        super::tts::stream_tts_sentence_to_audio(
+                            &task.text,
+                            &task.config,
+                            &task.cred_manager,
+                            task.voice_tx.as_ref(),
+                            audio_sender,
+                        )
+                        .await;
+                    });
+                }
+            });
+
+            // Stage 2: Ordered playback drainer — forwards prefetched & live PCM chunks strictly in order
+            while let Some(mut slot) = ordered_rx.recv().await {
+                let cur_gen = active_gen_worker.load(Ordering::SeqCst);
+                if slot.generation != cur_gen || turn_muted_worker.load(Ordering::SeqCst) {
                     continue;
                 }
 
                 stream_busy_worker.store(true, Ordering::SeqCst);
                 is_playing_worker.store(true, Ordering::SeqCst);
 
-                if let Some(ref tx) = task.voice_tx {
-                    let _ = tx.send(VoiceEvent::Notice(format!("🔊 {}", task.text)));
+                if let Some(ref tx) = slot.voice_tx {
+                    let _ = tx.send(VoiceEvent::Notice(format!("🔊 {}", slot.text)));
                 }
 
-                let audio_sender = GenAudioSender {
-                    tx: &audio_tx_worker,
-                    generation: task.generation,
-                    cancel: &cancel,
-                };
-
-                super::tts::stream_tts_sentence_to_audio(
-                    &task.text,
-                    &task.config,
-                    &task.cred_manager,
-                    task.voice_tx.as_ref(),
-                    audio_sender,
-                )
-                .await;
+                while let Some(cmd) = slot.rx.recv().await {
+                    if slot.generation != active_gen_worker.load(Ordering::SeqCst)
+                        || turn_muted_worker.load(Ordering::SeqCst)
+                    {
+                        break;
+                    }
+                    let _ = audio_tx_worker.send(cmd);
+                }
 
                 stream_busy_worker.store(false, Ordering::SeqCst);
             }
@@ -559,6 +624,7 @@ impl VoiceSpeechQueue {
             guard.cancel();
             *guard = CancellationToken::new();
         }
+        super::live_tts::drop_live_tts_session();
         let _ = self.audio_tx.send(AudioThreadCmd::ClearAndReset);
         self.is_playing.store(false, Ordering::SeqCst);
     }

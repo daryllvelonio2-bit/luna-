@@ -19,6 +19,7 @@ use super::approval::{approval_settings, build_approver};
 
 pub mod capture;
 pub mod catalog;
+pub mod live_tts;
 pub mod micserve;
 pub mod playback;
 pub mod stt;
@@ -43,16 +44,17 @@ pub use summary::{
 #[allow(unused_imports)]
 pub use tts::build_gemini_tts_payload;
 
-/// Shared HTTP client with connection pooling and TCP keep-alive for low-latency voice STT/TTS.
+/// Shared HTTP client with HTTP/2 adaptive window, TCP_NODELAY, and connection pooling for ultra-low-latency voice STT/TTS.
 pub(crate) fn voice_http_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .user_agent(concat!("luna/", env!("CARGO_PKG_VERSION")))
             .timeout(std::time::Duration::from_secs(25))
-            .connect_timeout(std::time::Duration::from_secs(8))
-            .pool_idle_timeout(std::time::Duration::from_secs(90))
+            .connect_timeout(std::time::Duration::from_secs(6))
+            .pool_idle_timeout(std::time::Duration::from_secs(180))
             .tcp_keepalive(std::time::Duration::from_secs(30))
+            .tcp_nodelay(true)
             .build()
             .unwrap_or_else(|_| reqwest::Client::new())
     })
@@ -122,6 +124,7 @@ pub async fn run_voice_loop(
 
     let cancel = CancellationToken::new();
     let speech_queue = VoiceSpeechQueue::new();
+    live_tts::spawn_warm_up_live_tts(cred_manager.clone(), config.voice.voice_name.clone());
     let is_playing = speech_queue.is_playing();
     let (voice_tx, mut voice_rx) = tokio::sync::mpsc::unbounded_channel::<VoiceEvent>();
 

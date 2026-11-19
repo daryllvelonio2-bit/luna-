@@ -55,34 +55,39 @@ pub async fn stream_tts_sentence_to_audio(
                 }
             }
         }
-        "gemini" => {
-            let g_keys = super::stt::lookup_plain_api_keys("gemini", cred_manager).await;
+        "gemini" | "antigravity" | "agy" => {
+            let g_keys = super::stt::resolve_gemini_api_keys(cred_manager).await;
             if g_keys.is_empty() {
-                let msg =
-                    "No Gemini credentials configured for voice TTS (run `luna auth add gemini`)"
-                        .to_string();
+                let msg = "No Gemini / Antigravity API keys configured for voice TTS (run `luna auth add gemini`)"
+                    .to_string();
                 tracing::warn!("{msg}");
                 if let Some(tx) = voice_tx {
                     let _ = tx.send(VoiceEvent::Error(msg));
                 }
                 return;
             }
+            // Fast path: persistent warm Gemini Live WebSocket (~400ms first audio)
+            if tts_model.is_empty() {
+                match super::live_tts::stream_gemini_live_ws_tts(
+                    &cleaned, &g_keys, voice_name, audio,
+                )
+                .await
+                {
+                    Ok(()) => return,
+                    Err(e) => {
+                        tracing::debug!(
+                            "Gemini Live WS TTS unavailable, falling back to streaming REST TTS: {e}"
+                        );
+                    }
+                }
+            }
+            // Streaming REST fallback: gemini-3.8-flash-tts -> gemini-3.1-flash-tts-preview -> gemini-2.5-flash-preview-tts
             if let Err(e) =
                 stream_gemini_tts_sse(&cleaned, &g_keys, voice_name, tts_model, audio).await
             {
                 tracing::warn!("Gemini TTS error: {e}");
                 if let Some(tx) = voice_tx {
                     let _ = tx.send(VoiceEvent::Error(format!("Gemini TTS error: {e}")));
-                }
-            }
-        }
-        "antigravity" | "agy" => {
-            if let Err(e) =
-                stream_antigravity_tts(&cleaned, cred_manager, voice_name, tts_model, audio).await
-            {
-                tracing::warn!("Antigravity TTS error: {e}");
-                if let Some(tx) = voice_tx {
-                    let _ = tx.send(VoiceEvent::Error(format!("Antigravity TTS error: {e}")));
                 }
             }
         }
@@ -202,7 +207,11 @@ pub async fn stream_gemini_tts_sse(
     let candidates: Vec<&str> = if !model.is_empty() {
         vec![model]
     } else {
-        vec!["gemini-2.5-flash-preview-tts", "gemini-2.5-pro-preview-tts"]
+        vec![
+            "gemini-3.8-flash-tts",
+            "gemini-3.1-flash-tts-preview",
+            "gemini-2.5-flash-preview-tts",
+        ]
     };
 
     let start_idx =
@@ -288,6 +297,7 @@ pub async fn stream_gemini_tts_sse(
 }
 
 /// Stream Antigravity TTS using Antigravity OAuth credentials.
+#[allow(dead_code)]
 pub async fn stream_antigravity_tts(
     text: &str,
     cred_manager: &Arc<CredentialManager>,

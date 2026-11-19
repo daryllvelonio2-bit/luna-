@@ -292,11 +292,11 @@ pub async fn run_background_voice_listener(
         }
     };
 
-    // Fast responsive end-of-utterance pause (cap default 800ms down to 480ms for real-time feel)
+    // Ultra-responsive end-of-utterance pause (cap default 800ms down to 320ms for instant feel)
     let silence_ms = if config.voice.silence_threshold_ms == 800 {
-        480
+        320
     } else {
-        config.voice.silence_threshold_ms.max(250)
+        config.voice.silence_threshold_ms.max(200)
     };
     let silence_duration = std::time::Duration::from_millis(silence_ms);
     let min_samples = (sample_rate as usize) / 4; // 250ms minimum utterance
@@ -338,7 +338,7 @@ pub async fn run_background_voice_listener(
                     }
                 } else if was_playing_tts {
                     was_playing_tts = false;
-                    tts_cooldown_until = Some(std::time::Instant::now() + std::time::Duration::from_millis(100));
+                    tts_cooldown_until = Some(std::time::Instant::now() + std::time::Duration::from_millis(60));
                     is_speaking = false;
                     speech_buffer.clear();
                     pre_roll.clear();

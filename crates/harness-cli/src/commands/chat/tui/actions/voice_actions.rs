@@ -66,6 +66,10 @@ pub async fn handle_voice_slash_command(
 pub async fn activate_voice(env: &Env<'_>, st: &mut TuiState) {
     st.voice_active = true;
     st.voice_speech_queue.warm_up(24_000);
+    crate::commands::voice::live_tts::spawn_warm_up_live_tts(
+        env.cred_manager.clone(),
+        env.config.voice.voice_name.clone(),
+    );
     env.agent.lock().await.set_voice_mode(true);
 
     if let Some(old) = st.voice_cancel.take() {
@@ -103,6 +107,7 @@ pub async fn deactivate_voice(env: &Env<'_>, st: &mut TuiState) {
     if let Some(cancel) = st.voice_cancel.take() {
         cancel.cancel();
     }
+    crate::commands::voice::live_tts::drop_live_tts_session();
     st.voice_speech_queue.interrupt();
     st.voice_stream_offset = 0;
     st.voice_stream_in_code = false;

@@ -249,3 +249,50 @@ fn test_default_player_idle_timeout_is_three_minutes() {
         std::time::Duration::from_secs(180)
     );
 }
+
+#[test]
+fn test_live_ws_tts_payloads_and_idle_timeout() {
+    use super::live_tts::*;
+    assert_eq!(LIVE_WS_IDLE_TIMEOUT, std::time::Duration::from_secs(180));
+    assert_eq!(LIVE_TTS_MODELS[0], "gemini-3.8-live");
+
+    let setup = build_live_tts_setup("gemini-3.8-live", "Aoede");
+    assert_eq!(
+        setup["setup"]["model"].as_str(),
+        Some("models/gemini-3.8-live")
+    );
+    assert_eq!(
+        setup["setup"]["generationConfig"]["speechConfig"]["voiceConfig"]["prebuiltVoiceConfig"]
+            ["voiceName"]
+            .as_str(),
+        Some("Aoede")
+    );
+
+    let turn = build_live_tts_turn("The build passed.");
+    assert_eq!(
+        turn["clientContent"]["turns"][0]["parts"][0]["text"].as_str(),
+        Some("The build passed.")
+    );
+    assert_eq!(turn["clientContent"]["turnComplete"].as_bool(), Some(true));
+}
+
+#[test]
+fn test_extract_ready_speech_chunks_early_clause_and_word_boundary() {
+    let mut in_code = false;
+    let (chunks_comma, consumed_comma) = extract_ready_speech_chunks(
+        "The server is ready, and all services are online",
+        &mut in_code,
+        true,
+    );
+    assert_eq!(chunks_comma, vec!["The server is ready,"]);
+    assert_eq!(consumed_comma, 21);
+
+    let (chunks_words, consumed_words) = extract_ready_speech_chunks(
+        "The background worker finished compiling all workspace crates cleanly",
+        &mut in_code,
+        true,
+    );
+    assert_eq!(chunks_words.len(), 1);
+    assert!(consumed_words >= 42);
+    assert!(chunks_words[0].starts_with("The background worker"));
+}
