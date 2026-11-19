@@ -10,11 +10,11 @@ use super::*;
 use std::sync::atomic::Ordering;
 
 #[test]
-fn test_build_gemini_tts_payload_sends_bare_text_without_read_aloud_prefix() {
+fn test_build_gemini_tts_payload_includes_read_aloud_transcript_instruction() {
     let payload = build_gemini_tts_payload("Hello, how are you?", "");
     let sent = payload["contents"][0]["parts"][0]["text"].as_str().unwrap();
-    assert_eq!(sent, "Hello, how are you?");
-    assert!(!sent.to_lowercase().contains("read aloud"));
+    assert!(sent.contains("Hello, how are you?"));
+    assert!(sent.contains("read aloud"));
     assert_eq!(
         payload["generationConfig"]["speechConfig"]["voiceConfig"]["prebuiltVoiceConfig"]
             ["voiceName"]

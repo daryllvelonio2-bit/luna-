@@ -163,17 +163,18 @@ pub async fn stream_openai_tts_pcm(
     Ok(())
 }
 
-/// Build the Gemini TTS payload sending bare text directly so the model never speaks
-/// instruction prefixes like "Read aloud...".
+/// Build the Gemini TTS payload with explicit transcript reading instruction
+/// required by Gemini 2.5 Flash TTS to prevent HTTP 400 "Model tried to generate text" errors.
 pub fn build_gemini_tts_payload(text: &str, voice: &str) -> serde_json::Value {
     let voice_name = if voice.is_empty() || voice.contains("Neural") {
         "Aoede"
     } else {
         voice
     };
+    let prompt = format!("Please read aloud the following text:\n{}", text.trim());
     serde_json::json!({
         "contents": [{
-            "parts": [{ "text": text }]
+            "parts": [{ "text": prompt }]
         }],
         "generationConfig": {
             "responseModalities": ["AUDIO"],
@@ -208,9 +209,9 @@ pub async fn stream_gemini_tts_sse(
         vec![model]
     } else {
         vec![
+            "gemini-2.5-flash-preview-tts",
             "gemini-3.8-flash-tts",
             "gemini-3.1-flash-tts-preview",
-            "gemini-2.5-flash-preview-tts",
         ]
     };
 
