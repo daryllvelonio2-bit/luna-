@@ -3555,6 +3555,15 @@ pub async fn submit_composer(
         return run_slash_command(env, st, terminal, command_text, &submitted.display_text).await;
     }
 
+    // Chatting while voice TTS is actively speaking immediately stops playback (barge-in).
+    if st.voice_active {
+        st.voice_speech_queue.interrupt();
+        st.voice_speech_queue.set_turn_muted(false);
+        st.voice_stream_offset = 0;
+        st.voice_stream_in_code = false;
+        st.voice_spoken_any = false;
+    }
+
     // Normal user prompt: queue/steer if a turn is active, else launch turn immediately.
     if env.compacting.load(Ordering::SeqCst) {
         st.queue.push_back(submitted.expanded_text);
@@ -3827,7 +3836,7 @@ pub async fn deactivate_voice(env: &Env<'_>, st: &mut TuiState) {
 /// Stream newly completed sentences from the live assistant response into `VoiceSpeechQueue`
 /// while the LLM turn is still generating tokens.
 pub fn pump_voice_streaming_tts(env: &Env<'_>, st: &mut TuiState) {
-    if !st.voice_active || st.active_turn.is_none() {
+    if !st.voice_active || st.active_turn.is_none() || st.voice_speech_queue.is_turn_muted() {
         return;
     }
     let live_text = env.ui.live_content_snapshot();
@@ -3867,6 +3876,17 @@ pub async fn handle_voice_event(
         crate::commands::voice::VoiceEvent::Transcript(query) => {
             handle_incoming_voice_input(env, st, query).await;
         }
+        crate::commands::voice::VoiceEvent::BargeIn => {
+            // Immediate barge-in: stop TTS instantly, mute rest of interrupted turn until new input
+            st.voice_speech_queue.interrupt();
+            if st.active_turn.is_some() {
+                st.voice_speech_queue.set_turn_muted(true);
+            }
+            st.voice_stream_offset = 0;
+            st.voice_stream_in_code = false;
+            st.voice_spoken_any = false;
+            st.system_notices.push(SystemNotice::new("🎤 Listening..."));
+        }
         crate::commands::voice::VoiceEvent::Notice(msg) => {
             st.system_notices.push(SystemNotice::new(msg));
         }
@@ -3883,8 +3903,9 @@ pub async fn handle_incoming_voice_input(env: &Env<'_>, st: &mut TuiState, voice
     if trimmed.is_empty() {
         return;
     }
-    // Barge-in: interrupt ongoing speech playback immediately
+    // Barge-in: interrupt ongoing speech playback immediately and unmute for the new turn
     st.voice_speech_queue.interrupt();
+    st.voice_speech_queue.set_turn_muted(false);
     st.voice_stream_offset = 0;
     st.voice_stream_in_code = false;
     st.voice_spoken_any = false;
@@ -4666,7 +4687,7 @@ pub async fn handle_turn_end(
                 set_all_process_expanded(st, false);
             }
             st.live_thinking_view = LiveThinkingView::Tail;
-            if st.voice_active {
+            if st.voice_active && !st.voice_speech_queue.is_turn_muted() {
                 if st.voice_spoken_any {
                     if remaining_live_for_voice.len() > st.voice_stream_offset
                         && remaining_live_for_voice.is_char_boundary(st.voice_stream_offset)
@@ -4707,6 +4728,7 @@ pub async fn handle_turn_end(
             st.voice_stream_offset = 0;
             st.voice_stream_in_code = false;
             st.voice_spoken_any = false;
+            st.voice_speech_queue.set_turn_muted(false);
             if st.active_goal.is_some() {
                 goal_reply = Some(outcome.reply);
             }
@@ -4715,6 +4737,7 @@ pub async fn handle_turn_end(
             st.voice_stream_offset = 0;
             st.voice_stream_in_code = false;
             st.voice_spoken_any = false;
+            st.voice_speech_queue.set_turn_muted(false);
             if let Some((r, secs)) = trailing_reasoning
                 .as_ref()
                 .filter(|(s, _)| !s.trim().is_empty())
@@ -5184,6 +5207,7 @@ pub async fn apply_compaction_completed(env: &Env<'_>, st: &mut TuiState) {
 /// Interrupt an active turn cleanly on `Esc` or `Ctrl+C`.
 pub async fn interrupt_turn(env: &Env<'_>, st: &mut TuiState) {
     st.voice_speech_queue.interrupt();
+    st.voice_speech_queue.set_turn_muted(false);
     st.voice_stream_offset = 0;
     st.voice_stream_in_code = false;
     st.voice_spoken_any = false;

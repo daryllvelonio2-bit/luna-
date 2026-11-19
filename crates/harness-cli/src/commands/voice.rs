@@ -42,12 +42,50 @@ pub enum VoiceEvent {
     Notice(String),
     /// Actionable voice error surfaced in the UI instead of silently swallowed.
     Error(String),
+    /// Immediate barge-in signal: user started speaking during TTS playback.
+    /// Sent before full transcript to allow instant TTS interruption.
+    BargeIn,
 }
 
 enum AudioThreadCmd {
-    AppendPcm { rate: u32, samples: Vec<i16> },
-    AppendEncoded(Vec<u8>),
+    AppendPcm {
+        generation: u64,
+        rate: u32,
+        samples: Vec<i16>,
+    },
+    AppendEncoded {
+        generation: u64,
+        bytes: Vec<u8>,
+    },
     ClearAndReset,
+}
+
+#[derive(Clone, Copy)]
+struct GenAudioSender<'a> {
+    tx: &'a std::sync::mpsc::Sender<AudioThreadCmd>,
+    generation: u64,
+    cancel: &'a CancellationToken,
+}
+
+impl<'a> GenAudioSender<'a> {
+    fn send_pcm(&self, rate: u32, samples: Vec<i16>) {
+        if !self.cancel.is_cancelled() && !samples.is_empty() {
+            let _ = self.tx.send(AudioThreadCmd::AppendPcm {
+                generation: self.generation,
+                rate,
+                samples,
+            });
+        }
+    }
+
+    fn send_encoded(&self, bytes: Vec<u8>) {
+        if !self.cancel.is_cancelled() && !bytes.is_empty() {
+            let _ = self.tx.send(AudioThreadCmd::AppendEncoded {
+                generation: self.generation,
+                bytes,
+            });
+        }
+    }
 }
 
 struct SpeechTask {
@@ -68,6 +106,7 @@ pub struct VoiceSpeechQueue {
     audio_tx: std::sync::mpsc::Sender<AudioThreadCmd>,
     active_gen: Arc<AtomicU64>,
     is_playing: Arc<AtomicBool>,
+    turn_muted: Arc<AtomicBool>,
     active_cancel: Arc<Mutex<CancellationToken>>,
 }
 
@@ -80,6 +119,7 @@ impl Default for VoiceSpeechQueue {
 impl VoiceSpeechQueue {
     pub fn new() -> Self {
         let is_playing = Arc::new(AtomicBool::new(false));
+        let turn_muted = Arc::new(AtomicBool::new(false));
         let active_gen = Arc::new(AtomicU64::new(1));
         let active_cancel = Arc::new(Mutex::new(CancellationToken::new()));
         let (audio_tx, audio_rx) = std::sync::mpsc::channel::<AudioThreadCmd>();
@@ -88,6 +128,7 @@ impl VoiceSpeechQueue {
         let sink_busy = Arc::new(AtomicBool::new(false));
         let stream_busy = Arc::new(AtomicBool::new(false));
         let is_playing_audio = is_playing.clone();
+        let active_gen_audio = active_gen.clone();
         let sink_busy_thread = sink_busy.clone();
         let stream_busy_thread = stream_busy.clone();
 
@@ -133,8 +174,14 @@ impl VoiceSpeechQueue {
                                         is_playing_audio.store(false, Ordering::SeqCst);
                                     }
                                 }
-                                AudioThreadCmd::AppendPcm { rate, samples } => {
-                                    if samples.is_empty() {
+                                AudioThreadCmd::AppendPcm {
+                                    generation,
+                                    rate,
+                                    samples,
+                                } => {
+                                    if samples.is_empty()
+                                        || generation != active_gen_audio.load(Ordering::SeqCst)
+                                    {
                                         continue;
                                     }
                                     if ensure_sink(&mut output, &mut sink).is_err() {
@@ -154,8 +201,10 @@ impl VoiceSpeechQueue {
                                         is_playing_audio.store(true, Ordering::SeqCst);
                                     }
                                 }
-                                AudioThreadCmd::AppendEncoded(bytes) => {
-                                    if bytes.is_empty() {
+                                AudioThreadCmd::AppendEncoded { generation, bytes } => {
+                                    if bytes.is_empty()
+                                        || generation != active_gen_audio.load(Ordering::SeqCst)
+                                    {
                                         continue;
                                     }
                                     if ensure_sink(&mut output, &mut sink).is_err() {
@@ -218,13 +267,17 @@ impl VoiceSpeechQueue {
                     stream_busy_worker.store(true, Ordering::SeqCst);
                     is_playing_worker.store(true, Ordering::SeqCst);
 
+                    let sender = GenAudioSender {
+                        tx: &audio_tx_worker,
+                        generation: task.generation,
+                        cancel: &cancel,
+                    };
                     stream_tts_sentence_to_audio(
                         &task.text,
                         &task.config,
                         &task.cred_manager,
                         task.voice_tx.as_ref(),
-                        &audio_tx_worker,
-                        &cancel,
+                        sender,
                     )
                     .await;
 
@@ -241,12 +294,21 @@ impl VoiceSpeechQueue {
             audio_tx,
             active_gen,
             is_playing,
+            turn_muted,
             active_cancel,
         }
     }
 
     pub fn is_playing(&self) -> Arc<AtomicBool> {
         self.is_playing.clone()
+    }
+
+    pub fn set_turn_muted(&self, muted: bool) {
+        self.turn_muted.store(muted, Ordering::SeqCst);
+    }
+
+    pub fn is_turn_muted(&self) -> bool {
+        self.turn_muted.load(Ordering::SeqCst)
     }
 
     pub fn enqueue(
@@ -373,6 +435,10 @@ pub async fn run_voice_loop(
                     }
                     VoiceEvent::Error(err) => {
                         eprintln!("{} {}", "✖".red().bold(), err);
+                    }
+                    VoiceEvent::BargeIn => {
+                        speech_queue.interrupt();
+                        println!("\n{} Barge-in detected — interrupting...", "🎤".bold().yellow());
                     }
                     VoiceEvent::Transcript(query) => {
                         speech_queue.interrupt();
@@ -725,6 +791,7 @@ pub async fn run_background_voice_listener(
     let mut noise_floor: f32 = 60.0;
     let mut last_speech_time = std::time::Instant::now();
     let mut was_playing_tts = false;
+    let mut barge_in_hits: u8 = 0;
     let mut tts_cooldown_until: Option<std::time::Instant> = None;
     let mut last_stt_error_at: Option<std::time::Instant> = None;
 
@@ -751,8 +818,8 @@ pub async fn run_background_voice_listener(
                     }
                 } else if was_playing_tts {
                     was_playing_tts = false;
-                    // Brief 200ms echo cooldown right after TTS playback finishes
-                    tts_cooldown_until = Some(std::time::Instant::now() + std::time::Duration::from_millis(200));
+                    // Brief 100ms echo cooldown right after TTS playback finishes
+                    tts_cooldown_until = Some(std::time::Instant::now() + std::time::Duration::from_millis(100));
                     is_speaking = false;
                     speech_buffer.clear();
                     pre_roll.clear();
@@ -770,14 +837,32 @@ pub async fn run_background_voice_listener(
                 let rms = harness_voice::AudioProcessor::calculate_rms_energy(&samples);
                 let base_threshold = (noise_floor * 2.6).clamp(130.0, 520.0);
                 let threshold = if playing {
-                    // Require noticeably louder voice to barge in over speaker audio
-                    (base_threshold * 2.5).max(900.0)
+                    // Require moderately louder voice to barge in over speaker audio
+                    (base_threshold * 1.5).max(600.0)
                 } else {
                     base_threshold
                 };
 
                 if rms > threshold {
                     if !is_speaking {
+                        if playing {
+                            barge_in_hits = barge_in_hits.saturating_add(1);
+                            if barge_in_hits < 2 {
+                                pre_roll_len += samples.len();
+                                pre_roll.push_back(samples);
+                                while pre_roll_len > pre_roll_max_samples {
+                                    if let Some(front) = pre_roll.pop_front() {
+                                        pre_roll_len = pre_roll_len.saturating_sub(front.len());
+                                    } else {
+                                        break;
+                                    }
+                                }
+                                continue;
+                            }
+                            let _ = voice_tx.send(VoiceEvent::BargeIn);
+                            was_playing_tts = false;
+                        }
+                        barge_in_hits = 0;
                         is_speaking = true;
                         for chunk in pre_roll.drain(..) {
                             speech_buffer.extend_from_slice(&chunk);
@@ -821,7 +906,8 @@ pub async fn run_background_voice_listener(
                         }
                     }
                 } else {
-                    if rms < 400.0 {
+                    barge_in_hits = 0;
+                    if !playing && rms < 400.0 {
                         noise_floor = noise_floor * 0.98 + rms * 0.02;
                     }
                     pre_roll_len += samples.len();
@@ -1317,16 +1403,15 @@ async fn transcribe_groq_whisper(
     Ok(val["text"].as_str().unwrap_or("").to_string())
 }
 
-/// Stream a single sentence or reply segment to `audio_tx` as chunks arrive over SSE/HTTP.
+/// Stream a single sentence or reply segment to `audio` as chunks arrive over SSE/HTTP.
 async fn stream_tts_sentence_to_audio(
     text: &str,
     config: &Config,
     cred_manager: &Arc<CredentialManager>,
     voice_tx: Option<&tokio::sync::mpsc::UnboundedSender<VoiceEvent>>,
-    audio_tx: &std::sync::mpsc::Sender<AudioThreadCmd>,
-    cancel: &CancellationToken,
+    audio: GenAudioSender<'_>,
 ) {
-    if cancel.is_cancelled() {
+    if audio.cancel.is_cancelled() {
         return;
     }
 
@@ -1344,9 +1429,7 @@ async fn stream_tts_sentence_to_audio(
     match provider.as_str() {
         "openai" => {
             if let Some(key) = resolve_openai_api_key(cred_manager).await {
-                match stream_openai_tts_pcm(&cleaned, &key, voice_name, tts_model, audio_tx, cancel)
-                    .await
-                {
+                match stream_openai_tts_pcm(&cleaned, &key, voice_name, tts_model, audio).await {
                     Ok(()) => streamed = true,
                     Err(e) => {
                         tracing::warn!("OpenAI TTS failed, trying Edge TTS fallback: {e}");
@@ -1354,10 +1437,10 @@ async fn stream_tts_sentence_to_audio(
                     }
                 }
             }
-            if !streamed && !cancel.is_cancelled() {
+            if !streamed && !audio.cancel.is_cancelled() {
                 match generate_edge_tts(&cleaned, voice_name).await {
                     Ok(bytes) => {
-                        let _ = audio_tx.send(AudioThreadCmd::AppendEncoded(bytes));
+                        audio.send_encoded(bytes);
                         streamed = true;
                     }
                     Err(e) => errors.push(e.to_string()),
@@ -1367,11 +1450,7 @@ async fn stream_tts_sentence_to_audio(
         "antigravity" | "agy" | "google" | "gemini" => {
             let g_keys = resolve_gemini_api_keys(cred_manager).await;
             if !g_keys.is_empty() {
-                match stream_gemini_tts_sse(
-                    &cleaned, &g_keys, voice_name, tts_model, audio_tx, cancel,
-                )
-                .await
-                {
+                match stream_gemini_tts_sse(&cleaned, &g_keys, voice_name, tts_model, audio).await {
                     Ok(()) => streamed = true,
                     Err(e) => {
                         tracing::warn!("Gemini SSE TTS failed, trying Edge TTS fallback: {e}");
@@ -1381,10 +1460,10 @@ async fn stream_tts_sentence_to_audio(
             } else {
                 errors.push("No Gemini API key configured for Gemini TTS".to_string());
             }
-            if !streamed && !cancel.is_cancelled() {
+            if !streamed && !audio.cancel.is_cancelled() {
                 match generate_edge_tts(&cleaned, voice_name).await {
                     Ok(bytes) => {
-                        let _ = audio_tx.send(AudioThreadCmd::AppendEncoded(bytes));
+                        audio.send_encoded(bytes);
                         streamed = true;
                     }
                     Err(e) => errors.push(e.to_string()),
@@ -1394,16 +1473,16 @@ async fn stream_tts_sentence_to_audio(
         _ => {
             let g_keys = resolve_gemini_api_keys(cred_manager).await;
             if !g_keys.is_empty()
-                && stream_gemini_tts_sse(&cleaned, &g_keys, voice_name, tts_model, audio_tx, cancel)
+                && stream_gemini_tts_sse(&cleaned, &g_keys, voice_name, tts_model, audio)
                     .await
                     .is_ok()
             {
                 streamed = true;
             }
-            if !streamed && !cancel.is_cancelled() {
+            if !streamed && !audio.cancel.is_cancelled() {
                 match generate_edge_tts(&cleaned, voice_name).await {
                     Ok(bytes) => {
-                        let _ = audio_tx.send(AudioThreadCmd::AppendEncoded(bytes));
+                        audio.send_encoded(bytes);
                         streamed = true;
                     }
                     Err(e) => errors.push(e.to_string()),
@@ -1412,7 +1491,7 @@ async fn stream_tts_sentence_to_audio(
         }
     }
 
-    if !streamed && !cancel.is_cancelled() {
+    if !streamed && !audio.cancel.is_cancelled() {
         let msg = format!("Voice TTS unavailable: {}", errors.join("; "));
         tracing::warn!("{msg}");
         if let Some(tx) = voice_tx {
@@ -1426,8 +1505,7 @@ async fn stream_openai_tts_pcm(
     api_key: &str,
     voice: &str,
     model: &str,
-    audio_tx: &std::sync::mpsc::Sender<AudioThreadCmd>,
-    cancel: &CancellationToken,
+    audio: GenAudioSender<'_>,
 ) -> Result<(), HarnessError> {
     let client = voice_http_client();
     let openai_voice = match voice {
@@ -1459,7 +1537,7 @@ async fn stream_openai_tts_pcm(
     let mut stream = res.bytes_stream();
     let mut carry: Option<u8> = None;
     while let Some(chunk_res) = stream.next().await {
-        if cancel.is_cancelled() {
+        if audio.cancel.is_cancelled() {
             return Ok(());
         }
         let chunk = chunk_res
@@ -1477,12 +1555,7 @@ async fn stream_openai_tts_pcm(
             .chunks_exact(2)
             .map(|c| i16::from_le_bytes([c[0], c[1]]))
             .collect();
-        if !samples.is_empty() {
-            let _ = audio_tx.send(AudioThreadCmd::AppendPcm {
-                rate: 24_000,
-                samples,
-            });
-        }
+        audio.send_pcm(24_000, samples);
     }
     Ok(())
 }
@@ -1520,8 +1593,7 @@ async fn stream_gemini_tts_sse(
     api_keys: &[String],
     voice: &str,
     model: &str,
-    audio_tx: &std::sync::mpsc::Sender<AudioThreadCmd>,
-    cancel: &CancellationToken,
+    audio: GenAudioSender<'_>,
 ) -> Result<(), HarnessError> {
     let client = voice_http_client();
     let payload = build_gemini_tts_payload(text, voice);
@@ -1541,7 +1613,7 @@ async fn stream_gemini_tts_sse(
     let mut last_err = String::new();
     for m in candidates {
         for api_key in api_keys {
-            if cancel.is_cancelled() {
+            if audio.cancel.is_cancelled() {
                 return Ok(());
             }
             let url = format!(
@@ -1574,7 +1646,7 @@ async fn stream_gemini_tts_sse(
             let mut got_audio = false;
 
             while let Some(chunk_res) = stream.next().await {
-                if cancel.is_cancelled() {
+                if audio.cancel.is_cancelled() {
                     return Ok(());
                 }
                 let Ok(chunk) = chunk_res else {
@@ -1587,18 +1659,18 @@ async fn stream_gemini_tts_sse(
                     let line_str = String::from_utf8_lossy(&raw_line);
                     let trimmed = line_str.trim();
                     if let Some(json_str) = trimmed.strip_prefix("data: ") {
-                        if push_gemini_sse_audio_chunk(json_str, audio_tx) {
+                        if push_gemini_sse_audio_chunk(json_str, audio) {
                             got_audio = true;
                         }
                     }
                 }
             }
 
-            if !line_buf.is_empty() && !cancel.is_cancelled() {
+            if !line_buf.is_empty() && !audio.cancel.is_cancelled() {
                 let line_str = String::from_utf8_lossy(&line_buf);
                 let trimmed = line_str.trim();
                 if let Some(json_str) = trimmed.strip_prefix("data: ") {
-                    if push_gemini_sse_audio_chunk(json_str, audio_tx) {
+                    if push_gemini_sse_audio_chunk(json_str, audio) {
                         got_audio = true;
                     }
                 }
@@ -1615,10 +1687,7 @@ async fn stream_gemini_tts_sse(
     Err(HarnessError::VoiceError(last_err))
 }
 
-fn push_gemini_sse_audio_chunk(
-    json_str: &str,
-    audio_tx: &std::sync::mpsc::Sender<AudioThreadCmd>,
-) -> bool {
+fn push_gemini_sse_audio_chunk(json_str: &str, audio: GenAudioSender<'_>) -> bool {
     let Ok(val) = serde_json::from_str::<serde_json::Value>(json_str) else {
         return false;
     };
@@ -1643,10 +1712,7 @@ fn push_gemini_sse_audio_chunk(
                 .map(|c| i16::from_le_bytes([c[0], c[1]]))
                 .collect();
             if !samples.is_empty() {
-                let _ = audio_tx.send(AudioThreadCmd::AppendPcm {
-                    rate: sample_rate,
-                    samples,
-                });
+                audio.send_pcm(sample_rate, samples);
                 sent_any = true;
             }
         }
@@ -1967,6 +2033,18 @@ mod tests {
             .unwrap();
         let resolved = lookup_plain_api_key("test-voice-provider", &mgr).await;
         assert_eq!(resolved.as_deref(), Some("AIzaTestKey123"));
+    }
+
+    #[test]
+    fn test_voice_speech_queue_interrupt_and_turn_mute() {
+        let queue = VoiceSpeechQueue::new();
+        assert!(!queue.is_turn_muted());
+        queue.set_turn_muted(true);
+        assert!(queue.is_turn_muted());
+        queue.interrupt();
+        assert!(!queue.is_playing().load(Ordering::SeqCst));
+        queue.set_turn_muted(false);
+        assert!(!queue.is_turn_muted());
     }
 
     #[tokio::test]

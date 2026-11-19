@@ -76,7 +76,7 @@ where
         )?;
         let env_info = self.runtime_environment();
         let voice_instruction = if self.config.voice_mode {
-            "\n\nVOICE MODE ACTIVE (CONVERSATIONAL SPOKEN OUTPUT):\n- Voice mode is active for this session.\n- Output a voice-compatible spoken summary that is natural, concise, and pleasant to hear when read aloud by text-to-speech (TTS).\n- Do not include raw Markdown tables, ASCII boxes, ANSI color escapes, code blocks, or unpronounceable formatting in the spoken response. State answers directly in simple, clear sentences."
+            "\n\nVOICE MODE ACTIVE (CONVERSATIONAL SPOKEN OUTPUT):\n- You are in a live, two-way spoken conversation. Speak naturally like a helpful teammate, using contractions and warm, direct phrasing.\n- Keep replies concise and easy to follow by ear (usually 1 to 4 short sentences unless the user asks for more detail), and offer a brief natural follow-up when helpful.\n- Never include Markdown tables, bulleted syntax, ASCII boxes, ANSI color escapes, raw URLs, or code blocks in your spoken reply."
         } else {
             ""
         };
