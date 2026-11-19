@@ -1518,6 +1518,11 @@ fn open_settings_menu(env: &Env<'_>, st: &mut TuiState, selected: usize) {
         harness_core::MemoryMode::Background => "Background saver",
     };
     let approval_model = format_approval_model_badge(env, st);
+    let voice_label = if config.voice.enabled {
+        format!("on ({})", config.voice.provider)
+    } else {
+        "off".to_string()
+    };
     st.modal = ActiveModal::SelectModal {
         title: "CLI Settings".to_string(),
         items: vec![
@@ -1531,9 +1536,10 @@ fn open_settings_menu(env: &Env<'_>, st: &mut TuiState, selected: usize) {
             format!("Notes · {}", feature_status_badge(env, Feature::Notes)),
             format!("Memory saver · {saver}"),
             format!("Approval model · {approval_model}"),
+            format!("Voice mode · {voice_label}"),
             "View current settings summary".to_string(),
         ],
-        selected: selected.min(10),
+        selected: selected.min(11),
         action: SelectAction::SettingsMain,
     };
 }
@@ -1710,6 +1716,27 @@ pub async fn toggle_settings_main_item(env: &mut Env<'_>, st: &mut TuiState, cho
                     .set_transient_error(Some(format!("Approval model reset failed: {err}")));
                 open_settings_menu(env, st, 9);
             }
+        }
+        10 => {
+            let next = if env.config.voice.enabled {
+                "voice off"
+            } else {
+                "voice on"
+            };
+            if let Err(error) = handle_settings_command(
+                None,
+                &env.ui,
+                env.config,
+                &env.display_settings,
+                &mut st.process_expanded,
+                Some(next),
+            )
+            .await
+            {
+                env.ui
+                    .set_transient_error(Some(format!("Voice settings failed: {error}")));
+            }
+            open_settings_menu(env, st, 10);
         }
         _ => {
             open_settings_menu(env, st, choice);
@@ -2416,11 +2443,73 @@ pub async fn run_select_action(
             }
             2..=8 => toggle_settings_main_item(env, st, choice).await,
             9 => open_provider_picker_for(env, st, ModelTarget::Approval).await,
+            10 => {
+                let items = vec![
+                    if env.config.voice.enabled {
+                        "Disable Voice Mode".to_string()
+                    } else {
+                        "Enable Voice Mode".to_string()
+                    },
+                    "Provider: Antigravity (Google Live Voice)".to_string(),
+                    "Provider: OpenAI (Whisper STT + TTS)".to_string(),
+                    "Provider: Groq (Whisper STT + Edge TTS)".to_string(),
+                    format!(
+                        "Toggle Barge-in Interrupt · [{}]",
+                        if env.config.voice.enable_barge_in {
+                            "Enabled"
+                        } else {
+                            "Disabled"
+                        }
+                    ),
+                ];
+                st.modal = ActiveModal::SelectModal {
+                    title: "Voice Mode Settings".to_string(),
+                    items,
+                    selected: 0,
+                    action: SelectAction::SettingsVoice,
+                };
+            }
             _ => {
                 let summary = format_settings_summary(env.config, Some(env.feature_toggles));
                 show_text_modal(st, "Current CLI Settings", &summary);
             }
         },
+        SelectAction::SettingsVoice => {
+            let arg = match choice {
+                0 => {
+                    if env.config.voice.enabled {
+                        "voice off"
+                    } else {
+                        "voice on"
+                    }
+                }
+                1 => "voice antigravity",
+                2 => "voice openai",
+                3 => "voice groq",
+                4 => {
+                    if env.config.voice.enable_barge_in {
+                        "voice barge off"
+                    } else {
+                        "voice barge on"
+                    }
+                }
+                _ => "voice show",
+            };
+            if let Err(error) = handle_settings_command(
+                None,
+                &env.ui,
+                env.config,
+                &env.display_settings,
+                &mut st.process_expanded,
+                Some(arg),
+            )
+            .await
+            {
+                env.ui
+                    .set_transient_error(Some(format!("Settings failed: {error}")));
+            }
+            open_settings_menu(env, st, 10);
+        }
         SelectAction::SettingsTheme => {
             let arg = if choice == 1 {
                 "theme light"

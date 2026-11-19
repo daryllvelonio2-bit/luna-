@@ -77,6 +77,17 @@ struct Cli {
     command: Option<Commands>,
 }
 
+#[derive(Subcommand, Debug, Clone, PartialEq)]
+pub enum VoiceSubcommand {
+    /// Configure hands-free voice interface settings (provider, wake word, models, threshold)
+    #[command(name = "setup", alias = "config", alias = "configure")]
+    Setup {
+        /// Optional direct value to set (e.g. "antigravity", "openai", "groq", "custom", "off")
+        #[arg(value_name = "VALUE")]
+        value: Option<String>,
+    },
+}
+
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// Interactive chat session with Luna agent
@@ -250,6 +261,9 @@ enum Commands {
     },
     /// Start hands-free voice interface with wake word "Luna"
     Voice {
+        /// Subcommand (e.g. `setup` to configure voice settings)
+        #[command(subcommand)]
+        subcommand: Option<VoiceSubcommand>,
         /// Provider id; without it, `model.provider` from the config file
         #[arg(short, long)]
         provider: Option<String>,
@@ -689,8 +703,12 @@ async fn dispatch_command(
             run_interactive_chat(config, cred_manager, discovery, selection, explicit_model)
                 .await?;
         }
-        Some(Commands::Voice { .. }) => {
-            run_voice_loop(config, cred_manager, discovery).await?;
+        Some(Commands::Voice { subcommand, .. }) => {
+            if let Some(VoiceSubcommand::Setup { value }) = subcommand {
+                setup_voice(layers, value.clone())?;
+            } else {
+                run_voice_loop(config, cred_manager, discovery).await?;
+            }
         }
         Some(Commands::Hooks { json }) => {
             commands::hooks::run_hooks(config, commands::hooks::HooksOptions { json })?;
@@ -1386,6 +1404,31 @@ mod goal_cli_tests {
                 assert!(json);
                 assert!(yes);
                 assert!(strict);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn voice_subcommand_parses_setup_and_options() {
+        let cli = Cli::try_parse_from(["luna", "voice", "setup", "antigravity"])
+            .expect("luna voice setup parses");
+        match cli.command {
+            Some(Commands::Voice { subcommand, .. }) => {
+                assert_eq!(
+                    subcommand,
+                    Some(VoiceSubcommand::Setup {
+                        value: Some("antigravity".to_string())
+                    })
+                );
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let cli_plain = Cli::try_parse_from(["luna", "voice"]).expect("luna voice parses");
+        match cli_plain.command {
+            Some(Commands::Voice { subcommand, .. }) => {
+                assert_eq!(subcommand, None);
             }
             other => panic!("unexpected command: {other:?}"),
         }

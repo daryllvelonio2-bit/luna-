@@ -43,13 +43,38 @@ pub(crate) async fn handle_settings_command(
                 apply_theme(theme, ui, config, display_settings)?;
                 return Ok(());
             }
+            ["voice" | "audio" | "talk", val] => {
+                apply_voice_setting(val, ui, config)?;
+                return Ok(());
+            }
+            ["voice" | "audio" | "talk", sub, val] => {
+                apply_voice_sub_setting(sub, val, ui, config)?;
+                return Ok(());
+            }
+            ["voice" | "audio" | "talk"] => {
+                if let Some(rx) = key_rx {
+                    run_voice_wizard(rx, ui, config).await?;
+                } else {
+                    let status = if config.voice.enabled {
+                        format!("enabled ({})", config.voice.provider)
+                    } else {
+                        "disabled".to_string()
+                    };
+                    ui.emit_above(&format!(
+                        "{} Voice mode is currently: {}",
+                        "•".cyan(),
+                        status.bold()
+                    ));
+                }
+                return Ok(());
+            }
             ["show"] => {
                 show_settings(ui, config);
                 return Ok(());
             }
             _ => {
                 ui.emit_above(&format!(
-                    "{} Unknown settings option: {}\nUsage: /settings [theme <dark|light>] [limit <1-10|all>] [collapse <on|off>] [thinking <on|off>] [show]",
+                    "{} Unknown settings option: {}\nUsage: /settings [theme <dark|light>] [limit <1-10|all>] [collapse <on|off>] [thinking <on|off>] [voice <on|off|antigravity|openai|groq>] [show]",
                     "•".cyan(),
                     arg_str
                 ));
@@ -125,13 +150,22 @@ async fn run_settings_wizard(
         ThemeMode::Dark => "Dark mode (Default)",
         ThemeMode::Light => "Light mode",
     };
+    let current_voice_desc = if config.voice.enabled {
+        format!(
+            "Enabled ({} · {})",
+            config.voice.provider, config.voice.wake_word
+        )
+    } else {
+        "Disabled".to_string()
+    };
 
     let main_items = vec![
         format!("1. Display Block Limit · [{current_limit_desc}]"),
         format!("2. Auto-collapse on Turn Finish · [{current_collapse_desc}]"),
         format!("3. Auto-collapse Thinking During Tool Calls · [{current_thinking_desc}]"),
         format!("4. Theme · [{current_theme_desc}]"),
-        "5. View Current Settings Summary".to_string(),
+        format!("5. Voice Mode · [{current_voice_desc}]"),
+        "6. View Current Settings Summary".to_string(),
     ];
 
     let choice = select_from_rx(rx, ui, "CLI Settings", &main_items, 0, false, false).await;
@@ -238,11 +272,166 @@ async fn run_settings_wizard(
             }
         }
         Some(4) => {
+            run_voice_wizard(rx, ui, config).await?;
+        }
+        Some(5) => {
             show_settings(ui, config);
         }
         _ => {}
     }
 
+    Ok(())
+}
+
+async fn run_voice_wizard(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppKey>,
+    ui: &ChatUi,
+    config: &mut Config,
+) -> Result<(), HarnessError> {
+    let current_status = if config.voice.enabled {
+        format!("Enabled ({})", config.voice.provider)
+    } else {
+        "Disabled".to_string()
+    };
+    let voice_items = vec![
+        format!("Toggle Voice Mode · [{current_status}]"),
+        "Provider: Antigravity (Google Live Voice)".to_string(),
+        "Provider: OpenAI (Whisper STT + TTS)".to_string(),
+        "Provider: Groq (Whisper STT + Edge TTS)".to_string(),
+        format!(
+            "Barge-in Interrupt · [{}]",
+            if config.voice.enable_barge_in {
+                "Enabled"
+            } else {
+                "Disabled"
+            }
+        ),
+    ];
+    let choice = select_from_rx(rx, ui, "Voice Settings", &voice_items, 0, true, false).await;
+    match choice {
+        Some(0) => {
+            let next = if config.voice.enabled { "off" } else { "on" };
+            apply_voice_setting(next, ui, config)?;
+        }
+        Some(1) => apply_voice_setting("antigravity", ui, config)?,
+        Some(2) => apply_voice_setting("openai", ui, config)?,
+        Some(3) => apply_voice_setting("groq", ui, config)?,
+        Some(4) => {
+            let next = if config.voice.enable_barge_in {
+                "off"
+            } else {
+                "on"
+            };
+            apply_voice_sub_setting("barge", next, ui, config)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+pub(crate) fn apply_voice_setting(
+    val: &str,
+    ui: &ChatUi,
+    config: &mut Config,
+) -> Result<(), HarnessError> {
+    let layers = harness_core::config::process_layers(crate::commands::config::catalog_defaults())?;
+    let (enabled, provider) = match val.to_ascii_lowercase().as_str() {
+        "off" | "false" | "disable" | "disabled" | "0" | "none" => (false, None),
+        "on" | "true" | "enable" | "enabled" | "1" => (true, None),
+        "antigravity" | "agy" | "google" => (true, Some("antigravity")),
+        "openai" | "whisper" => (true, Some("openai")),
+        "groq" | "edge" => (true, Some("groq")),
+        "custom" => (true, Some("custom")),
+        other => {
+            return Err(HarnessError::ConfigurationError(format!(
+                "unknown voice option: '{other}'. Expected 'on', 'off', 'antigravity', 'openai', or 'groq'."
+            )));
+        }
+    };
+
+    config.voice.enabled = enabled;
+    let _ = harness_core::config::set_in_file(
+        &layers,
+        "voice.enabled",
+        if enabled { "true" } else { "false" },
+    );
+
+    if let Some(p) = provider {
+        config.voice.provider = p.to_string();
+        let _ = harness_core::config::set_in_file(&layers, "voice.provider", p);
+    }
+
+    let desc = if enabled {
+        format!("Enabled ({})", config.voice.provider)
+    } else {
+        "Disabled".to_string()
+    };
+
+    ui.emit_above(&format!(
+        "{} Voice mode set to: {} (saved to config)",
+        "✔".green().bold(),
+        desc.bold()
+    ));
+
+    Ok(())
+}
+
+pub(crate) fn apply_voice_sub_setting(
+    sub: &str,
+    val: &str,
+    ui: &ChatUi,
+    config: &mut Config,
+) -> Result<(), HarnessError> {
+    let layers = harness_core::config::process_layers(crate::commands::config::catalog_defaults())?;
+    match sub.to_ascii_lowercase().as_str() {
+        "wake" | "wakeword" | "wake-word" => {
+            config.voice.wake_word = val.to_string();
+            let _ = harness_core::config::set_in_file(&layers, "voice.wake_word", val);
+            ui.emit_above(&format!(
+                "{} Voice wake word set to: '{}' (saved to config)",
+                "✔".green().bold(),
+                val.bold()
+            ));
+        }
+        "barge" | "barge-in" | "bargein" => {
+            let enabled = parse_bool(val)?;
+            config.voice.enable_barge_in = enabled;
+            let _ = harness_core::config::set_in_file(
+                &layers,
+                "voice.enable_barge_in",
+                if enabled { "true" } else { "false" },
+            );
+            ui.emit_above(&format!(
+                "{} Voice barge-in interrupt set to: {} (saved to config)",
+                "✔".green().bold(),
+                if enabled {
+                    "Enabled".bold()
+                } else {
+                    "Disabled".bold()
+                }
+            ));
+        }
+        "provider" => {
+            apply_voice_setting(val, ui, config)?;
+        }
+        "threshold" | "silence" => {
+            let threshold: u64 = val.parse().map_err(|_| {
+                HarnessError::ConfigurationError(format!("invalid threshold ms: '{val}'"))
+            })?;
+            config.voice.silence_threshold_ms = threshold;
+            let _ = harness_core::config::set_in_file(&layers, "voice.silence_threshold_ms", val);
+            ui.emit_above(&format!(
+                "{} Voice silence threshold set to: {}ms (saved to config)",
+                "✔".green().bold(),
+                threshold
+            ));
+        }
+        other => {
+            return Err(HarnessError::ConfigurationError(format!(
+                "unknown voice setting '{other}'. Supported: provider, wake, barge, threshold"
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -419,6 +608,20 @@ pub(crate) fn format_settings_summary(
         harness_core::MemoryMode::Session => "Session writer (saves mid-turn)",
         harness_core::MemoryMode::Background => "Background saver (distills after reply)",
     };
+    let voice_str = if config.voice.enabled {
+        format!(
+            "Enabled (provider: {}, wake word: '{}', barge-in: {})",
+            config.voice.provider,
+            config.voice.wake_word,
+            if config.voice.enable_barge_in {
+                "on"
+            } else {
+                "off"
+            }
+        )
+    } else {
+        "Disabled".to_string()
+    };
     let approval_model_str = match (
         config
             .tools
@@ -477,7 +680,7 @@ pub(crate) fn format_settings_summary(
     };
 
     format!(
-        "  {:<26} {}\n  {:<26} {}\n  {:<26} {}\n  {:<26} {}\n  {:<26} {}\n  {:<26} {}\n  {:<26} {}\n  {:<26} {}\n  {:<26} {}\n  {:<26} {}\n  {:<26} {}",
+        "  {:<26} {}\n  {:<26} {}\n  {:<26} {}\n  {:<26} {}\n  {:<26} {}\n  {:<26} {}\n  {:<26} {}\n  {:<26} {}\n  {:<26} {}\n  {:<26} {}\n  {:<26} {}\n  {:<26} {}",
         "Theme:",
         theme_str,
         "Display Block Limit:",
@@ -490,6 +693,8 @@ pub(crate) fn format_settings_summary(
         compact_str,
         "Memory Saver Mode:",
         saver_str,
+        "Voice Mode:",
+        voice_str,
         "Approval Model:",
         approval_model_str,
         "MCP:",
@@ -522,5 +727,18 @@ mod tests {
         assert!(format_settings_summary(&cfg, None).contains("Dark mode (default)"));
         cfg.display.theme = ThemeMode::Light;
         assert!(format_settings_summary(&cfg, None).contains("Light mode"));
+    }
+
+    #[test]
+    fn format_settings_summary_reports_voice() {
+        let mut cfg = Config::default();
+        assert!(format_settings_summary(&cfg, None).contains("Disabled"));
+        cfg.voice.enabled = true;
+        cfg.voice.provider = "antigravity".to_string();
+        cfg.voice.wake_word = "Luna".to_string();
+        let summary = format_settings_summary(&cfg, None);
+        assert!(summary.contains("Voice Mode:"));
+        assert!(summary.contains("antigravity"));
+        assert!(summary.contains("Luna"));
     }
 }

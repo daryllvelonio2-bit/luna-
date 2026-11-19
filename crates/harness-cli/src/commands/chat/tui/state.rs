@@ -56,6 +56,7 @@ pub enum SelectAction {
     SettingsMain,
     SettingsBlockLimit,
     SettingsTheme,
+    SettingsVoice,
     DirScope {
         path: String,
     },
