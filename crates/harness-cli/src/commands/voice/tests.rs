@@ -194,3 +194,36 @@ async fn live_voice_pipeline_diagnostic() {
     let json_str = serde_json::to_string(&payload).unwrap();
     assert!(json_str.contains("Aoede"));
 }
+
+#[test]
+fn test_micwire_frame_and_hello_roundtrip() {
+    use super::micserve::*;
+    let hello = speaker_hello(16000);
+    assert_eq!(hello, "SPEAKER rate=16000\n");
+    assert_eq!(parse_speaker_hello(&hello), Some(16000));
+    assert_eq!(parse_speaker_hello("SPEAKER rate=24000\n"), Some(24000));
+    assert_eq!(parse_speaker_hello("INVALID\n"), None);
+
+    let payload = b"voice-audio-pcm-data";
+    let mut encoded = Vec::new();
+    write_frame(&mut encoded, payload).unwrap();
+    assert_eq!(encoded.len(), 4 + payload.len());
+
+    let mut cursor = std::io::Cursor::new(encoded);
+    let decoded = read_frame(&mut cursor).unwrap();
+    assert_eq!(decoded, payload);
+}
+
+#[tokio::test]
+async fn test_strict_voice_routing_zero_fallbacks() {
+    let mut config = Config::default();
+    config.voice.provider = "nonexistent_provider".to_string();
+    let cred_manager = Arc::new(CredentialManager::new(None).unwrap());
+
+    // Fails directly with provider-specific error instead of falling back
+    let err = transcribe_audio_bytes(&[0u8; 100], &config, &cred_manager)
+        .await
+        .unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("Unsupported voice provider 'nonexistent_provider'"));
+}

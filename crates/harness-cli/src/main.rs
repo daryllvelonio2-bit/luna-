@@ -86,6 +86,13 @@ pub enum VoiceSubcommand {
         #[arg(value_name = "VALUE")]
         value: Option<String>,
     },
+    /// Serve this machine's microphone to another host or session over micwire socket
+    #[command(name = "mic-serve", alias = "serve")]
+    MicServe {
+        /// Address to listen on; keep it on loopback (default 127.0.0.1:4713)
+        #[arg(long, default_value = "127.0.0.1:4713")]
+        addr: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -273,6 +280,13 @@ enum Commands {
         /// Approve every mutating tool call without asking (same as `tools.approval=allow`)
         #[arg(long)]
         yes: bool,
+    },
+    /// Serve this machine's microphone to a CLI on another host
+    #[command(name = "mic-serve")]
+    MicServe {
+        /// Address to listen on; keep it on loopback (default 127.0.0.1:4713)
+        #[arg(long, default_value = "127.0.0.1:4713")]
+        addr: String,
     },
     /// Run agent supervised with auto-rebuild and restart
     Supervisor {
@@ -703,11 +717,36 @@ async fn dispatch_command(
             run_interactive_chat(config, cred_manager, discovery, selection, explicit_model)
                 .await?;
         }
+        Some(Commands::MicServe { addr }) => {
+            let cancel = tokio_util::sync::CancellationToken::new();
+            tokio::spawn({
+                let cancel = cancel.clone();
+                async move {
+                    tokio::signal::ctrl_c().await.ok();
+                    cancel.cancel();
+                }
+            });
+            commands::voice::micserve::run_mic_serve(&addr, cancel).await?;
+        }
         Some(Commands::Voice { subcommand, .. }) => {
-            if let Some(VoiceSubcommand::Setup { value }) = subcommand {
-                setup_voice(layers, value.clone())?;
-            } else {
-                run_voice_loop(config, cred_manager, discovery).await?;
+            match subcommand {
+                Some(VoiceSubcommand::Setup { value }) => {
+                    setup_voice(layers, value.clone())?;
+                }
+                Some(VoiceSubcommand::MicServe { addr }) => {
+                    let cancel = tokio_util::sync::CancellationToken::new();
+                    tokio::spawn({
+                        let cancel = cancel.clone();
+                        async move {
+                            tokio::signal::ctrl_c().await.ok();
+                            cancel.cancel();
+                        }
+                    });
+                    commands::voice::micserve::run_mic_serve(&addr, cancel).await?;
+                }
+                None => {
+                    run_voice_loop(config, cred_manager, discovery).await?;
+                }
             }
         }
         Some(Commands::Hooks { json }) => {

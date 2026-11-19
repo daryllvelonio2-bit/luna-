@@ -9,6 +9,7 @@ pub struct VoiceCatalogEntry {
     pub description: &'static str,
 }
 
+#[allow(dead_code)]
 pub fn is_openai_voice(voice: &str) -> bool {
     matches!(
         voice.trim(),

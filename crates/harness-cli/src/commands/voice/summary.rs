@@ -279,31 +279,15 @@ pub async fn generate_fast_voice_text(
         }
     };
 
-    let mut candidates: Vec<(String, String)> = Vec::new();
-    let active_prov = config.model.provider.trim().to_ascii_lowercase();
-    if !active_prov.is_empty() {
-        candidates.push((
-            active_prov.clone(),
-            fast_model_for(&active_prov, &config.model.default),
-        ));
-    }
-    let voice_prov = config.voice.provider.trim().to_ascii_lowercase();
-    if !voice_prov.is_empty() && voice_prov != "none" && voice_prov != active_prov {
-        candidates.push((
-            voice_prov.clone(),
-            fast_model_for(&voice_prov, &config.model.default),
-        ));
-    }
-    for (prov, model) in [
-        ("groq", "llama-3.1-8b-instant"),
-        ("antigravity", "gemini-3-flash"),
-        ("openai", "gpt-4o-mini"),
-        ("gemini", "gemini-3-flash-preview"),
-    ] {
-        if !candidates.iter().any(|(p, _)| p == prov) {
-            candidates.push((prov.to_string(), model.to_string()));
-        }
-    }
+    let target_prov = if !config.voice.provider.trim().is_empty()
+        && config.voice.provider.trim().to_ascii_lowercase() != "none"
+    {
+        config.voice.provider.trim().to_ascii_lowercase()
+    } else {
+        config.model.provider.trim().to_ascii_lowercase()
+    };
+    let target_model = fast_model_for(&target_prov, &config.model.default);
+    let candidates = vec![(target_prov, target_model)];
 
     let messages = vec![Message::system(system), Message::user(user_prompt)];
     let mut last_err = String::new();

@@ -1,4 +1,5 @@
-//! Speech-to-text transcription engine (Groq, Antigravity, Gemini, OpenAI Whisper).
+//! Speech-to-text transcription engine (Antigravity, Gemini, Groq, OpenAI Whisper).
+//! Strict credential isolation with zero fallbacks between providers.
 
 use std::sync::Arc;
 
@@ -52,19 +53,7 @@ pub async fn lookup_raw_credential(
 
 pub async fn resolve_gemini_api_keys(cred_manager: &Arc<CredentialManager>) -> Vec<String> {
     let mut keys = lookup_plain_api_keys("gemini", cred_manager).await;
-    for prov in ["google", "antigravity", "agy"] {
-        for k in lookup_plain_api_keys(prov, cred_manager).await {
-            if !keys.contains(&k) {
-                keys.push(k);
-            }
-        }
-    }
-    for env_name in [
-        "GEMINI_API_KEY",
-        "GOOGLE_API_KEY",
-        "ANTIGRAVITY_API_KEY",
-        "AGY_API_KEY",
-    ] {
+    for env_name in ["GEMINI_API_KEY", "GOOGLE_API_KEY"] {
         if let Ok(k) = std::env::var(env_name) {
             let trimmed = k.trim();
             if !trimmed.is_empty() && !keys.iter().any(|x| x == trimmed) {
@@ -75,6 +64,7 @@ pub async fn resolve_gemini_api_keys(cred_manager: &Arc<CredentialManager>) -> V
     keys
 }
 
+#[allow(dead_code)]
 pub async fn resolve_gemini_api_key(cred_manager: &Arc<CredentialManager>) -> Option<String> {
     resolve_gemini_api_keys(cred_manager)
         .await
@@ -100,7 +90,7 @@ pub async fn resolve_openai_api_key(cred_manager: &Arc<CredentialManager>) -> Op
         .filter(|s| !s.trim().is_empty())
 }
 
-/// Transcribe recorded audio bytes into text with ultra-low-latency routing + Antigravity/Gemini/Groq fallback.
+/// Transcribe recorded audio bytes into text with strict provider routing (zero fallbacks).
 pub async fn transcribe_audio_bytes(
     wav_bytes: &[u8],
     config: &Config,
@@ -108,93 +98,39 @@ pub async fn transcribe_audio_bytes(
 ) -> Result<String, HarnessError> {
     let provider = config.voice.provider.to_ascii_lowercase();
     let stt_model = config.voice.stt_model.trim();
-    let mut errors: Vec<String> = Vec::new();
 
     match provider.as_str() {
+        "antigravity" | "agy" => {
+            transcribe_antigravity_audio(wav_bytes, cred_manager, stt_model).await
+        }
+        "gemini" => {
+            let g_keys = resolve_gemini_api_keys(cred_manager).await;
+            if g_keys.is_empty() {
+                return Err(HarnessError::VoiceError(
+                    "No Gemini API keys found for voice STT (check `luna auth list`)".into(),
+                ));
+            }
+            transcribe_gemini_audio_with_keys(wav_bytes, &g_keys, stt_model).await
+        }
         "groq" => {
-            if let Some(key) = resolve_groq_api_key(cred_manager).await {
-                match transcribe_groq_whisper(wav_bytes, &key, stt_model).await {
-                    Ok(t) => return Ok(t),
-                    Err(e) => errors.push(format!("groq: {e}")),
-                }
-            } else {
-                errors.push("groq: no API key configured".to_string());
-            }
-            if let Ok(t) = transcribe_antigravity_audio(wav_bytes, cred_manager, "").await {
-                return Ok(t);
-            }
-            if let Some(key) = resolve_gemini_api_key(cred_manager).await {
-                let _ = key;
-                let g_keys = resolve_gemini_api_keys(cred_manager).await;
-                if let Ok(t) = transcribe_gemini_audio_with_keys(wav_bytes, &g_keys, "").await {
-                    return Ok(t);
-                }
-            }
+            let key = resolve_groq_api_key(cred_manager).await.ok_or_else(|| {
+                HarnessError::VoiceError(
+                    "No Groq API key found for voice STT (check `luna auth list`)".into(),
+                )
+            })?;
+            transcribe_groq_whisper(wav_bytes, &key, stt_model).await
         }
         "openai" => {
-            if let Some(key) = resolve_openai_api_key(cred_manager).await {
-                match transcribe_openai_whisper(wav_bytes, &key, stt_model).await {
-                    Ok(t) => return Ok(t),
-                    Err(e) => errors.push(format!("openai: {e}")),
-                }
-            } else {
-                errors.push("openai: no API key configured".to_string());
-            }
-            if let Some(key) = resolve_groq_api_key(cred_manager).await {
-                if let Ok(t) = transcribe_groq_whisper(wav_bytes, &key, "").await {
-                    return Ok(t);
-                }
-            }
+            let key = resolve_openai_api_key(cred_manager).await.ok_or_else(|| {
+                HarnessError::VoiceError(
+                    "No OpenAI API key found for voice STT (check `luna auth list`)".into(),
+                )
+            })?;
+            transcribe_openai_whisper(wav_bytes, &key, stt_model).await
         }
-        _ => {
-            if stt_model.is_empty() {
-                if let Some(key) = resolve_groq_api_key(cred_manager).await {
-                    match transcribe_groq_whisper(wav_bytes, &key, "").await {
-                        Ok(t) => return Ok(t),
-                        Err(e) => errors.push(format!("groq: {e}")),
-                    }
-                }
-            }
-
-            match transcribe_antigravity_audio(wav_bytes, cred_manager, stt_model).await {
-                Ok(t) => return Ok(t),
-                Err(e) => errors.push(format!("antigravity: {e}")),
-            }
-
-            let g_keys = resolve_gemini_api_keys(cred_manager).await;
-            if !g_keys.is_empty() {
-                match transcribe_gemini_audio_with_keys(wav_bytes, &g_keys, stt_model).await {
-                    Ok(t) => return Ok(t),
-                    Err(e) => errors.push(format!("gemini: {e}")),
-                }
-            } else {
-                errors.push("gemini: no Gemini API key configured".to_string());
-            }
-
-            if !stt_model.is_empty() {
-                if let Some(key) = resolve_groq_api_key(cred_manager).await {
-                    match transcribe_groq_whisper(wav_bytes, &key, "").await {
-                        Ok(t) => return Ok(t),
-                        Err(e) => errors.push(format!("groq fallback: {e}")),
-                    }
-                }
-            }
-            if let Some(key) = resolve_openai_api_key(cred_manager).await {
-                match transcribe_openai_whisper(wav_bytes, &key, "").await {
-                    Ok(t) => return Ok(t),
-                    Err(e) => errors.push(format!("openai fallback: {e}")),
-                }
-            }
-        }
-    }
-
-    if errors.is_empty() {
-        Err(HarnessError::VoiceError(
-            "No STT credentials available (configure groq, antigravity, gemini, or openai key)"
-                .into(),
-        ))
-    } else {
-        Err(HarnessError::VoiceError(errors.join("; ")))
+        other => Err(HarnessError::VoiceError(format!(
+            "Unsupported voice provider '{other}' for STT (use 'antigravity', 'gemini', 'groq', or 'openai')"
+        ))),
     }
 }
 
@@ -212,7 +148,7 @@ pub async fn transcribe_antigravity_audio(
             })?,
     };
 
-    let (bearer_token, project_opt) =
+    let (mut bearer_token, project_opt) =
         harness_providers::antigravity::extract_bearer_token(&raw_secret);
     let project =
         project_opt.unwrap_or_else(|| harness_providers::antigravity::DEFAULT_PROJECT.to_string());
@@ -221,19 +157,15 @@ pub async fn transcribe_antigravity_audio(
     use base64::Engine;
     let b64 = base64::engine::general_purpose::STANDARD.encode(wav_bytes);
 
-    let candidates: Vec<&str> = if !model.is_empty() {
-        vec![model]
+    let chosen_model = if !model.is_empty() {
+        model
     } else {
-        vec![
-            "gemini-3.1-flash-lite",
-            "gemini-3-flash-preview",
-            "gemini-3.8-flash",
-        ]
+        "gemini-2.5-flash"
     };
 
     let payload = serde_json::json!({
         "project": project,
-        "model": candidates[0],
+        "model": chosen_model,
         "request": {
             "contents": [{
                 "parts": [
@@ -251,7 +183,7 @@ pub async fn transcribe_antigravity_audio(
         }
     });
 
-    let res = client
+    let mut res = client
         .post(harness_providers::antigravity::CODE_ASSIST_ENDPOINT)
         .header(
             reqwest::header::AUTHORIZATION,
@@ -265,6 +197,36 @@ pub async fn transcribe_antigravity_audio(
         .send()
         .await
         .map_err(|e| HarnessError::VoiceError(format!("Antigravity STT request failed: {e}")))?;
+
+    // Handle ordinary token expiry (401) by refreshing token in place and retrying once
+    if res.status().as_u16() == 401 {
+        if let Ok(new_token) =
+            harness_providers::antigravity::refresh_and_store_antigravity_credential(
+                client,
+                &raw_secret,
+                Some(cred_manager),
+            )
+            .await
+        {
+            bearer_token = new_token;
+            res = client
+                .post(harness_providers::antigravity::CODE_ASSIST_ENDPOINT)
+                .header(
+                    reqwest::header::AUTHORIZATION,
+                    format!("Bearer {bearer_token}"),
+                )
+                .header(
+                    reqwest::header::USER_AGENT,
+                    harness_providers::antigravity::user_agent(),
+                )
+                .json(&payload)
+                .send()
+                .await
+                .map_err(|e| {
+                    HarnessError::VoiceError(format!("Antigravity STT retry request failed: {e}"))
+                })?;
+        }
+    }
 
     if !res.status().is_success() {
         let status = res.status();
@@ -310,9 +272,9 @@ pub async fn transcribe_gemini_audio_with_keys(
         vec![model]
     } else {
         vec![
-            "gemini-3.1-flash-lite",
-            "gemini-3-flash-preview",
-            "gemini-3.8-flash",
+            "gemini-2.5-flash",
+            "gemini-2.0-flash",
+            "gemini-1.5-flash",
         ]
     };
 
@@ -338,78 +300,48 @@ pub async fn transcribe_gemini_audio_with_keys(
             let url = format!(
                 "https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={api_key}"
             );
-            match client.post(&url).json(&payload).send().await {
-                Ok(res) if res.status().is_success() => {
-                    let val: serde_json::Value = res.json().await.unwrap_or_default();
-                    let txt = val["candidates"][0]["content"]["parts"][0]["text"]
-                        .as_str()
-                        .unwrap_or("")
-                        .trim()
-                        .to_string();
-                    return Ok(txt);
-                }
-                Ok(res) => {
-                    let status = res.status();
-                    let body = res.text().await.unwrap_or_default();
-                    last_err = format!(
-                        "{m} HTTP {status}: {}",
-                        body.chars().take(160).collect::<String>()
-                    );
-                    if status.as_u16() == 429 || status.as_u16() == 403 {
-                        continue;
-                    }
-                    break;
-                }
+            let res = match client.post(&url).json(&payload).send().await {
+                Ok(r) => r,
                 Err(e) => {
-                    last_err = format!("{m}: {e}");
-                    break;
+                    last_err = format!("Gemini STT ({m}) request failed: {e}");
+                    continue;
+                }
+            };
+
+            if !res.status().is_success() {
+                let status = res.status();
+                let err_text = res.text().await.unwrap_or_default();
+                last_err = format!(
+                    "Gemini STT ({m}) HTTP {status}: {}",
+                    err_text.chars().take(160).collect::<String>()
+                );
+                if status.as_u16() == 429 || status.as_u16() == 403 || status.as_u16() == 401 {
+                    continue;
+                }
+                break;
+            }
+
+            let val: serde_json::Value = match res.json().await {
+                Ok(v) => v,
+                Err(e) => {
+                    last_err = format!("Gemini STT ({m}) JSON parse failed: {e}");
+                    continue;
+                }
+            };
+
+            let mut transcript = String::new();
+            if let Some(parts) = val["candidates"][0]["content"]["parts"].as_array() {
+                for p in parts {
+                    if let Some(t) = p["text"].as_str() {
+                        transcript.push_str(t);
+                    }
                 }
             }
+            return Ok(transcript.trim().to_string());
         }
     }
 
     Err(HarnessError::VoiceError(last_err))
-}
-
-pub async fn transcribe_openai_whisper(
-    wav_bytes: &[u8],
-    api_key: &str,
-    model: &str,
-) -> Result<String, HarnessError> {
-    let client = voice_http_client();
-    let part = reqwest::multipart::Part::bytes(wav_bytes.to_vec())
-        .file_name("audio.wav")
-        .mime_str("audio/wav")
-        .map_err(|e| HarnessError::VoiceError(format!("Failed to create multipart: {e}")))?;
-
-    let form = reqwest::multipart::Form::new().part("file", part).text(
-        "model",
-        if model.is_empty() {
-            "whisper-1".to_string()
-        } else {
-            model.to_string()
-        },
-    );
-
-    let res = client
-        .post("https://api.openai.com/v1/audio/transcriptions")
-        .bearer_auth(api_key)
-        .multipart(form)
-        .send()
-        .await
-        .map_err(|e| HarnessError::VoiceError(format!("Whisper request failed: {e}")))?;
-
-    if !res.status().is_success() {
-        let status = res.status();
-        let body = res.text().await.unwrap_or_default();
-        return Err(HarnessError::VoiceError(format!(
-            "OpenAI Whisper HTTP {status}: {}",
-            body.chars().take(160).collect::<String>()
-        )));
-    }
-
-    let val: serde_json::Value = res.json().await.unwrap_or_default();
-    Ok(val["text"].as_str().unwrap_or("").to_string())
 }
 
 pub async fn transcribe_groq_whisper(
@@ -418,19 +350,21 @@ pub async fn transcribe_groq_whisper(
     model: &str,
 ) -> Result<String, HarnessError> {
     let client = voice_http_client();
+    let chosen_model = if model.is_empty() {
+        "whisper-large-v3-turbo"
+    } else {
+        model
+    };
+
     let part = reqwest::multipart::Part::bytes(wav_bytes.to_vec())
         .file_name("audio.wav")
         .mime_str("audio/wav")
-        .map_err(|e| HarnessError::VoiceError(format!("Failed to create multipart: {e}")))?;
+        .map_err(|e| HarnessError::VoiceError(format!("Multipart part error: {e}")))?;
 
-    let form = reqwest::multipart::Form::new().part("file", part).text(
-        "model",
-        if model.is_empty() {
-            "whisper-large-v3-turbo".to_string()
-        } else {
-            model.to_string()
-        },
-    );
+    let form = reqwest::multipart::Form::new()
+        .part("file", part)
+        .text("model", chosen_model.to_string())
+        .text("response_format", "json");
 
     let res = client
         .post("https://api.groq.com/openai/v1/audio/transcriptions")
@@ -442,13 +376,66 @@ pub async fn transcribe_groq_whisper(
 
     if !res.status().is_success() {
         let status = res.status();
-        let body = res.text().await.unwrap_or_default();
+        let err_text = res.text().await.unwrap_or_default();
         return Err(HarnessError::VoiceError(format!(
             "Groq Whisper HTTP {status}: {}",
-            body.chars().take(160).collect::<String>()
+            err_text.chars().take(160).collect::<String>()
         )));
     }
 
-    let val: serde_json::Value = res.json().await.unwrap_or_default();
-    Ok(val["text"].as_str().unwrap_or("").to_string())
+    let val: serde_json::Value = res
+        .json()
+        .await
+        .map_err(|e| HarnessError::VoiceError(format!("Groq response JSON error: {e}")))?;
+
+    let text = val["text"].as_str().unwrap_or_default().trim().to_string();
+    Ok(text)
+}
+
+pub async fn transcribe_openai_whisper(
+    wav_bytes: &[u8],
+    api_key: &str,
+    model: &str,
+) -> Result<String, HarnessError> {
+    let client = voice_http_client();
+    let chosen_model = if model.is_empty() {
+        "whisper-1"
+    } else {
+        model
+    };
+
+    let part = reqwest::multipart::Part::bytes(wav_bytes.to_vec())
+        .file_name("audio.wav")
+        .mime_str("audio/wav")
+        .map_err(|e| HarnessError::VoiceError(format!("Multipart part error: {e}")))?;
+
+    let form = reqwest::multipart::Form::new()
+        .part("file", part)
+        .text("model", chosen_model.to_string())
+        .text("response_format", "json");
+
+    let res = client
+        .post("https://api.openai.com/v1/audio/transcriptions")
+        .bearer_auth(api_key)
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| HarnessError::VoiceError(format!("OpenAI Whisper request failed: {e}")))?;
+
+    if !res.status().is_success() {
+        let status = res.status();
+        let err_text = res.text().await.unwrap_or_default();
+        return Err(HarnessError::VoiceError(format!(
+            "OpenAI Whisper HTTP {status}: {}",
+            err_text.chars().take(160).collect::<String>()
+        )));
+    }
+
+    let val: serde_json::Value = res
+        .json()
+        .await
+        .map_err(|e| HarnessError::VoiceError(format!("OpenAI Whisper JSON error: {e}")))?;
+
+    let text = val["text"].as_str().unwrap_or_default().trim().to_string();
+    Ok(text)
 }

@@ -19,6 +19,7 @@ use super::approval::{approval_settings, build_approver};
 
 pub mod capture;
 pub mod catalog;
+pub mod micserve;
 pub mod playback;
 pub mod stt;
 pub mod summary;

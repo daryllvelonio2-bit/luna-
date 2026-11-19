@@ -296,7 +296,7 @@ pub(crate) fn merge_antigravity_refresh(
 /// This is the one place a refresh happens: the turn path and the quota path both see a 401 once
 /// the access token ages out (roughly hourly), and both need the same merge so a refreshed record
 /// keeps the e-mail and expiry the original import carried. Returns the new access token.
-pub(crate) async fn refresh_and_store_antigravity_credential(
+pub async fn refresh_and_store_antigravity_credential(
     http_client: &reqwest::Client,
     raw_secret: &str,
     cred_manager: Option<&std::sync::Arc<crate::auth::CredentialManager>>,

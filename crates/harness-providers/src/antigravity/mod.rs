@@ -148,8 +148,9 @@ mod payload;
 mod quota;
 
 pub use credentials::{
-    detect_antigravity_credentials, extract_bearer_token, refresh_antigravity_token,
-    resolve_antigravity_email_strict, store_antigravity_credentials, AntigravityCredentials,
+    detect_antigravity_credentials, extract_bearer_token, refresh_and_store_antigravity_credential,
+    refresh_antigravity_token, resolve_antigravity_email_strict, store_antigravity_credentials,
+    AntigravityCredentials,
 };
 #[cfg(test)]
 use payload::parse_antigravity_chunk;

@@ -1,21 +1,19 @@
-//! Text-to-speech synthesis engine (Edge TTS, Gemini SSE, OpenAI PCM).
+//! Cloud streaming text-to-speech engine (Antigravity, Gemini, OpenAI).
+//! Strict provider credential isolation with zero fallbacks between providers.
 
-use futures_util::StreamExt;
+use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 
+use futures_util::StreamExt;
 use harness_core::{Config, HarnessError};
 use harness_providers::CredentialManager;
 
-use super::catalog::is_openai_voice;
 use super::playback::GenAudioSender;
-use super::stt::{resolve_gemini_api_keys, resolve_openai_api_key};
 use super::summary::clean_text_for_speech;
 use super::{voice_http_client, VoiceEvent};
 
-static LAST_WORKING_GEMINI_KEY: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+static LAST_WORKING_GEMINI_KEY: AtomicUsize = AtomicUsize::new(0);
 
-/// Stream a single sentence or reply segment to `audio` as chunks arrive over SSE/HTTP.
 pub async fn stream_tts_sentence_to_audio(
     text: &str,
     config: &Config,
@@ -36,10 +34,16 @@ pub async fn stream_tts_sentence_to_audio(
     let tts_model = config.voice.tts_model.trim();
     let voice_name = config.voice.voice_name.trim();
 
-    // Provider / Voice routing:
-    // If OpenAI is explicitly selected or an OpenAI voice name is picked:
-    if provider == "openai" || is_openai_voice(voice_name) {
-        if let Some(key) = resolve_openai_api_key(cred_manager).await {
+    match provider.as_str() {
+        "openai" => {
+            let Some(key) = super::stt::resolve_openai_api_key(cred_manager).await else {
+                let msg = "No OpenAI credentials configured for voice TTS (run `luna auth add openai`)".to_string();
+                tracing::warn!("{msg}");
+                if let Some(tx) = voice_tx {
+                    let _ = tx.send(VoiceEvent::Error(msg));
+                }
+                return;
+            };
             if let Err(e) =
                 stream_openai_tts_pcm(&cleaned, &key, voice_name, tts_model, audio).await
             {
@@ -48,25 +52,44 @@ pub async fn stream_tts_sentence_to_audio(
                     let _ = tx.send(VoiceEvent::Error(format!("OpenAI TTS error: {e}")));
                 }
             }
-            return;
         }
-    }
-
-    // Default & Antigravity/Gemini: Stream directly via Gemini 2.5 Flash TTS
-    let g_keys = resolve_gemini_api_keys(cred_manager).await;
-    if g_keys.is_empty() {
-        let msg = "No Antigravity / Gemini credentials found for cloud voice TTS (check `luna auth list`)".to_string();
-        tracing::warn!("{msg}");
-        if let Some(tx) = voice_tx {
-            let _ = tx.send(VoiceEvent::Error(msg));
+        "gemini" => {
+            let g_keys = super::stt::lookup_plain_api_keys("gemini", cred_manager).await;
+            if g_keys.is_empty() {
+                let msg = "No Gemini credentials configured for voice TTS (run `luna auth add gemini`)".to_string();
+                tracing::warn!("{msg}");
+                if let Some(tx) = voice_tx {
+                    let _ = tx.send(VoiceEvent::Error(msg));
+                }
+                return;
+            }
+            if let Err(e) =
+                stream_gemini_tts_sse(&cleaned, &g_keys, voice_name, tts_model, audio).await
+            {
+                tracing::warn!("Gemini TTS error: {e}");
+                if let Some(tx) = voice_tx {
+                    let _ = tx.send(VoiceEvent::Error(format!("Gemini TTS error: {e}")));
+                }
+            }
         }
-        return;
-    }
-
-    if let Err(e) = stream_gemini_tts_sse(&cleaned, &g_keys, voice_name, tts_model, audio).await {
-        tracing::warn!("Gemini TTS error: {e}");
-        if let Some(tx) = voice_tx {
-            let _ = tx.send(VoiceEvent::Error(format!("Voice TTS error: {e}")));
+        "antigravity" | "agy" => {
+            if let Err(e) =
+                stream_antigravity_tts(&cleaned, cred_manager, voice_name, tts_model, audio).await
+            {
+                tracing::warn!("Antigravity TTS error: {e}");
+                if let Some(tx) = voice_tx {
+                    let _ = tx.send(VoiceEvent::Error(format!("Antigravity TTS error: {e}")));
+                }
+            }
+        }
+        other => {
+            let msg = format!(
+                "Unsupported voice provider '{other}' for TTS (supported: 'antigravity', 'gemini', 'openai')"
+            );
+            tracing::warn!("{msg}");
+            if let Some(tx) = voice_tx {
+                let _ = tx.send(VoiceEvent::Error(msg));
+            }
         }
     }
 }
@@ -166,7 +189,7 @@ pub async fn stream_gemini_tts_sse(
 ) -> Result<(), HarnessError> {
     if api_keys.is_empty() {
         return Err(HarnessError::VoiceError(
-            "No Gemini / Antigravity API keys available for TTS".into(),
+            "No Gemini API keys available for TTS".into(),
         ));
     }
     let client = voice_http_client();
@@ -260,11 +283,171 @@ pub async fn stream_gemini_tts_sse(
     Err(HarnessError::VoiceError(last_err))
 }
 
+/// Stream Antigravity TTS using Antigravity OAuth credentials.
+pub async fn stream_antigravity_tts(
+    text: &str,
+    cred_manager: &Arc<CredentialManager>,
+    voice: &str,
+    model: &str,
+    audio: GenAudioSender<'_>,
+) -> Result<(), HarnessError> {
+    let raw_secret = match super::stt::lookup_raw_credential("antigravity", cred_manager).await {
+        Some(s) => s,
+        None => super::stt::lookup_raw_credential("agy", cred_manager)
+            .await
+            .ok_or_else(|| {
+                HarnessError::VoiceError(
+                    "No Antigravity credentials configured (run `luna auth add antigravity`)".into(),
+                )
+            })?,
+    };
+
+    let (mut bearer_token, project_opt) =
+        harness_providers::antigravity::extract_bearer_token(&raw_secret);
+    let project =
+        project_opt.unwrap_or_else(|| harness_providers::antigravity::DEFAULT_PROJECT.to_string());
+    let client = voice_http_client();
+
+    let voice_name = if voice.is_empty() || voice.contains("Neural") {
+        "Aoede"
+    } else {
+        voice
+    };
+
+    let chosen_model = if !model.is_empty() {
+        model
+    } else {
+        "gemini-2.5-flash-preview-tts"
+    };
+
+    let payload = serde_json::json!({
+        "project": project,
+        "model": chosen_model,
+        "request": {
+            "contents": [{
+                "parts": [{ "text": text }]
+            }],
+            "generationConfig": {
+                "responseModalities": ["AUDIO"],
+                "speechConfig": {
+                    "voiceConfig": {
+                        "prebuiltVoiceConfig": {
+                            "voiceName": voice_name
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    let mut res = client
+        .post(harness_providers::antigravity::CODE_ASSIST_ENDPOINT)
+        .header(
+            reqwest::header::AUTHORIZATION,
+            format!("Bearer {bearer_token}"),
+        )
+        .header(
+            reqwest::header::USER_AGENT,
+            harness_providers::antigravity::user_agent(),
+        )
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| HarnessError::VoiceError(format!("Antigravity TTS request failed: {e}")))?;
+
+    if res.status().as_u16() == 401 {
+        if let Ok(new_token) =
+            harness_providers::antigravity::refresh_and_store_antigravity_credential(
+                client,
+                &raw_secret,
+                Some(cred_manager),
+            )
+            .await
+        {
+            bearer_token = new_token;
+            res = client
+                .post(harness_providers::antigravity::CODE_ASSIST_ENDPOINT)
+                .header(
+                    reqwest::header::AUTHORIZATION,
+                    format!("Bearer {bearer_token}"),
+                )
+                .header(
+                    reqwest::header::USER_AGENT,
+                    harness_providers::antigravity::user_agent(),
+                )
+                .json(&payload)
+                .send()
+                .await
+                .map_err(|e| {
+                    HarnessError::VoiceError(format!("Antigravity TTS retry request failed: {e}"))
+                })?;
+        }
+    }
+
+    if !res.status().is_success() {
+        let status = res.status();
+        let body = res.text().await.unwrap_or_default();
+        return Err(HarnessError::VoiceError(format!(
+            "Antigravity TTS HTTP {status}: {}",
+            body.chars().take(160).collect::<String>()
+        )));
+    }
+
+    let mut stream = res.bytes_stream();
+    let mut line_buf: Vec<u8> = Vec::new();
+    let mut got_audio = false;
+
+    while let Some(chunk_res) = stream.next().await {
+        if audio.cancel.is_cancelled() {
+            return Ok(());
+        }
+        let Ok(chunk) = chunk_res else {
+            break;
+        };
+        line_buf.extend_from_slice(&chunk);
+
+        while let Some(nl_pos) = line_buf.iter().position(|&b| b == b'\n') {
+            let raw_line: Vec<u8> = line_buf.drain(..=nl_pos).collect();
+            let line_str = String::from_utf8_lossy(&raw_line);
+            let trimmed = line_str.trim();
+            if let Some(json_str) = trimmed.strip_prefix("data: ") {
+                if push_gemini_sse_audio_chunk(json_str, audio) {
+                    got_audio = true;
+                }
+            }
+        }
+    }
+
+    if !line_buf.is_empty() && !audio.cancel.is_cancelled() {
+        let line_str = String::from_utf8_lossy(&line_buf);
+        let trimmed = line_str.trim();
+        if let Some(json_str) = trimmed.strip_prefix("data: ") {
+            if push_gemini_sse_audio_chunk(json_str, audio) {
+                got_audio = true;
+            }
+        }
+    }
+
+    if got_audio {
+        return Ok(());
+    }
+
+    Err(HarnessError::VoiceError(
+        "No inline audio received in Antigravity TTS stream".into(),
+    ))
+}
+
 pub fn push_gemini_sse_audio_chunk(json_str: &str, audio: GenAudioSender<'_>) -> bool {
     let Ok(val) = serde_json::from_str::<serde_json::Value>(json_str) else {
         return false;
     };
-    let Some(parts) = val["candidates"][0]["content"]["parts"].as_array() else {
+    let candidates = val["candidates"]
+        .as_array()
+        .or_else(|| val["response"]["candidates"].as_array());
+    let Some(candidates) = candidates else {
+        return false;
+    };
+    let Some(parts) = candidates.first().and_then(|c| c["content"]["parts"].as_array()) else {
         return false;
     };
     let mut sent_any = false;

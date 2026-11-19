@@ -1,7 +1,9 @@
-//! Background microphone audio capture via CPAL and adaptive RMS VAD.
+//! Background microphone audio capture via native CLI (pw-record / parec / arecord) or CPAL.
+//! Reconstructed from binary analysis of agy audio subsystem (`google3/third_party/jetski/cli/audio`).
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::collections::VecDeque;
+use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -10,6 +12,21 @@ use harness_core::Config;
 use harness_providers::{CredentialManager, ModelDiscovery};
 
 use super::VoiceEvent;
+
+/// Locate host audio recording CLI following `audio.selectTool` in agy architecture.
+///
+/// Order of evaluation:
+/// 1. `pw-record` (PipeWire)
+/// 2. `parec` (PulseAudio)
+/// 3. `arecord` (ALSA fallback)
+pub fn select_recorder_tool() -> Option<String> {
+    for tool in ["pw-record", "parec", "arecord"] {
+        if super::playback::find_in_path(tool).is_some() {
+            return Some(tool.to_string());
+        }
+    }
+    None
+}
 
 /// Run the continuous background voice listener.
 pub async fn run_background_voice_listener(
@@ -31,12 +48,110 @@ pub async fn run_background_voice_listener(
 
     let cancel_thread = cancel.clone();
     let err_tx = voice_tx.clone();
+
+    // Check for native recorder tool (pw-record, parec, arecord) matching agy hostCapture
+    let recorder_tool = select_recorder_tool();
+
     std::thread::spawn(move || {
+        if let Some(ref tool) = recorder_tool {
+            let (prog, args): (&str, Vec<String>) = match tool.as_str() {
+                "pw-record" => (
+                    "pw-record",
+                    vec![
+                        "--rate".into(),
+                        "16000".into(),
+                        "--channels".into(),
+                        "1".into(),
+                        "--format".into(),
+                        "s16".into(),
+                        "--raw".into(),
+                        "-".into(),
+                    ],
+                ),
+                "parec" => (
+                    "parec",
+                    vec![
+                        "--rate=16000".into(),
+                        "--channels=1".into(),
+                        "--format=s16le".into(),
+                        "--raw".into(),
+                    ],
+                ),
+                _ => (
+                    "arecord",
+                    vec![
+                        "-t".into(),
+                        "raw".into(),
+                        "-f".into(),
+                        "S16_LE".into(),
+                        "-r".into(),
+                        "16000".into(),
+                        "-c".into(),
+                        "1".into(),
+                        "-q".into(),
+                        "-".into(),
+                    ],
+                ),
+            };
+
+            let mut child = match std::process::Command::new(prog)
+                .args(&args)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!("Failed to spawn native recorder {prog}: {e}");
+                    let _ = err_tx.send(VoiceEvent::Error(format!(
+                        "Failed to start microphone ({prog}): {e}"
+                    )));
+                    return;
+                }
+            };
+
+            let mut stdout = match child.stdout.take() {
+                Some(s) => s,
+                None => {
+                    let _ = child.kill();
+                    return;
+                }
+            };
+
+            let _ = sample_rate_tx.send(16_000);
+            let _ = err_tx.send(VoiceEvent::Notice(format!(
+                "🎙 Microphone active ({tool} · 16000Hz)"
+            )));
+
+            let mut raw_buf = [0u8; 1024];
+            while !cancel_thread.is_cancelled() {
+                match stdout.read(&mut raw_buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        #[allow(clippy::chunks_exact_to_as_chunks)]
+                        let samples: Vec<i16> = raw_buf[..n]
+                            .chunks_exact(2)
+                            .map(|c| i16::from_le_bytes([c[0], c[1]]))
+                            .collect();
+                        if !samples.is_empty() {
+                            let _ = audio_sample_tx.send(samples);
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+
+            let _ = child.kill();
+            let _ = child.wait();
+            return;
+        }
+
+        // CPAL fallback if no native CLI recorder is found on host
         let host = cpal::default_host();
         let Some(device) = host.default_input_device() else {
             tracing::warn!("No default audio input device found for voice listener");
             let _ = err_tx.send(VoiceEvent::Error(
-                "No default microphone input device found.".to_string(),
+                "No microphone recorder found. Install one with: sudo apt-get install -y alsa-utils (arecord), or use PipeWire's pw-record.".to_string(),
             ));
             return;
         };

@@ -1,4 +1,5 @@
 //! Persistent, interruptible audio playback queue and streaming sink.
+//! Reconstructed from binary analysis of agy audio subsystem (`google3/third_party/jetski/cli/audio`).
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -8,6 +9,141 @@ use harness_core::Config;
 use harness_providers::CredentialManager;
 
 use super::VoiceEvent;
+
+/// Search for an executable binary in the system PATH.
+pub fn find_in_path(cmd: &str) -> Option<std::path::PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    for p in std::env::split_paths(&path_var) {
+        let candidate = p.join(cmd);
+        if candidate.is_file() {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if let Ok(meta) = candidate.metadata() {
+                    if meta.permissions().mode() & 0o111 != 0 {
+                        return Some(candidate);
+                    }
+                }
+            }
+            #[cfg(not(unix))]
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Locate host audio player following `audio.selectPlayerTool` in agy architecture.
+///
+/// Order of evaluation:
+/// 1. If `PULSE_SERVER` is set, prefers `paplay`. If absent, warns about pulseaudio-utils.
+/// 2. Probes `$PATH` in order: `pw-cat` (PipeWire), `paplay` (PulseAudio), `aplay` (ALSA).
+pub fn select_player_tool() -> Option<String> {
+    if let Ok(server) = std::env::var("PULSE_SERVER") {
+        if !server.trim().is_empty() {
+            if find_in_path("paplay").is_some() {
+                return Some("paplay".to_string());
+            }
+            tracing::warn!(
+                "Audio forwarding is configured (PULSE_SERVER) but 'paplay' isn't installed. \
+                 Install with: sudo apt-get install -y pulseaudio-utils"
+            );
+        }
+    }
+
+    for tool in ["pw-cat", "paplay", "aplay"] {
+        if find_in_path(tool).is_some() {
+            return Some(tool.to_string());
+        }
+    }
+    None
+}
+
+/// Dedicated streaming process wrapper for low-latency playback via PipeWire/PulseAudio/ALSA.
+pub struct NativePlayerProcess {
+    #[allow(dead_code)]
+    pub tool: String,
+    pub rate: u32,
+    child: std::process::Child,
+    stdin: std::process::ChildStdin,
+}
+
+impl NativePlayerProcess {
+    pub fn spawn(tool: &str, rate: u32) -> Result<Self, String> {
+        let (prog, args): (&str, Vec<String>) = match tool {
+            "pw-cat" => (
+                "pw-cat",
+                vec![
+                    "--playback".into(),
+                    "--rate".into(),
+                    rate.to_string(),
+                    "--channels".into(),
+                    "1".into(),
+                    "--format".into(),
+                    "s16".into(),
+                    "--raw".into(),
+                    "-".into(),
+                ],
+            ),
+            "paplay" => (
+                "paplay",
+                vec![
+                    format!("--rate={rate}"),
+                    "--channels=1".into(),
+                    "--format=s16le".into(),
+                    "--raw".into(),
+                ],
+            ),
+            _ => (
+                "aplay",
+                vec![
+                    "-t".into(),
+                    "raw".into(),
+                    "-f".into(),
+                    "S16_LE".into(),
+                    "-r".into(),
+                    rate.to_string(),
+                    "-c".into(),
+                    "1".into(),
+                    "-q".into(),
+                    "-".into(),
+                ],
+            ),
+        };
+
+        let mut child = std::process::Command::new(prog)
+            .args(&args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| format!("Failed to start native audio player {prog}: {e}"))?;
+
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "Failed to capture stdin for audio player".to_string())?;
+
+        Ok(Self {
+            tool: tool.to_string(),
+            rate,
+            child,
+            stdin,
+        })
+    }
+
+    pub fn write_samples(&mut self, samples: &[i16]) -> std::io::Result<()> {
+        use std::io::Write;
+        for s in samples {
+            self.stdin.write_all(&s.to_le_bytes())?;
+        }
+        self.stdin.flush()
+    }
+
+    pub fn kill(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
 
 pub enum AudioThreadCmd {
     AppendPcm {
@@ -86,19 +222,23 @@ impl VoiceSpeechQueue {
         let (audio_tx, audio_rx) = std::sync::mpsc::channel::<AudioThreadCmd>();
         let (task_tx, mut task_rx) = tokio::sync::mpsc::unbounded_channel::<SpeechTask>();
 
-        let sink_busy = Arc::new(AtomicBool::new(false));
         let stream_busy = Arc::new(AtomicBool::new(false));
         let is_playing_audio = is_playing.clone();
         let active_gen_audio = active_gen.clone();
-        let sink_busy_thread = sink_busy.clone();
         let stream_busy_thread = stream_busy.clone();
 
-        // Dedicated non-blocking audio playback thread holding a persistent OutputStream + Sink.
+        // Dedicated low-latency playback thread matching agy streamPlayer architecture:
+        // Prefers native CLI pipeline (pw-cat / paplay / aplay) with instant kill on barge-in.
         std::thread::spawn(move || {
-            let mut output: Option<(rodio::OutputStream, rodio::OutputStreamHandle)> = None;
-            let mut sink: Option<rodio::Sink> = None;
+            let player_tool = select_player_tool();
+            let mut native_player: Option<NativePlayerProcess> = None;
+            let mut last_sample_time: Option<std::time::Instant> = None;
 
-            let ensure_sink =
+            // Rodio fallback only if no host CLI audio tool is available
+            let mut rodio_output: Option<(rodio::OutputStream, rodio::OutputStreamHandle)> = None;
+            let mut rodio_sink: Option<rodio::Sink> = None;
+
+            let ensure_rodio_sink =
                 |output: &mut Option<(rodio::OutputStream, rodio::OutputStreamHandle)>,
                  sink: &mut Option<rodio::Sink>|
                  -> Result<(), String> {
@@ -118,7 +258,7 @@ impl VoiceSpeechQueue {
                 };
 
             loop {
-                match audio_rx.recv_timeout(std::time::Duration::from_millis(30)) {
+                match audio_rx.recv_timeout(std::time::Duration::from_millis(25)) {
                     Ok(cmd) => {
                         let mut cmds = vec![cmd];
                         while let Ok(more) = audio_rx.try_recv() {
@@ -127,11 +267,14 @@ impl VoiceSpeechQueue {
                         for c in cmds {
                             match c {
                                 AudioThreadCmd::ClearAndReset => {
-                                    if let Some(ref s) = sink {
+                                    if let Some(mut p) = native_player.take() {
+                                        p.kill();
+                                    }
+                                    if let Some(ref s) = rodio_sink {
                                         s.stop();
                                     }
-                                    sink = None;
-                                    sink_busy_thread.store(false, Ordering::SeqCst);
+                                    rodio_sink = None;
+                                    last_sample_time = None;
                                     is_playing_audio.store(false, Ordering::SeqCst);
                                 }
                                 AudioThreadCmd::AppendPcm {
@@ -144,19 +287,44 @@ impl VoiceSpeechQueue {
                                     {
                                         continue;
                                     }
-                                    if let Err(e) = ensure_sink(&mut output, &mut sink) {
-                                        tracing::warn!("{e}");
-                                        continue;
-                                    }
-                                    if let Some(ref s) = sink {
-                                        let source =
-                                            rodio::buffer::SamplesBuffer::new(1, rate, samples);
-                                        s.append(source);
-                                        if s.is_paused() {
-                                            s.play();
+
+                                    if let Some(ref tool) = player_tool {
+                                        let needs_new = match native_player {
+                                            Some(ref p) => p.rate != rate,
+                                            None => true,
+                                        };
+                                        if needs_new {
+                                            if let Some(mut old) = native_player.take() {
+                                                old.kill();
+                                            }
+                                            match NativePlayerProcess::spawn(tool, rate) {
+                                                Ok(p) => native_player = Some(p),
+                                                Err(e) => tracing::warn!("{e}"),
+                                            }
                                         }
-                                        sink_busy_thread.store(true, Ordering::SeqCst);
-                                        is_playing_audio.store(true, Ordering::SeqCst);
+
+                                        if let Some(ref mut p) = native_player {
+                                            let _ = p.write_samples(&samples);
+                                            last_sample_time = Some(std::time::Instant::now());
+                                            is_playing_audio.store(true, Ordering::SeqCst);
+                                        }
+                                    } else {
+                                        if let Err(e) =
+                                            ensure_rodio_sink(&mut rodio_output, &mut rodio_sink)
+                                        {
+                                            tracing::warn!("{e}");
+                                            continue;
+                                        }
+                                        if let Some(ref s) = rodio_sink {
+                                            let source =
+                                                rodio::buffer::SamplesBuffer::new(1, rate, samples);
+                                            s.append(source);
+                                            if s.is_paused() {
+                                                s.play();
+                                            }
+                                            last_sample_time = Some(std::time::Instant::now());
+                                            is_playing_audio.store(true, Ordering::SeqCst);
+                                        }
                                     }
                                 }
                                 AudioThreadCmd::AppendEncoded { generation, bytes } => {
@@ -165,18 +333,20 @@ impl VoiceSpeechQueue {
                                     {
                                         continue;
                                     }
-                                    if let Err(e) = ensure_sink(&mut output, &mut sink) {
+                                    if let Err(e) =
+                                        ensure_rodio_sink(&mut rodio_output, &mut rodio_sink)
+                                    {
                                         tracing::warn!("{e}");
                                         continue;
                                     }
-                                    if let Some(ref s) = sink {
+                                    if let Some(ref s) = rodio_sink {
                                         let cursor = std::io::Cursor::new(bytes);
                                         if let Ok(source) = rodio::Decoder::new(cursor) {
                                             s.append(source);
                                             if s.is_paused() {
                                                 s.play();
                                             }
-                                            sink_busy_thread.store(true, Ordering::SeqCst);
+                                            last_sample_time = Some(std::time::Instant::now());
                                             is_playing_audio.store(true, Ordering::SeqCst);
                                         }
                                     }
@@ -188,14 +358,29 @@ impl VoiceSpeechQueue {
                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                 }
 
-                let in_flight = if let Some(ref s) = sink {
+                // Check whether playback has settled
+                let streaming = stream_busy_thread.load(Ordering::SeqCst);
+                let audio_busy = if player_tool.is_some() {
+                    if let Some(last) = last_sample_time {
+                        if last.elapsed() > std::time::Duration::from_millis(300) {
+                            if let Some(mut p) = native_player.take() {
+                                p.kill();
+                            }
+                            last_sample_time = None;
+                            false
+                        } else {
+                            true
+                        }
+                    } else {
+                        false
+                    }
+                } else if let Some(ref s) = rodio_sink {
                     !s.empty()
                 } else {
                     false
                 };
-                sink_busy_thread.store(in_flight, Ordering::SeqCst);
-                let streaming = stream_busy_thread.load(Ordering::SeqCst);
-                is_playing_audio.store(in_flight || streaming, Ordering::SeqCst);
+
+                is_playing_audio.store(streaming || audio_busy, Ordering::SeqCst);
             }
         });
 
