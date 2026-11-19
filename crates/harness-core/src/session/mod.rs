@@ -197,6 +197,10 @@ pub trait SessionStore: Send + Sync {
     /// concurrent append cannot slip a half-cleared store between two deletes.
     async fn delete_all_sessions(&self) -> Result<usize, HarnessError>;
 
+    /// Prune empty sessions that have zero messages, optionally sparing an active session.
+    /// Returns the number of empty session rows removed.
+    async fn prune_empty_sessions(&self, except_id: Option<&str>) -> Result<usize, HarnessError>;
+
     /// Fork an existing session into a new session copy, cloning all message history and metadata.
     async fn fork_session(
         &self,

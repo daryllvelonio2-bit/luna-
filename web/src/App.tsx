@@ -117,6 +117,12 @@ export const App: React.FC = () => {
   const activeSessionIdRef = useRef<string | null>(null);
   activeSessionIdRef.current = activeSessionId;
 
+  const messagesRef = useRef<TranscriptMessageDto[]>([]);
+  messagesRef.current = messages;
+
+  const turnRunningRef = useRef(false);
+  turnRunningRef.current = turnRunning;
+
   // RAF-batched streaming delta buffer
   const pendingContentDeltaRef = useRef('');
   const pendingReasoningDeltaRef = useRef('');
@@ -486,6 +492,20 @@ export const App: React.FC = () => {
 
   const handleSelectSession = useCallback(
     (sid: string) => {
+      const prevSid = activeSessionIdRef.current;
+      if (
+        prevSid &&
+        prevSid !== sid &&
+        messagesRef.current.length === 0 &&
+        !turnRunningRef.current
+      ) {
+        api
+          .deleteSession(prevSid)
+          .then(() => {
+            setSessions((prev) => prev.filter((s) => s.record.id !== prevSid));
+          })
+          .catch(() => {});
+      }
       pendingContentDeltaRef.current = '';
       pendingReasoningDeltaRef.current = '';
       liveToolCallsRef.current = [];
@@ -504,6 +524,19 @@ export const App: React.FC = () => {
 
   const handleNewSession = useCallback(
     async (agentId?: string | null) => {
+      const prevSid = activeSessionIdRef.current;
+      if (
+        prevSid &&
+        messagesRef.current.length === 0 &&
+        !turnRunningRef.current
+      ) {
+        if (!agentId) {
+          handleSelectSession(prevSid);
+          setCurrentTab('chat');
+          return;
+        }
+        api.deleteSession(prevSid).catch(() => {});
+      }
       try {
         const sid = await api.createSession(agentId);
         const updated = await api.listSessions(150);

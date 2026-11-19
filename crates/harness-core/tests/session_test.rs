@@ -3067,3 +3067,50 @@ async fn compact_current_session_folds_beyond_resume_max_messages() {
         "oldest turn beyond resume_max_messages must be folded too"
     );
 }
+
+#[tokio::test]
+async fn most_recent_ignores_empty_sessions() {
+    let (_dir, _path, store) = temp_store();
+    store.ensure_session("s_empty").await.unwrap();
+    assert_eq!(store.most_recent().await.unwrap(), None);
+
+    store.ensure_session("s_convo").await.unwrap();
+    store
+        .append("s_convo", &Message::user("hello"), false)
+        .await
+        .unwrap();
+    assert_eq!(
+        store.most_recent().await.unwrap().as_deref(),
+        Some("s_convo")
+    );
+
+    // Creating another empty session should NOT displace s_convo
+    store.ensure_session("s_empty_2").await.unwrap();
+    assert_eq!(
+        store.most_recent().await.unwrap().as_deref(),
+        Some("s_convo")
+    );
+}
+
+#[tokio::test]
+async fn prune_empty_sessions_removes_zero_message_sessions() {
+    let (_dir, _path, store) = temp_store();
+    store.ensure_session("s_empty1").await.unwrap();
+    store.ensure_session("s_empty2").await.unwrap();
+    store.ensure_session("s_kept").await.unwrap();
+    store
+        .append("s_kept", &Message::user("hi"), false)
+        .await
+        .unwrap();
+
+    let pruned = store.prune_empty_sessions(Some("s_empty2")).await.unwrap();
+    assert_eq!(pruned, 1);
+    assert!(store.get("s_empty1").await.is_err());
+    assert!(store.get("s_empty2").await.is_ok());
+    assert!(store.get("s_kept").await.is_ok());
+
+    let pruned_all = store.prune_empty_sessions(None).await.unwrap();
+    assert_eq!(pruned_all, 1);
+    assert!(store.get("s_empty2").await.is_err());
+    assert!(store.get("s_kept").await.is_ok());
+}

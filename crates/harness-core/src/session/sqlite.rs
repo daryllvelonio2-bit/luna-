@@ -1034,7 +1034,9 @@ impl SessionStore for SqliteSessionStore {
     async fn most_recent(&self) -> Result<Option<String>, HarnessError> {
         self.with_conn(|conn| {
             conn.query_row(
-                "SELECT id FROM sessions ORDER BY updated_at DESC LIMIT 1",
+                "SELECT id FROM sessions 
+                 WHERE EXISTS (SELECT 1 FROM messages WHERE messages.session_id = sessions.id)
+                 ORDER BY updated_at DESC LIMIT 1",
                 [],
                 |row| row.get::<_, String>(0),
             )
@@ -1071,6 +1073,28 @@ impl SessionStore for SqliteSessionStore {
             let removed = conn
                 .execute("DELETE FROM sessions", [])
                 .map_err(|error| session_error("failed to delete all sessions", error))?;
+            Ok(removed)
+        })
+        .await
+    }
+
+    async fn prune_empty_sessions(&self, except_id: Option<&str>) -> Result<usize, HarnessError> {
+        let except_id = except_id.map(str::to_string);
+        self.with_conn(move |conn| {
+            let removed = match except_id {
+                Some(except) => conn.execute(
+                    "DELETE FROM sessions 
+                     WHERE id != ?1 
+                       AND NOT EXISTS (SELECT 1 FROM messages WHERE messages.session_id = sessions.id)",
+                    params![except],
+                ),
+                None => conn.execute(
+                    "DELETE FROM sessions 
+                     WHERE NOT EXISTS (SELECT 1 FROM messages WHERE messages.session_id = sessions.id)",
+                    [],
+                ),
+            }
+            .map_err(|error| session_error("failed to prune empty sessions", error))?;
             Ok(removed)
         })
         .await

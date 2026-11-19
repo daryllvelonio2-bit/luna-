@@ -219,6 +219,9 @@ async fn prepare_session(
                 .filter(|m| !m.is_empty())
         });
 
+    // Prune any abandoned empty sessions from previous runs, sparing the current session.
+    let _ = store.prune_empty_sessions(Some(&session_id)).await;
+
     Ok(SessionSetup {
         session_id,
         todo_scope,

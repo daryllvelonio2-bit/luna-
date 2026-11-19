@@ -523,6 +523,17 @@ pub(crate) async fn handle_sessions_switch(
         return Ok(());
     }
 
+    let old_id = session_id.clone();
+    let old_empty = turns.is_empty()
+        && store
+            .get(&old_id)
+            .await
+            .map(|r| r.message_count == 0)
+            .unwrap_or(true);
+    if old_empty {
+        let _ = store.delete_session(&old_id).await;
+    }
+
     *session_id = target_id.clone();
     agent.lock().await.set_session(SessionBinding {
         store: store.clone(),
@@ -637,7 +648,7 @@ async fn pick_session_target(
             .list()
             .await?
             .into_iter()
-            .filter(|session| !session.name.starts_with("worker:"))
+            .filter(|session| !session.name.starts_with("worker:") && session.message_count > 0)
             .collect();
         if sessions.is_empty() {
             ui.emit_above(&format!("{} No saved sessions found", "•".cyan()));

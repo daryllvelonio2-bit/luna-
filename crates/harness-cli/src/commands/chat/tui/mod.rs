@@ -225,7 +225,7 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
                             _ => true,
                         };
                         if input::handle_event(&mut env, &mut st, &mut terminal, ev).await? == Flow::Break {
-                            return Ok(());
+                            break;
                         }
                         if should_redraw {
                             needs_redraw = true;
@@ -588,23 +588,41 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
         }
     }
 
-    let session_name = env
-        .store
-        .get(env.session_id)
-        .await
-        .map(|s| s.name)
-        .unwrap_or_default();
+    // Clean up current active session if it was never used (no conversation).
+    if st.turns.is_empty() && st.active_turn.is_none() {
+        if let Ok(record) = env.store.get(env.session_id).await {
+            if record.message_count == 0 {
+                let _ = env.store.delete_session(env.session_id).await;
+            }
+        }
+    }
+    // Also clean up any empty background sessions that were never used.
+    for (bg_id, slot) in &st.background_sessions {
+        if slot.turns.is_empty() && slot.active_turn.is_none() {
+            if let Ok(record) = env.store.get(bg_id).await {
+                if record.message_count == 0 {
+                    let _ = env.store.delete_session(bg_id).await;
+                }
+            }
+        }
+    }
+
+    let session_record = env.store.get(env.session_id).await.ok();
     let session_id_copy = env.session_id.clone();
     drop(_term_guard);
     runtime.ui.set_tui_mode(false);
 
-    if session_name.is_empty() {
-        println!("Resume: luna --session {}", session_id_copy);
-    } else {
-        println!(
-            "Resume: luna --session {}    (name: {})",
-            session_id_copy, session_name
-        );
+    if let Some(record) = session_record {
+        if record.message_count > 0 {
+            if record.name.is_empty() {
+                println!("Resume: luna --session {}", session_id_copy);
+            } else {
+                println!(
+                    "Resume: luna --session {}    (name: {})",
+                    session_id_copy, record.name
+                );
+            }
+        }
     }
     Ok(())
 }

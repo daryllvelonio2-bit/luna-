@@ -101,6 +101,9 @@ pub async fn run_web_server(config: Config, options: WebServerOptions) -> Result
     let launch_url = format!("{}/?token={}", advertised_url, state.auth.launch_token);
     println!("{} {}", "luna web:".green().bold(), launch_url);
 
+    // Prune any abandoned empty sessions from previous runs
+    let _ = state.store.prune_empty_sessions(None).await;
+
     // Start background scheduler loop so due automations execute automatically while luna web runs
     let sched_handler = state.schedule_delivery_handler();
     let _scheduler_handle = state.scheduler.clone().spawn_loop(

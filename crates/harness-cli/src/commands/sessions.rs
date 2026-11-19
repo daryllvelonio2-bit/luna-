@@ -118,7 +118,12 @@ async fn create_session(store: &SqliteSessionStore) -> Result<String, HarnessErr
 
 async fn list_sessions(config: &Config) -> Result<(), HarnessError> {
     let store = open_store(config)?;
-    let sessions = store.list().await?;
+    let sessions: Vec<_> = store
+        .list()
+        .await?
+        .into_iter()
+        .filter(|s| s.message_count > 0)
+        .collect();
 
     if sessions.is_empty() {
         println!("no sessions yet — `luna chat` creates one");
@@ -168,7 +173,12 @@ pub async fn handle_sessions_command(
         }
         SessionsCommand::Select => {
             let store = open_store(config)?;
-            let sessions = store.list().await?;
+            let sessions: Vec<_> = store
+                .list()
+                .await?
+                .into_iter()
+                .filter(|s| s.message_count > 0)
+                .collect();
 
             if sessions.is_empty() {
                 println!("no sessions yet — `luna chat` creates one");

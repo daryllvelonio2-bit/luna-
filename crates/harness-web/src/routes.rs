@@ -359,6 +359,7 @@ async fn bootstrap(
 
     let sessions: Vec<GuiSessionItem> = records
         .into_iter()
+        .filter(|r| r.message_count > 0 || query.session_id.as_deref() == Some(&r.id))
         .take(120)
         .map(|r| {
             let pid = agent_map.get(&r.id).cloned();
@@ -467,9 +468,12 @@ async fn list_sessions(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let agent_map = state.session_agents.read().await;
+    let active_sessions = state.sessions.read().await;
     let limit = query.limit.unwrap_or(150);
 
-    let iter = records.into_iter();
+    let iter = records
+        .into_iter()
+        .filter(|r| r.message_count > 0 || active_sessions.contains_key(&r.id));
     let items = if limit > 0 {
         iter.take(limit)
             .map(|r| {

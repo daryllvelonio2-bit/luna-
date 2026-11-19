@@ -48,7 +48,9 @@ pub async fn refresh_tabs(env: &Env<'_>, st: &mut TuiState) {
     let sessions = env.store.list().await.unwrap_or_default();
     let non_worker: Vec<_> = sessions
         .into_iter()
-        .filter(|s| !s.name.starts_with("worker:"))
+        .filter(|s| {
+            !s.name.starts_with("worker:") && (s.message_count > 0 || s.id == *env.session_id)
+        })
         .collect();
     st.total_sessions_count = non_worker.len();
 
@@ -195,6 +197,28 @@ fn park_current_session(env: &Env<'_>, st: &mut TuiState) {
         feature_toggles: env.feature_toggles.snapshot(),
     };
     st.background_sessions.insert(old_id, slot);
+}
+
+/// Park the current session if it contains conversation messages; otherwise discard and delete
+/// it from the session store so abandoned/empty sessions never pollute history.
+async fn park_or_discard_current_session(env: &Env<'_>, st: &mut TuiState) {
+    let old_id = env.session_id.clone();
+    let old_is_empty = st.turns.is_empty()
+        && st.active_turn.is_none()
+        && st.queue.is_empty()
+        && env
+            .store
+            .get(&old_id)
+            .await
+            .map(|r| r.message_count == 0)
+            .unwrap_or(true);
+
+    if old_is_empty {
+        let _ = env.store.delete_session(&old_id).await;
+        st.tabs.retain(|t| t.id != old_id);
+    } else {
+        park_current_session(env, st);
+    }
 }
 
 fn restore_background_session(env: &mut Env<'_>, st: &mut TuiState, slot: BackgroundSession) {
@@ -388,7 +412,7 @@ pub async fn switch_to_session(
     }
 
     if let Some(existing) = st.background_sessions.remove(target_id) {
-        park_current_session(env, st);
+        park_or_discard_current_session(env, st).await;
         restore_background_session(env, st, existing);
         sync_delegate_wiring(env).await;
         let ui_bg = env.ui.clone();
@@ -456,7 +480,7 @@ pub async fn switch_to_session(
         .collect();
     let initial_len = turns.len();
 
-    park_current_session(env, st);
+    park_or_discard_current_session(env, st).await;
 
     *env.session_id = target_id.to_string();
     env.agent = agent.clone();
@@ -556,7 +580,7 @@ pub async fn create_new_session(env: &mut Env<'_>, st: &mut TuiState) -> Result<
     let new_toggles = env.feature_toggles.snapshot();
     env.feature_toggles.restore(saved_toggles);
 
-    park_current_session(env, st);
+    park_or_discard_current_session(env, st).await;
     env.feature_toggles.restore(new_toggles);
 
     *env.session_id = new_id.clone();
@@ -623,7 +647,7 @@ pub async fn open_session_picker(env: &Env<'_>, st: &mut TuiState) {
         .await
         .unwrap_or_default()
         .into_iter()
-        .filter(|s| !s.name.starts_with("worker:"))
+        .filter(|s| !s.name.starts_with("worker:") && s.message_count > 0)
         .collect();
     let selected = sessions
         .iter()

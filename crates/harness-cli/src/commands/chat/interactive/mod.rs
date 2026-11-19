@@ -126,22 +126,18 @@ pub(super) async fn run(runtime: &mut ChatRuntime) -> Result<(), HarnessError> {
     }
 
     clear_on_exit();
-    // The screen is wiped on exit, so leave behind just the line that gets the user back in.
-    // Both id and name are shown: the name is what the user recognises, the id is the
-    // unambiguous handle, and `--session` accepts either.
-    let session_name = env
-        .store
-        .get(env.session_id)
-        .await
-        .map(|s| s.name)
-        .unwrap_or_default();
-    if session_name.is_empty() {
-        println!("Resume: luna --session {}", env.session_id);
-    } else {
-        println!(
-            "Resume: luna --session {}    (name: {})",
-            env.session_id, session_name
-        );
+    let session_record = env.store.get(env.session_id).await.ok();
+    if let Some(record) = session_record {
+        if record.message_count == 0 && st.turns.is_empty() {
+            let _ = env.store.delete_session(env.session_id).await;
+        } else if record.name.is_empty() {
+            println!("Resume: luna --session {}", env.session_id);
+        } else {
+            println!(
+                "Resume: luna --session {}    (name: {})",
+                env.session_id, record.name
+            );
+        }
     }
     Ok(())
 }
