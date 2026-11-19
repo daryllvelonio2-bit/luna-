@@ -6,7 +6,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::header::{HeaderMap, SET_COOKIE};
 use axum::http::{StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::{delete, get, post, put};
+use axum::routing::{delete, get, post};
 use axum::Json;
 use axum::Router;
 use rust_embed::RustEmbed;
