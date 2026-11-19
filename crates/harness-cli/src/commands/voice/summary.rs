@@ -280,7 +280,7 @@ pub async fn generate_fast_voice_text(
     };
 
     let target_prov = if !config.voice.provider.trim().is_empty()
-        && config.voice.provider.trim().to_ascii_lowercase() != "none"
+        && !config.voice.provider.trim().eq_ignore_ascii_case("none")
     {
         config.voice.provider.trim().to_ascii_lowercase()
     } else {

@@ -144,7 +144,7 @@ async fn handle_client_conn(
         let player_tool =
             super::playback::select_player_tool().unwrap_or_else(|| "pw-cat".to_string());
         let mut player = super::playback::NativePlayerProcess::spawn(&player_tool, rate)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(std::io::Error::other)?;
 
         while !cancel.is_cancelled() {
             let mut len_buf = [0u8; 4];
