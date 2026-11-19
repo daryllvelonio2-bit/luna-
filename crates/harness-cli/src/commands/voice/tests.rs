@@ -241,3 +241,11 @@ fn test_is_filler_speech_detects_chatter() {
         "Error code 524 indicates you do not have permission to join this experience."
     ));
 }
+
+#[test]
+fn test_default_player_idle_timeout_is_three_minutes() {
+    assert_eq!(
+        DEFAULT_PLAYER_IDLE_TIMEOUT,
+        std::time::Duration::from_secs(180)
+    );
+}

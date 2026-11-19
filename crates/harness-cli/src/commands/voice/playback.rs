@@ -65,7 +65,11 @@ pub struct NativePlayerProcess {
     pub rate: u32,
     child: std::process::Child,
     stdin: std::process::ChildStdin,
+    last_write: std::time::Instant,
 }
+
+/// Idle timeout after which the warm audio player process is terminated to release audio hardware.
+pub const DEFAULT_PLAYER_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180); // 3 minutes
 
 impl NativePlayerProcess {
     pub fn spawn(tool: &str, rate: u32) -> Result<Self, String> {
@@ -80,6 +84,7 @@ impl NativePlayerProcess {
                     "1".into(),
                     "--format".into(),
                     "s16".into(),
+                    "--latency=40ms".into(),
                     "--raw".into(),
                     "-".into(),
                 ],
@@ -90,6 +95,7 @@ impl NativePlayerProcess {
                     format!("--rate={rate}"),
                     "--channels=1".into(),
                     "--format=s16le".into(),
+                    "--latency-msec=40".into(),
                     "--raw".into(),
                 ],
             ),
@@ -104,6 +110,8 @@ impl NativePlayerProcess {
                     rate.to_string(),
                     "-c".into(),
                     "1".into(),
+                    "-B".into(),
+                    "40000".into(),
                     "-q".into(),
                     "-".into(),
                 ],
@@ -128,7 +136,16 @@ impl NativePlayerProcess {
             rate,
             child,
             stdin,
+            last_write: std::time::Instant::now(),
         })
+    }
+
+    pub fn is_alive(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
+    }
+
+    pub fn idle_elapsed(&self) -> std::time::Duration {
+        self.last_write.elapsed()
     }
 
     pub fn write_samples(&mut self, samples: &[i16]) -> std::io::Result<()> {
@@ -136,7 +153,9 @@ impl NativePlayerProcess {
         for s in samples {
             self.stdin.write_all(&s.to_le_bytes())?;
         }
-        self.stdin.flush()
+        self.stdin.flush()?;
+        self.last_write = std::time::Instant::now();
+        Ok(())
     }
 
     pub fn kill(&mut self) {
@@ -146,6 +165,9 @@ impl NativePlayerProcess {
 }
 
 pub enum AudioThreadCmd {
+    WarmUp {
+        rate: u32,
+    },
     AppendPcm {
         generation: u64,
         rate: u32,
@@ -266,6 +288,23 @@ impl VoiceSpeechQueue {
                         }
                         for c in cmds {
                             match c {
+                                AudioThreadCmd::WarmUp { rate } => {
+                                    if let Some(ref tool) = player_tool {
+                                        let needs_new = match native_player {
+                                            Some(ref mut p) => p.rate != rate || !p.is_alive(),
+                                            None => true,
+                                        };
+                                        if needs_new {
+                                            if let Some(mut old) = native_player.take() {
+                                                old.kill();
+                                            }
+                                            match NativePlayerProcess::spawn(tool, rate) {
+                                                Ok(p) => native_player = Some(p),
+                                                Err(e) => tracing::warn!("{e}"),
+                                            }
+                                        }
+                                    }
+                                }
                                 AudioThreadCmd::ClearAndReset => {
                                     if let Some(mut p) = native_player.take() {
                                         p.kill();
@@ -290,7 +329,7 @@ impl VoiceSpeechQueue {
 
                                     if let Some(ref tool) = player_tool {
                                         let needs_new = match native_player {
-                                            Some(ref p) => p.rate != rate,
+                                            Some(ref mut p) => p.rate != rate || !p.is_alive(),
                                             None => true,
                                         };
                                         if needs_new {
@@ -304,7 +343,17 @@ impl VoiceSpeechQueue {
                                         }
 
                                         if let Some(ref mut p) = native_player {
-                                            let _ = p.write_samples(&samples);
+                                            if let Err(e) = p.write_samples(&samples) {
+                                                tracing::warn!("Failed writing samples to player, respawning: {e}");
+                                                p.kill();
+                                                native_player = None;
+                                                if let Ok(mut new_p) =
+                                                    NativePlayerProcess::spawn(tool, rate)
+                                                {
+                                                    let _ = new_p.write_samples(&samples);
+                                                    native_player = Some(new_p);
+                                                }
+                                            }
                                             last_sample_time = Some(std::time::Instant::now());
                                             is_playing_audio.store(true, Ordering::SeqCst);
                                         }
@@ -363,9 +412,6 @@ impl VoiceSpeechQueue {
                 let audio_busy = if player_tool.is_some() {
                     if let Some(last) = last_sample_time {
                         if last.elapsed() > std::time::Duration::from_millis(300) {
-                            if let Some(mut p) = native_player.take() {
-                                p.kill();
-                            }
                             last_sample_time = None;
                             false
                         } else {
@@ -381,6 +427,15 @@ impl VoiceSpeechQueue {
                 };
 
                 is_playing_audio.store(streaming || audio_busy, Ordering::SeqCst);
+
+                // Idle check: terminate warm native player process after 3 minutes of inactivity
+                if let Some(ref mut p) = native_player {
+                    if p.idle_elapsed() >= DEFAULT_PLAYER_IDLE_TIMEOUT {
+                        tracing::debug!("Audio player idle for 3 minutes; terminating process to release audio hardware.");
+                        p.kill();
+                        native_player = None;
+                    }
+                }
             }
         });
 
@@ -448,14 +503,21 @@ impl VoiceSpeechQueue {
             });
         }
 
-        Self {
+        let queue = Self {
             task_tx,
             audio_tx,
             active_gen,
             is_playing,
             turn_muted,
             active_cancel,
-        }
+        };
+        queue.warm_up(24_000);
+        queue
+    }
+
+    /// Pre-spawn and warm up the native audio player process to eliminate playback latency.
+    pub fn warm_up(&self, rate: u32) {
+        let _ = self.audio_tx.send(AudioThreadCmd::WarmUp { rate });
     }
 
     pub fn is_playing(&self) -> Arc<AtomicBool> {

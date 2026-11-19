@@ -65,6 +65,7 @@ pub async fn handle_voice_slash_command(
 
 pub async fn activate_voice(env: &Env<'_>, st: &mut TuiState) {
     st.voice_active = true;
+    st.voice_speech_queue.warm_up(24_000);
     env.agent.lock().await.set_voice_mode(true);
 
     if let Some(old) = st.voice_cancel.take() {
