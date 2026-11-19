@@ -198,8 +198,11 @@ impl<'a> SlashContext<'a> {
             self.ui.emit_above(&format!(
                 "{} Usage: {}",
                 "•".cyan(),
-                format!("{}<what you want to automate>", harness_scheduler::AUTOMATION_PREFILL)
-                    .yellow()
+                format!(
+                    "{}<what you want to automate>",
+                    harness_scheduler::AUTOMATION_PREFILL
+                )
+                .yellow()
             ));
             return Ok(SlashOutcome::Continue);
         };

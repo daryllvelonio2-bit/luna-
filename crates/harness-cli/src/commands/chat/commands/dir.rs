@@ -332,9 +332,10 @@ async fn apply_workspace_change(
     }
     // The skills the harness ships with, including the desktop skill.
     all_skills.extend(crate::commands::desktop::builtin_skills());
-    if !all_skills.iter().any(|s| {
-        harness_plugins::names_match(&s.name, harness_scheduler::AUTOMATION_SKILL_NAME)
-    }) {
+    if !all_skills
+        .iter()
+        .any(|s| harness_plugins::names_match(&s.name, harness_scheduler::AUTOMATION_SKILL_NAME))
+    {
         all_skills.push(harness_scheduler::automation_skill());
     }
     if !all_skills.is_empty() {

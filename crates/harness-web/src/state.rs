@@ -9,9 +9,7 @@ use tokio_util::sync::CancellationToken;
 
 use harness_app::events::{from_agent_event, from_subagent_event, AppEvent};
 use harness_app::runtime::{AppRuntime, AppSessionOptions, ExtraToolRegistrar};
-use harness_app::session::{
-    create_session as create_store_session, open_store, SessionSelection,
-};
+use harness_app::session::{create_session as create_store_session, open_store, SessionSelection};
 use harness_core::config::Config;
 use harness_core::session::{SessionStore, SqliteSessionStore};
 use harness_core::{ApprovalDecision, ClarifyResponse, HarnessError, ToolRegistry};
@@ -186,9 +184,10 @@ impl WebState {
                         all_skills.extend(skills);
                     }
                 }
-                if !all_skills.iter().any(|s| {
-                    harness_plugins::names_match(&s.name, AUTOMATION_SKILL_NAME)
-                }) {
+                if !all_skills
+                    .iter()
+                    .any(|s| harness_plugins::names_match(&s.name, AUTOMATION_SKILL_NAME))
+                {
                     all_skills.push(automation_skill());
                 }
                 if !all_skills.is_empty() {
