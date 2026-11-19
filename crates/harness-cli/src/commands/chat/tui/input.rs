@@ -893,7 +893,12 @@ async fn handle_key(
             }
             KeyCode::Tab => {
                 if let Some(entry) = st.slash_popup.matches.get(st.slash_popup.selected) {
-                    st.composer.set_text(format!("{} ", entry.name));
+                    if entry.name == "/automation" {
+                        st.composer
+                            .set_text(harness_scheduler::AUTOMATION_PREFILL.to_string());
+                    } else {
+                        st.composer.set_text(format!("{} ", entry.name));
+                    }
                     sync_slash_popup(env, st);
                 }
                 return Ok(Flow::Continue);
@@ -907,6 +912,12 @@ async fn handle_key(
                     && !key.modifiers.contains(KeyModifiers::ALT) =>
             {
                 if let Some(entry) = st.slash_popup.matches.get(st.slash_popup.selected).cloned() {
+                    if entry.name == "/automation" {
+                        st.composer
+                            .set_text(harness_scheduler::AUTOMATION_PREFILL.to_string());
+                        sync_slash_popup(env, st);
+                        return Ok(Flow::Continue);
+                    }
                     // Commands that expect an argument complete into composer if user hasn't typed exact match.
                     let is_worker = entry.details.starts_with("Worker · ");
                     let needs_arg =

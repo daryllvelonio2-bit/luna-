@@ -97,20 +97,32 @@ export interface PluginSummary {
   source_kind: 'workspace' | 'global' | 'builtin';
 }
 
+export type DeliveryTarget =
+  | { kind: 'new_session_each_run' }
+  | { kind: 'single_new_session'; session_id?: string | null }
+  | { kind: 'existing_session'; session_id: string };
+
+export interface DeliveryReceipt {
+  delivered_at: string;
+  session_id: string;
+  status: string;
+  summary: string;
+}
+
 export interface ScheduleTask {
   id: string;
-  title: string;
-  prompt: string;
-  schedule_type: 'cron' | 'interval';
-  cron_expr?: string;
-  interval_secs?: number;
-  provider?: string;
-  model?: string;
-  enabled: boolean;
-  last_run_at?: string;
-  next_run_at?: string;
+  name: string;
+  instruction: string;
+  rule: string;
+  delivery_target: DeliveryTarget;
+  plugin_id?: string | null;
+  paused: boolean;
+  completed: boolean;
+  last_run_at?: string | null;
+  next_run_at?: string | null;
   created_at: string;
   updated_at: string;
+  history: DeliveryReceipt[];
 }
 
 export interface MemoryFact {

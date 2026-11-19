@@ -1,20 +1,27 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use chrono::Utc;
 use tokio::sync::{broadcast, oneshot, Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 
 use harness_app::events::{from_agent_event, from_subagent_event, AppEvent};
 use harness_app::runtime::{AppRuntime, AppSessionOptions, ExtraToolRegistrar};
-use harness_app::session::{open_store, SessionSelection};
+use harness_app::session::{
+    create_session as create_store_session, open_store, SessionSelection,
+};
 use harness_core::config::Config;
-use harness_core::session::SqliteSessionStore;
+use harness_core::session::{SessionStore, SqliteSessionStore};
 use harness_core::{ApprovalDecision, ClarifyResponse, HarnessError, ToolRegistry};
 use harness_plugins::{PluginManager, SkillLoader, SkillViewTool, SkillsListTool};
 use harness_providers::{CredentialManager, ModelDiscovery};
-use harness_scheduler::{ensure_scheduler_plugin, ScheduleStore, SchedulerService};
+use harness_scheduler::{
+    automation_skill, ensure_scheduler_plugin, register_schedule_tools, DeliveryReceipt,
+    DeliveryTarget, ScheduleDeliveryHandler, ScheduleStore, ScheduleTask, SchedulerService,
+    AUTOMATION_SKILL_NAME,
+};
 
 use crate::auth::WebAuthState;
 
@@ -162,9 +169,13 @@ impl WebState {
         let cfg_snapshot = self.config.read().await.clone();
         let skills_dir = cfg_snapshot.paths.skills_dir.clone();
         let ws_skills_dir = cfg_snapshot.paths.workspace_root.join(".harness/skills");
+        let sched_store = self.scheduler.store().clone();
+        let sid_for_tools = session_id.to_string();
         let extra_tools: Option<ExtraToolRegistrar> = Some(Arc::new(move |registry| {
             let skills_dir = skills_dir.clone();
             let ws_skills_dir = ws_skills_dir.clone();
+            let sched_store = sched_store.clone();
+            let sid_for_tools = sid_for_tools.clone();
             Box::pin(async move {
                 let mut all_skills = Vec::new();
                 if let Ok(skills) = SkillLoader::load_skills_from_dir(&skills_dir) {
@@ -175,6 +186,11 @@ impl WebState {
                         all_skills.extend(skills);
                     }
                 }
+                if !all_skills.iter().any(|s| {
+                    harness_plugins::names_match(&s.name, AUTOMATION_SKILL_NAME)
+                }) {
+                    all_skills.push(automation_skill());
+                }
                 if !all_skills.is_empty() {
                     let skills_arc = Arc::new(all_skills);
                     registry
@@ -184,6 +200,8 @@ impl WebState {
                         .register(Arc::new(SkillsListTool::new(skills_arc)))
                         .await?;
                 }
+                let reg_dyn: Arc<dyn ToolRegistry> = registry.clone();
+                register_schedule_tools(&reg_dyn, sched_store, Some(sid_for_tools), true).await?;
                 Ok(())
             })
         }));
@@ -306,5 +324,116 @@ impl WebState {
         }
 
         Ok(handle)
+    }
+
+    /// Resolve or create the target session ID for a scheduled automation run.
+    pub async fn resolve_schedule_session(&self, task: &ScheduleTask) -> Result<String, String> {
+        match &task.delivery_target {
+            DeliveryTarget::ExistingSession { session_id } if !session_id.trim().is_empty() => {
+                Ok(session_id.clone())
+            }
+            DeliveryTarget::SingleNewSession {
+                session_id: Some(sid),
+            } if !sid.trim().is_empty() => Ok(sid.clone()),
+            _ => {
+                let sid = create_store_session(&self.store)
+                    .await
+                    .map_err(|e| format!("failed to create automation session: {e}"))?;
+                let title = format!("⚡ {}", task.name);
+                let _ = self.store.set_name(&sid, &title).await;
+                Ok(sid)
+            }
+        }
+    }
+
+    /// Execute a single scheduled task inside `session_id` and return a `DeliveryReceipt`.
+    pub async fn execute_schedule_in_session(
+        self: &Arc<Self>,
+        task: &ScheduleTask,
+        session_id: String,
+    ) -> Result<DeliveryReceipt, String> {
+        let handle = self
+            .get_or_open_session(&session_id, None)
+            .await
+            .map_err(|e| format!("failed to open automation session: {e}"))?;
+
+        let cancel = CancellationToken::new();
+        *handle
+            .active_cancel
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(cancel.clone());
+        handle.turn_running.store(true, Ordering::SeqCst);
+
+        self.emit_event(AppEvent::TurnStarted {
+            session_id: session_id.clone(),
+            query: task.instruction.clone(),
+        });
+        let started = std::time::Instant::now();
+
+        let (result, provider, model) = {
+            let rt = handle.runtime.lock().await;
+            let ag = rt.agent.lock().await;
+            let res = ag.run_turn(&task.instruction, cancel).await;
+            (res, rt.current_provider.clone(), rt.current_model.clone())
+        };
+
+        handle.turn_running.store(false, Ordering::SeqCst);
+        let elapsed = started.elapsed().as_millis() as u64;
+
+        match result {
+            Ok(turn_outcome) => {
+                {
+                    let rt = handle.runtime.lock().await;
+                    rt.usage
+                        .record_chat(&provider, &model, Some(&session_id), &turn_outcome)
+                        .await;
+                }
+                let usage = turn_outcome.usage;
+                let summary_raw = turn_outcome.reply.trim();
+                let summary: String = summary_raw.chars().take(280).collect();
+                self.emit_event(AppEvent::TurnFinished {
+                    session_id: session_id.clone(),
+                    reply: turn_outcome.reply,
+                    duration_ms: elapsed,
+                    prompt_tokens: usage.as_ref().map(|u| u.prompt_tokens).unwrap_or(0),
+                    completion_tokens: usage.as_ref().map(|u| u.completion_tokens).unwrap_or(0),
+                });
+                Ok(DeliveryReceipt {
+                    delivered_at: Utc::now(),
+                    session_id,
+                    status: "delivered".to_string(),
+                    summary: if summary.is_empty() {
+                        "Completed with no text output.".to_string()
+                    } else {
+                        summary
+                    },
+                })
+            }
+            Err(err) => {
+                let err_str = err.to_string();
+                self.emit_event(AppEvent::TurnFailed {
+                    session_id: session_id.clone(),
+                    error: err_str.clone(),
+                });
+                Ok(DeliveryReceipt {
+                    delivered_at: Utc::now(),
+                    session_id,
+                    status: "failed".to_string(),
+                    summary: err_str,
+                })
+            }
+        }
+    }
+
+    /// Build the background delivery handler consumed by `SchedulerService::spawn_loop`.
+    pub fn schedule_delivery_handler(self: &Arc<Self>) -> ScheduleDeliveryHandler {
+        let state = Arc::clone(self);
+        Arc::new(move |task: ScheduleTask| {
+            let state = Arc::clone(&state);
+            Box::pin(async move {
+                let session_id = state.resolve_schedule_session(&task).await?;
+                state.execute_schedule_in_session(&task, session_id).await
+            })
+        })
     }
 }

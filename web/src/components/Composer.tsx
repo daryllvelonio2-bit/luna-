@@ -21,6 +21,7 @@ export interface SlashItem {
   desc: string;
   category: 'command' | 'worker' | 'skill';
   hasArg?: boolean;
+  prefill?: string;
 }
 
 const BUILTIN_SLASH_COMMANDS: SlashItem[] = [
@@ -28,6 +29,13 @@ const BUILTIN_SLASH_COMMANDS: SlashItem[] = [
   { cmd: '/thinking', desc: 'Set thinking / reasoning effort', category: 'command', hasArg: true },
   { cmd: '/plan', desc: 'Toggle read-only plan mode', category: 'command' },
   { cmd: '/mode', desc: 'Switch build / auto / plan mode', category: 'command', hasArg: true },
+  {
+    cmd: '/automation',
+    desc: 'Open Automations UI or guide a new scheduled workflow',
+    category: 'command',
+    hasArg: true,
+    prefill: '/automation guide me with automation ',
+  },
   { cmd: '/compact', desc: 'Compact conversation history now', category: 'command' },
   { cmd: '/summarize', desc: 'Summarize and start a fresh chat', category: 'command' },
   { cmd: '/usage', desc: 'View session and global token/cost usage', category: 'command' },
@@ -240,7 +248,11 @@ export const Composer: React.FC<ComposerProps> = React.memo(
     };
 
     const applySlashPick = (item: SlashItem) => {
-      if (item.hasArg) {
+      if (item.prefill) {
+        setInput(item.prefill);
+        setSlashDismissed(true);
+        textareaRef.current?.focus();
+      } else if (item.hasArg) {
         setInput(`${item.cmd} `);
         setSlashDismissed(true);
         textareaRef.current?.focus();

@@ -219,6 +219,10 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
             "Run an autonomous loop until a goal is achieved (/goal <objective>, status, stop)",
     },
     SlashCommand {
+        name: "/automation",
+        details: "Guide and configure persistent scheduled automations (/automation <request>)",
+    },
+    SlashCommand {
         name: "/fork",
         details: "Fork current session into a new branch session",
     },

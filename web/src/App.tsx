@@ -452,6 +452,7 @@ export const App: React.FC = () => {
             loadTranscript(event.session_id);
           }
           api.listSessions(150).then(setSessions).catch(() => {});
+          api.listSchedules().then(setSchedules).catch(() => {});
           break;
 
         case 'turn_failed':
@@ -773,6 +774,22 @@ export const App: React.FC = () => {
         }
         return true;
       }
+      if (cmd === '/automation' || cmd === '/automations') {
+        if (!arg) {
+          api.listSchedules().then(setSchedules).catch(() => {});
+          setCurrentTab('automations');
+          return true;
+        }
+        const prompt =
+          `Automation Workflow Request:\n` +
+          `1. First call \`skill_view\` with \`name: "automation"\` to load the global automation workflow instructions.\n` +
+          `2. Follow those instructions carefully for the user's request below.\n` +
+          `3. If critical details (timezone, tools/pipeline, side-effect boundaries, inputs/outputs, etc.) are missing or ambiguous, call \`clarify\` first before creating any schedules.\n` +
+          `4. Once requirements are clear, create or update the scheduled automation task(s) using \`schedule_create\` / \`schedule_edit\`.\n\n` +
+          `User request:\n${arg}`;
+        handleSendMessage(prompt, images);
+        return true;
+      }
       if (cmd === '/dir') {
         setIsWorkspacePickerOpen(true);
         return true;
@@ -842,6 +859,7 @@ export const App: React.FC = () => {
       handleForkSession,
       handleDeleteSession,
       handleRenameSession,
+      handleSendMessage,
       pushNotice,
       showError,
     ]
@@ -1052,30 +1070,64 @@ export const App: React.FC = () => {
     }
   }, []);
 
-  const handleCreateSchedule = async (
-    title: string,
-    prompt: string,
-    scheduleType: 'cron' | 'interval',
-    cronExpr?: string,
-    intervalSecs?: number
-  ) => {
+  const handleCreateSchedule = async (payload: {
+    name: string;
+    instruction: string;
+    rule: string;
+    target?: 'new_session_each_run' | 'single_new_session' | 'existing_session';
+    session_id?: string;
+  }) => {
     try {
-      await api.createSchedule(title, prompt, scheduleType, cronExpr, intervalSecs);
+      await api.createSchedule(payload);
       const updated = await api.listSchedules();
       setSchedules(updated);
+      pushNotice(`Created automation "${payload.name}".`);
     } catch (e) {
       showError(`Failed to create automation: ${String(e)}`);
     }
   };
 
-  const handleToggleSchedule = async (taskId: string, enabled: boolean) => {
+  const handleUpdateSchedule = async (
+    taskId: string,
+    payload: {
+      name?: string;
+      instruction?: string;
+      rule?: string;
+      paused?: boolean;
+      target?: 'new_session_each_run' | 'single_new_session' | 'existing_session';
+    }
+  ) => {
     try {
-      await api.toggleSchedule(taskId, enabled);
+      const updatedTask = await api.updateSchedule(taskId, payload);
       setSchedules((prev) =>
-        prev.map((s) => (s.id === taskId ? { ...s, enabled } : s))
+        prev.map((s) => (s.id === taskId ? updatedTask : s))
+      );
+      pushNotice(`Updated automation "${updatedTask.name}".`);
+    } catch (e) {
+      showError(`Failed to update automation: ${String(e)}`);
+    }
+  };
+
+  const handleToggleSchedule = async (taskId: string, paused: boolean) => {
+    try {
+      const updatedTask = await api.toggleSchedule(taskId, paused);
+      setSchedules((prev) =>
+        prev.map((s) => (s.id === taskId ? updatedTask : s))
       );
     } catch (e) {
       showError(`Failed to toggle automation: ${String(e)}`);
+    }
+  };
+
+  const handleRunSchedule = async (taskId: string): Promise<string | null> => {
+    try {
+      const res = await api.runSchedule(taskId);
+      api.listSessions(150).then(setSessions).catch(() => {});
+      pushNotice(`Automation started in session ${res.session_id.slice(0, 8)}…`);
+      return res.session_id;
+    } catch (e) {
+      showError(`Failed to run automation: ${String(e)}`);
+      return null;
     }
   };
 
@@ -1086,6 +1138,27 @@ export const App: React.FC = () => {
     } catch (e) {
       showError(`Failed to delete automation: ${String(e)}`);
     }
+  };
+
+  const handleGuideAutomationInChat = async (description: string) => {
+    setCurrentTab('chat');
+    if (!activeSessionIdRef.current) {
+      await handleNewSession(null);
+    }
+    const clean = description.trim();
+    const prompt =
+      `Automation Workflow Request:\n` +
+      `1. First call \`skill_view\` with \`name: "automation"\` to load the global automation workflow instructions.\n` +
+      `2. Follow those instructions carefully for the user's request below.\n` +
+      `3. If critical details (timezone, tools/pipeline, side-effect boundaries, inputs/outputs, etc.) are missing or ambiguous, call \`clarify\` first before creating any schedules.\n` +
+      `4. Once requirements are clear, create or update the scheduled automation task(s) using \`schedule_create\` / \`schedule_edit\`.\n\n` +
+      `User request:\n${clean || 'guide me with automation'}`;
+    handleSendMessage(prompt);
+  };
+
+  const handleOpenAutomationSession = (sessionId: string) => {
+    setCurrentTab('chat');
+    handleSelectSession(sessionId);
   };
 
   const handleTogglePlugin = async (pluginId: string, enabled: boolean) => {
@@ -1214,8 +1287,13 @@ export const App: React.FC = () => {
             sidebarOpen={sidebarOpen}
             onToggleSidebar={() => setSidebarOpen((v) => !v)}
             onCreateTask={handleCreateSchedule}
+            onUpdateTask={handleUpdateSchedule}
             onToggleTask={handleToggleSchedule}
+            onRunTask={handleRunSchedule}
             onDeleteTask={handleDeleteSchedule}
+            onGuideInChat={handleGuideAutomationInChat}
+            onOpenSession={handleOpenAutomationSession}
+            onRefresh={() => api.listSchedules().then(setSchedules).catch(() => {})}
           />
         )}
 

@@ -3670,6 +3670,11 @@ pub async fn run_slash_command(
             create_new_session(env, st).await?;
             return Ok(Flow::Continue);
         }
+        "/automation" if arg.is_none() => {
+            st.composer
+                .set_text(harness_scheduler::AUTOMATION_PREFILL.to_string());
+            return Ok(Flow::Continue);
+        }
         "/thinking" | "/think" | "/reasoning" if arg.is_none() => {
             open_thinking_picker(env, st).await;
             return Ok(Flow::Continue);

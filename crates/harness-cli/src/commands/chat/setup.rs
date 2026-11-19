@@ -349,6 +349,7 @@ async fn build_tooling(
         provider,
         store,
         &session.todo_scope,
+        &session.session_id,
     )
     .await?;
 
@@ -712,6 +713,7 @@ async fn register_tools(
     provider: &Arc<GenericProviderClient>,
     store: &Arc<SqliteSessionStore>,
     todo_scope: &TodoScope,
+    session_id: &str,
 ) -> Result<ToolSetup, HarnessError> {
     register_memory_and_note_tools(
         config,
@@ -726,6 +728,29 @@ async fn register_tools(
 
     let (skills_arc, skills_readout) = load_skills_and_readout(config);
     register_skill_and_desktop_tools(registry, &skills_arc).await?;
+
+    // Register persistent schedule tools (`schedule_create`, `schedule_list`, `schedule_view`, `schedule_edit`).
+    let schedules_db = config
+        .paths
+        .sessions_db
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .join("schedules.db");
+    match harness_scheduler::ScheduleStore::open(Some(&schedules_db)) {
+        Ok(sched_store) => {
+            let reg_dyn: Arc<dyn ToolRegistry> = registry.clone();
+            harness_scheduler::register_schedule_tools(
+                &reg_dyn,
+                Arc::new(sched_store),
+                Some(session_id.to_string()),
+                true,
+            )
+            .await?;
+        }
+        Err(err) => {
+            tracing::warn!("failed to open schedule store for CLI tools: {}", err);
+        }
+    }
 
     let (bg_queue, delegate_tool, sudo_rx) =
         register_task_and_core_tools(config, registry, provider, memory, notes, store, todo_scope)
@@ -824,8 +849,13 @@ fn load_skills_and_readout(
             all_skills.extend(skills);
         }
     }
-    // The skills the harness ships with, including the desktop skill.
+    // The skills the harness ships with, including the desktop and automation skills.
     all_skills.extend(crate::commands::desktop::builtin_skills());
+    if !all_skills.iter().any(|s| {
+        harness_plugins::names_match(&s.name, harness_scheduler::AUTOMATION_SKILL_NAME)
+    }) {
+        all_skills.push(harness_scheduler::automation_skill());
+    }
 
     // `/skills` prints a name-only readout: a paragraph per skill is a wall of text on a terminal,
     // and the procedure itself is `skill_view`'s job. Skills are not listed in the system prompt;

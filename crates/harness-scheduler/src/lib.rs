@@ -3,12 +3,17 @@
 pub mod builtin_plugin;
 pub mod model;
 pub mod service;
+pub mod skill;
 pub mod store;
 pub mod tools;
 
 pub use builtin_plugin::{ensure_scheduler_plugin, SCHEDULER_PLUGIN_ID};
 pub use model::{compute_next_run, validate_rule, DeliveryReceipt, DeliveryTarget, ScheduleTask};
 pub use service::{ScheduleDeliveryHandler, SchedulerService};
+pub use skill::{
+    automation_skill, build_automation_turn_prompt, AUTOMATION_PREFILL,
+    AUTOMATION_SKILL_DESCRIPTION, AUTOMATION_SKILL_INSTRUCTIONS, AUTOMATION_SKILL_NAME,
+};
 pub use store::ScheduleStore;
 pub use tools::register_schedule_tools;
 

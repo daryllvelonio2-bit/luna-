@@ -625,30 +625,52 @@ class ApiClient {
     return this.request<ScheduleTask[]>('/api/schedules');
   }
 
-  public async createSchedule(
-    title: string,
-    prompt: string,
-    scheduleType: 'cron' | 'interval',
-    cronExpr?: string,
-    intervalSecs?: number
-  ): Promise<{ id: string }> {
-    return this.request<{ id: string }>('/api/schedules', {
+  public async createSchedule(payload: {
+    name: string;
+    instruction: string;
+    rule: string;
+    target?: 'new_session_each_run' | 'single_new_session' | 'existing_session';
+    session_id?: string;
+  }): Promise<ScheduleTask> {
+    return this.request<ScheduleTask>('/api/schedules', {
       method: 'POST',
-      body: JSON.stringify({
-        title,
-        prompt,
-        schedule_type: scheduleType,
-        cron_expr: cronExpr,
-        interval_secs: intervalSecs,
-      }),
+      body: JSON.stringify(payload),
     });
   }
 
-  public async toggleSchedule(taskId: string, enabled: boolean): Promise<void> {
-    return this.request<void>(`/api/schedules/${encodeURIComponent(taskId)}/toggle`, {
-      method: 'POST',
-      body: JSON.stringify({ enabled }),
+  public async updateSchedule(
+    taskId: string,
+    payload: {
+      name?: string;
+      instruction?: string;
+      rule?: string;
+      paused?: boolean;
+      target?: 'new_session_each_run' | 'single_new_session' | 'existing_session';
+      session_id?: string;
+    }
+  ): Promise<ScheduleTask> {
+    return this.request<ScheduleTask>(`/api/schedules/${encodeURIComponent(taskId)}`, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
     });
+  }
+
+  public async toggleSchedule(taskId: string, paused: boolean): Promise<ScheduleTask> {
+    return this.request<ScheduleTask>(`/api/schedules/${encodeURIComponent(taskId)}/toggle`, {
+      method: 'POST',
+      body: JSON.stringify({ paused }),
+    });
+  }
+
+  public async runSchedule(
+    taskId: string
+  ): Promise<{ task_id: string; session_id: string; status: string }> {
+    return this.request<{ task_id: string; session_id: string; status: string }>(
+      `/api/schedules/${encodeURIComponent(taskId)}/run`,
+      {
+        method: 'POST',
+      }
+    );
   }
 
   public async deleteSchedule(taskId: string): Promise<void> {

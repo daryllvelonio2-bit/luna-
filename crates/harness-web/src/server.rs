@@ -101,6 +101,14 @@ pub async fn run_web_server(config: Config, options: WebServerOptions) -> Result
     let launch_url = format!("{}/?token={}", advertised_url, state.auth.launch_token);
     println!("{} {}", "luna web:".green().bold(), launch_url);
 
+    // Start background scheduler loop so due automations execute automatically while luna web runs
+    let sched_handler = state.schedule_delivery_handler();
+    let _scheduler_handle = state.scheduler.clone().spawn_loop(
+        sched_handler,
+        std::time::Duration::from_secs(5),
+        state.shutdown_token.clone(),
+    );
+
     let router = create_router(state);
 
     // Browser handoff in background task so axum::serve starts accepting requests immediately

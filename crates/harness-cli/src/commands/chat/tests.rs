@@ -999,6 +999,12 @@ fn goal_command_is_registered_reserved_and_mid_turn_stoppable() {
             .any(|cmd| cmd.name == "/goal"),
         "/goal must be listed in SLASH_COMMANDS"
     );
+    assert!(
+        super::commands::SLASH_COMMANDS
+            .iter()
+            .any(|cmd| cmd.name == "/automation"),
+        "/automation must be listed in SLASH_COMMANDS"
+    );
     assert_eq!(
         composer_command("/goal stop"),
         Some(ComposerCommand::GoalStop)

@@ -6,7 +6,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::header::{HeaderMap, SET_COOKIE};
 use axum::http::{StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use axum::Json;
 use axum::Router;
 use rust_embed::RustEmbed;
@@ -130,7 +130,13 @@ pub fn create_router(state: Arc<WebState>) -> Router {
             "/api/schedules/{task_id}/toggle",
             post(toggle_schedule_task),
         )
-        .route("/api/schedules/{task_id}", delete(delete_schedule_task))
+        .route("/api/schedules/{task_id}/run", post(run_schedule_task))
+        .route(
+            "/api/schedules/{task_id}",
+            get(get_schedule_task)
+                .put(update_schedule_task)
+                .delete(delete_schedule_task),
+        )
         .route("/api/memories", get(search_memories))
         .route("/api/notes", get(search_notes))
         .route("/api/notes/{note_id}", get(get_note))
@@ -1332,58 +1338,191 @@ async fn list_schedules(
     Ok(Json(tasks))
 }
 
+async fn get_schedule_task(
+    State(state): State<Arc<WebState>>,
+    Path(task_id): Path<String>,
+) -> Result<Json<ScheduleTask>, (StatusCode, String)> {
+    let task = state
+        .scheduler
+        .store()
+        .get(&task_id)
+        .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
+    Ok(Json(task))
+}
+
+fn parse_delivery_target(target: Option<&str>, session_id: Option<&str>) -> DeliveryTarget {
+    match target.unwrap_or("new_session_each_run") {
+        "existing_session" => DeliveryTarget::ExistingSession {
+            session_id: session_id.unwrap_or_default().to_string(),
+        },
+        "single_new_session" => DeliveryTarget::SingleNewSession {
+            session_id: session_id.filter(|s| !s.is_empty()).map(str::to_string),
+        },
+        _ => DeliveryTarget::NewSessionEachRun,
+    }
+}
+
 #[derive(Deserialize)]
 struct CreateScheduleReq {
-    title: String,
-    prompt: String,
-    schedule_type: String,
+    name: Option<String>,
+    title: Option<String>,
+    instruction: Option<String>,
+    prompt: Option<String>,
+    rule: Option<String>,
+    schedule_type: Option<String>,
     cron_expr: Option<String>,
     interval_secs: Option<u64>,
+    target: Option<String>,
+    session_id: Option<String>,
 }
 
 async fn create_schedule_task(
     State(state): State<Arc<WebState>>,
     Json(payload): Json<CreateScheduleReq>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let rule = if payload.schedule_type == "interval" {
+) -> Result<Json<ScheduleTask>, (StatusCode, String)> {
+    let name = payload
+        .name
+        .or(payload.title)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let instruction = payload
+        .instruction
+        .or(payload.prompt)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if name.is_empty() || instruction.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "name and instruction are required".to_string(),
+        ));
+    }
+
+    let rule = if let Some(r) = payload.rule.filter(|s| !s.trim().is_empty()) {
+        r.trim().to_string()
+    } else if payload.schedule_type.as_deref() == Some("interval") {
         format!("every:{}", payload.interval_secs.unwrap_or(3600))
     } else {
         payload
             .cron_expr
+            .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| "0 9 * * 1-5".to_string())
     };
+
+    let target = parse_delivery_target(payload.target.as_deref(), payload.session_id.as_deref());
 
     let task = state
         .scheduler
         .store()
-        .create(
-            None,
-            payload.title,
-            payload.prompt,
-            rule,
-            DeliveryTarget::NewSessionEachRun,
-            None,
-        )
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .create(None, name, instruction, rule, target, None)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
-    Ok(Json(serde_json::json!({ "id": task.id })))
+    Ok(Json(task))
+}
+
+#[derive(Deserialize)]
+struct UpdateScheduleReq {
+    name: Option<String>,
+    instruction: Option<String>,
+    rule: Option<String>,
+    paused: Option<bool>,
+    target: Option<String>,
+    session_id: Option<String>,
+}
+
+async fn update_schedule_task(
+    State(state): State<Arc<WebState>>,
+    Path(task_id): Path<String>,
+    Json(payload): Json<UpdateScheduleReq>,
+) -> Result<Json<ScheduleTask>, (StatusCode, String)> {
+    let delivery_target = payload
+        .target
+        .as_deref()
+        .map(|t| parse_delivery_target(Some(t), payload.session_id.as_deref()));
+
+    let updated = state
+        .scheduler
+        .store()
+        .update(
+            &task_id,
+            payload.name,
+            payload.instruction,
+            payload.rule,
+            delivery_target,
+            payload.paused,
+        )
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+
+    Ok(Json(updated))
+}
+
+async fn run_schedule_task(
+    State(state): State<Arc<WebState>>,
+    Path(task_id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let task = state
+        .scheduler
+        .store()
+        .get(&task_id)
+        .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
+
+    let session_id = state
+        .resolve_schedule_session(&task)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    let bg_state = Arc::clone(&state);
+    let bg_session_id = session_id.clone();
+    let bg_task_id = task_id.clone();
+    tokio::spawn(async move {
+        let receipt = match bg_state
+            .execute_schedule_in_session(&task, bg_session_id.clone())
+            .await
+        {
+            Ok(r) => r,
+            Err(err) => harness_scheduler::DeliveryReceipt {
+                delivered_at: chrono::Utc::now(),
+                session_id: bg_session_id,
+                status: "failed".to_string(),
+                summary: err,
+            },
+        };
+        if let Err(err) = bg_state
+            .scheduler
+            .store()
+            .record_delivery(&bg_task_id, receipt)
+        {
+            tracing::warn!("failed to record schedule delivery receipt: {}", err);
+        }
+    });
+
+    Ok(Json(serde_json::json!({
+        "task_id": task_id,
+        "session_id": session_id,
+        "status": "running"
+    })))
 }
 
 async fn toggle_schedule_task(
     State(state): State<Arc<WebState>>,
     Path(task_id): Path<String>,
     Json(payload): Json<serde_json::Value>,
-) -> Result<StatusCode, (StatusCode, String)> {
-    let enabled = payload
-        .get("enabled")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
-    state
+) -> Result<Json<ScheduleTask>, (StatusCode, String)> {
+    let paused = if let Some(p) = payload.get("paused").and_then(|v| v.as_bool()) {
+        p
+    } else {
+        !payload
+            .get("enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true)
+    };
+    let updated = state
         .scheduler
         .store()
-        .update(&task_id, None, None, None, None, Some(!enabled))
+        .update(&task_id, None, None, None, None, Some(paused))
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(StatusCode::OK)
+    Ok(Json(updated))
 }
 
 async fn delete_schedule_task(

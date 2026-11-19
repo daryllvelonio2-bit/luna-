@@ -190,6 +190,24 @@ impl<'a> SlashContext<'a> {
         ))
     }
 
+    pub(super) async fn cmd_automation(
+        &mut self,
+        arg: Option<&str>,
+    ) -> Result<SlashOutcome, HarnessError> {
+        let Some(request) = arg.map(str::trim).filter(|s| !s.is_empty()) else {
+            self.ui.emit_above(&format!(
+                "{} Usage: {}",
+                "•".cyan(),
+                format!("{}<what you want to automate>", harness_scheduler::AUTOMATION_PREFILL)
+                    .yellow()
+            ));
+            return Ok(SlashOutcome::Continue);
+        };
+        let prompt = harness_scheduler::build_automation_turn_prompt(request);
+        let display = format!("/automation {request}");
+        Ok(SlashOutcome::Turn { prompt, display })
+    }
+
     pub(super) async fn cmd_exit(&mut self) -> Result<SlashOutcome, HarnessError> {
         self.ui.clear_box_on_exit();
         clear_on_exit();
