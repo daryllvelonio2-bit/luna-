@@ -3815,13 +3815,47 @@ pub async fn deactivate_voice(env: &Env<'_>, st: &mut TuiState) {
     if let Some(cancel) = st.voice_cancel.take() {
         cancel.cancel();
     }
-    if let Some(pb_cancel) = st.voice_playback_cancel.take() {
-        pb_cancel.cancel();
-    }
-    st.voice_is_playing.store(false, Ordering::SeqCst);
+    st.voice_speech_queue.interrupt();
+    st.voice_stream_offset = 0;
+    st.voice_stream_in_code = false;
+    st.voice_spoken_any = false;
 
     st.system_notices
         .push(SystemNotice::new("• Voice mode deactivated."));
+}
+
+/// Stream newly completed sentences from the live assistant response into `VoiceSpeechQueue`
+/// while the LLM turn is still generating tokens.
+pub fn pump_voice_streaming_tts(env: &Env<'_>, st: &mut TuiState) {
+    if !st.voice_active || st.active_turn.is_none() {
+        return;
+    }
+    let live_text = env.ui.live_content_snapshot();
+    if live_text.len() < st.voice_stream_offset
+        || !live_text.is_char_boundary(st.voice_stream_offset)
+    {
+        st.voice_stream_offset = 0;
+        st.voice_stream_in_code = false;
+    }
+    if live_text.len() <= st.voice_stream_offset {
+        return;
+    }
+
+    let (chunks, consumed) = crate::commands::voice::extract_ready_speech_chunks(
+        &live_text[st.voice_stream_offset..],
+        &mut st.voice_stream_in_code,
+        !st.voice_spoken_any,
+    );
+    st.voice_stream_offset += consumed;
+    for chunk in chunks {
+        st.voice_speech_queue.enqueue(
+            &chunk,
+            env.config,
+            &env.cred_manager,
+            Some(st.voice_tx.clone()),
+        );
+        st.voice_spoken_any = true;
+    }
 }
 
 pub async fn handle_voice_event(
@@ -3850,9 +3884,10 @@ pub async fn handle_incoming_voice_input(env: &Env<'_>, st: &mut TuiState, voice
         return;
     }
     // Barge-in: interrupt ongoing speech playback immediately
-    if let Some(cancel) = st.voice_playback_cancel.take() {
-        cancel.cancel();
-    }
+    st.voice_speech_queue.interrupt();
+    st.voice_stream_offset = 0;
+    st.voice_stream_in_code = false;
+    st.voice_spoken_any = false;
 
     st.system_notices
         .push(SystemNotice::new(format!("🎤 Heard: \"{trimmed}\"")));
@@ -4542,6 +4577,11 @@ pub async fn handle_turn_end(
     }
     env.ui.set_turn_active(false);
     env.ui.stop_activity();
+    let remaining_live_for_voice = if st.voice_active {
+        env.ui.live_content_snapshot()
+    } else {
+        String::new()
+    };
     let trailing_reasoning = env.ui.take_live_reasoning_with_duration();
     let trailing_prose = env.ui.take_live_content();
     env.ui.clear_live_state();
@@ -4626,34 +4666,55 @@ pub async fn handle_turn_end(
                 set_all_process_expanded(st, false);
             }
             st.live_thinking_view = LiveThinkingView::Tail;
-            if st.voice_active && !outcome.reply.trim().is_empty() {
-                if let Some(prev) = st.voice_playback_cancel.take() {
-                    prev.cancel();
+            if st.voice_active {
+                if st.voice_spoken_any {
+                    if remaining_live_for_voice.len() > st.voice_stream_offset
+                        && remaining_live_for_voice.is_char_boundary(st.voice_stream_offset)
+                    {
+                        let tail = &remaining_live_for_voice[st.voice_stream_offset..];
+                        let cleaned_tail = crate::commands::voice::clean_text_for_speech(tail);
+                        if !cleaned_tail.is_empty() {
+                            st.voice_speech_queue.enqueue(
+                                &cleaned_tail,
+                                env.config,
+                                &env.cred_manager,
+                                Some(st.voice_tx.clone()),
+                            );
+                        }
+                    } else if st.voice_stream_offset == 0 && !outcome.reply.trim().is_empty() {
+                        let cleaned = crate::commands::voice::clean_text_for_speech(&outcome.reply);
+                        for sentence in crate::commands::voice::split_sentences_for_tts(&cleaned) {
+                            st.voice_speech_queue.enqueue(
+                                &sentence,
+                                env.config,
+                                &env.cred_manager,
+                                Some(st.voice_tx.clone()),
+                            );
+                        }
+                    }
+                } else if !outcome.reply.trim().is_empty() {
+                    let cleaned = crate::commands::voice::clean_text_for_speech(&outcome.reply);
+                    for sentence in crate::commands::voice::split_sentences_for_tts(&cleaned) {
+                        st.voice_speech_queue.enqueue(
+                            &sentence,
+                            env.config,
+                            &env.cred_manager,
+                            Some(st.voice_tx.clone()),
+                        );
+                    }
                 }
-                let pb_cancel = CancellationToken::new();
-                st.voice_playback_cancel = Some(pb_cancel.clone());
-                let reply_to_speak = outcome.reply.clone();
-                let config_clone = env.config.clone();
-                let cred_manager_clone = env.cred_manager.clone();
-                let voice_tx_clone = st.voice_tx.clone();
-                let is_playing_clone = st.voice_is_playing.clone();
-                tokio::spawn(async move {
-                    crate::commands::voice::play_tts_response(
-                        &reply_to_speak,
-                        &config_clone,
-                        &cred_manager_clone,
-                        Some(voice_tx_clone),
-                        is_playing_clone,
-                        pb_cancel,
-                    )
-                    .await;
-                });
             }
+            st.voice_stream_offset = 0;
+            st.voice_stream_in_code = false;
+            st.voice_spoken_any = false;
             if st.active_goal.is_some() {
                 goal_reply = Some(outcome.reply);
             }
         }
         Ok(Err(HarnessError::Cancelled)) => {
+            st.voice_stream_offset = 0;
+            st.voice_stream_in_code = false;
+            st.voice_spoken_any = false;
             if let Some((r, secs)) = trailing_reasoning
                 .as_ref()
                 .filter(|(s, _)| !s.trim().is_empty())
@@ -5122,9 +5183,10 @@ pub async fn apply_compaction_completed(env: &Env<'_>, st: &mut TuiState) {
 
 /// Interrupt an active turn cleanly on `Esc` or `Ctrl+C`.
 pub async fn interrupt_turn(env: &Env<'_>, st: &mut TuiState) {
-    if let Some(cancel) = st.voice_playback_cancel.take() {
-        cancel.cancel();
-    }
+    st.voice_speech_queue.interrupt();
+    st.voice_stream_offset = 0;
+    st.voice_stream_in_code = false;
+    st.voice_spoken_any = false;
     st.active_goal = None;
     env.ui.set_goal_status(None);
     let ctx_max = context_window(

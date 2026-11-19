@@ -171,13 +171,6 @@ pub(super) fn launch_turn(
             q
         );
     }
-    let is_voice = agent.try_lock().map(|ag| ag.voice_mode()).unwrap_or(false);
-    if is_voice {
-        q = format!(
-            "[VOICE MODE ACTIVE: Output a concise, voice-compatible conversational spoken summary suitable for text-to-speech. Avoid raw Markdown tables, ASCII boxes, or unpronounceable formatting.]\n\n{}",
-            q
-        );
-    }
     let q_with_images = if images.is_empty() {
         q
     } else {

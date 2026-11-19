@@ -1438,10 +1438,16 @@ pub struct TuiState {
     pub voice_active: bool,
     /// Cancellation token for background voice listening loop.
     pub voice_cancel: Option<CancellationToken>,
-    /// Cancellation token for active text-to-speech audio playback.
-    pub voice_playback_cancel: Option<CancellationToken>,
+    /// Persistent streaming TTS playback queue for near-real-time speech synthesis.
+    pub voice_speech_queue: crate::commands::voice::VoiceSpeechQueue,
     /// Shared flag indicating TTS audio is actively playing (used for echo/barge-in gating).
     pub voice_is_playing: Arc<AtomicBool>,
+    /// Byte offset into `env.ui.live_content_snapshot()` already dispatched to TTS during the current turn.
+    pub voice_stream_offset: usize,
+    /// Whether the streaming voice splitter is currently inside a fenced code block.
+    pub voice_stream_in_code: bool,
+    /// Whether at least one speech segment has been enqueued during the active turn.
+    pub voice_spoken_any: bool,
     /// Sender for voice events (transcripts, status notices, errors).
     pub voice_tx: tokio::sync::mpsc::UnboundedSender<crate::commands::voice::VoiceEvent>,
     /// Receiver polled by the event loop for voice events.

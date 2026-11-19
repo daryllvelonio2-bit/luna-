@@ -40,6 +40,14 @@ impl ChatUi {
             .clear();
         self.notify_tui();
     }
+    /// Return a snapshot clone of the currently streamed live reply buffer.
+    pub fn live_content_snapshot(&self) -> String {
+        self.live
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .content
+            .clone()
+    }
     /// Take and clear the current live reply text buffer if non-empty (used to preserve
     /// intermediate assistant prose emitted before a tool call).
     pub fn take_live_content(&self) -> Option<String> {

@@ -237,6 +237,7 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
 
             _ = tui_notifier.notified() => {
                 needs_redraw = true;
+                actions::pump_voice_streaming_tts(&env, &mut st);
                 drain_tui_notices(&env, &mut st);
                 actions::sync_worker_turns(&env, &mut st).await;
                 if env.ui.take_compaction_completed() {
@@ -719,6 +720,8 @@ async fn init_tui_state(env: &mut Env<'_>) -> Result<TuiState, HarnessError> {
     let (picker_tx, picker_rx) = tokio::sync::mpsc::unbounded_channel();
     let (approval_reply_tx, approval_reply_rx) = tokio::sync::mpsc::unbounded_channel();
     let (voice_tx, voice_rx) = tokio::sync::mpsc::unbounded_channel();
+    let voice_speech_queue = crate::commands::voice::VoiceSpeechQueue::new();
+    let voice_is_playing = voice_speech_queue.is_playing();
     let voice_active = env.config.voice.enabled;
     let mut st = TuiState {
         turns,
@@ -792,8 +795,11 @@ async fn init_tui_state(env: &mut Env<'_>) -> Result<TuiState, HarnessError> {
         approval_reply_rx,
         voice_active,
         voice_cancel: None,
-        voice_playback_cancel: None,
-        voice_is_playing: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        voice_speech_queue,
+        voice_is_playing,
+        voice_stream_offset: 0,
+        voice_stream_in_code: false,
+        voice_spoken_any: false,
         voice_tx,
         voice_rx,
         settled_cache: state::SettledTranscriptCache::default(),
