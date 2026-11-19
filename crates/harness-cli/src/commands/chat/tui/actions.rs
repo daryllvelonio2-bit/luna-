@@ -2508,6 +2508,12 @@ pub async fn run_select_action(
             {
                 env.ui
                     .set_transient_error(Some(format!("Settings failed: {error}")));
+            } else {
+                if env.config.voice.enabled {
+                    activate_voice(env, st).await;
+                } else if st.voice_active {
+                    deactivate_voice(env, st).await;
+                }
             }
             open_settings_menu(env, st, 10);
         }
@@ -3770,7 +3776,7 @@ pub async fn handle_voice_slash_command(
     Ok(())
 }
 
-pub async fn activate_voice(env: &mut Env<'_>, st: &mut TuiState) {
+pub async fn activate_voice(env: &Env<'_>, st: &mut TuiState) {
     st.voice_active = true;
     env.agent.lock().await.set_voice_mode(true);
 
@@ -3781,6 +3787,7 @@ pub async fn activate_voice(env: &mut Env<'_>, st: &mut TuiState) {
     st.voice_cancel = Some(cancel.clone());
 
     let voice_tx = st.voice_tx.clone();
+    let is_playing = st.voice_is_playing.clone();
     let config = env.config.clone();
     let cred_manager = env.cred_manager.clone();
     let discovery = env.discovery.clone();
@@ -3790,6 +3797,7 @@ pub async fn activate_voice(env: &mut Env<'_>, st: &mut TuiState) {
             cred_manager,
             discovery,
             voice_tx,
+            is_playing,
             cancel,
         )
         .await;
@@ -3800,7 +3808,7 @@ pub async fn activate_voice(env: &mut Env<'_>, st: &mut TuiState) {
     ));
 }
 
-pub async fn deactivate_voice(env: &mut Env<'_>, st: &mut TuiState) {
+pub async fn deactivate_voice(env: &Env<'_>, st: &mut TuiState) {
     st.voice_active = false;
     env.agent.lock().await.set_voice_mode(false);
 
@@ -3810,9 +3818,30 @@ pub async fn deactivate_voice(env: &mut Env<'_>, st: &mut TuiState) {
     if let Some(pb_cancel) = st.voice_playback_cancel.take() {
         pb_cancel.cancel();
     }
+    st.voice_is_playing.store(false, Ordering::SeqCst);
 
     st.system_notices
         .push(SystemNotice::new("• Voice mode deactivated."));
+}
+
+pub async fn handle_voice_event(
+    env: &Env<'_>,
+    st: &mut TuiState,
+    evt: crate::commands::voice::VoiceEvent,
+) {
+    match evt {
+        crate::commands::voice::VoiceEvent::Transcript(query) => {
+            handle_incoming_voice_input(env, st, query).await;
+        }
+        crate::commands::voice::VoiceEvent::Notice(msg) => {
+            st.system_notices.push(SystemNotice::new(msg));
+        }
+        crate::commands::voice::VoiceEvent::Error(err) => {
+            env.ui.set_transient_error(Some(err.clone()));
+            st.system_notices
+                .push(SystemNotice::new(format!("✖ {err}")));
+        }
+    }
 }
 
 pub async fn handle_incoming_voice_input(env: &Env<'_>, st: &mut TuiState, voice_query: String) {
@@ -4606,11 +4635,15 @@ pub async fn handle_turn_end(
                 let reply_to_speak = outcome.reply.clone();
                 let config_clone = env.config.clone();
                 let cred_manager_clone = env.cred_manager.clone();
+                let voice_tx_clone = st.voice_tx.clone();
+                let is_playing_clone = st.voice_is_playing.clone();
                 tokio::spawn(async move {
                     crate::commands::voice::play_tts_response(
                         &reply_to_speak,
                         &config_clone,
                         &cred_manager_clone,
+                        Some(voice_tx_clone),
+                        is_playing_clone,
                         pb_cancel,
                     )
                     .await;

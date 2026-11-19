@@ -271,9 +271,9 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
                 }
             }
 
-            maybe_voice_query = st.voice_rx.recv() => {
-                if let Some(voice_query) = maybe_voice_query {
-                    actions::handle_incoming_voice_input(&env, &mut st, voice_query).await;
+            maybe_voice_evt = st.voice_rx.recv() => {
+                if let Some(evt) = maybe_voice_evt {
+                    actions::handle_voice_event(&env, &mut st, evt).await;
                     needs_redraw = true;
                 }
             }
@@ -720,9 +720,6 @@ async fn init_tui_state(env: &mut Env<'_>) -> Result<TuiState, HarnessError> {
     let (approval_reply_tx, approval_reply_rx) = tokio::sync::mpsc::unbounded_channel();
     let (voice_tx, voice_rx) = tokio::sync::mpsc::unbounded_channel();
     let voice_active = env.config.voice.enabled;
-    if voice_active {
-        env.agent.lock().await.set_voice_mode(true);
-    }
     let mut st = TuiState {
         turns,
         turn_meta,
@@ -796,6 +793,7 @@ async fn init_tui_state(env: &mut Env<'_>) -> Result<TuiState, HarnessError> {
         voice_active,
         voice_cancel: None,
         voice_playback_cancel: None,
+        voice_is_playing: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         voice_tx,
         voice_rx,
         settled_cache: state::SettledTranscriptCache::default(),
@@ -805,6 +803,9 @@ async fn init_tui_state(env: &mut Env<'_>) -> Result<TuiState, HarnessError> {
         background_sessions: HashMap::new(),
         memory_project_filter: None,
     };
+    if voice_active {
+        actions::activate_voice(env, &mut st).await;
+    }
     refresh_tabs(env, &mut st).await;
     Ok(st)
 }

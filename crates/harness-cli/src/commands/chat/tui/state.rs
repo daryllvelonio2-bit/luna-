@@ -1440,10 +1440,12 @@ pub struct TuiState {
     pub voice_cancel: Option<CancellationToken>,
     /// Cancellation token for active text-to-speech audio playback.
     pub voice_playback_cancel: Option<CancellationToken>,
-    /// Sender for transcribed voice inputs.
-    pub voice_tx: tokio::sync::mpsc::UnboundedSender<String>,
-    /// Receiver polled by the event loop for spoken voice inputs.
-    pub voice_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+    /// Shared flag indicating TTS audio is actively playing (used for echo/barge-in gating).
+    pub voice_is_playing: Arc<AtomicBool>,
+    /// Sender for voice events (transcripts, status notices, errors).
+    pub voice_tx: tokio::sync::mpsc::UnboundedSender<crate::commands::voice::VoiceEvent>,
+    /// Receiver polled by the event loop for voice events.
+    pub voice_rx: tokio::sync::mpsc::UnboundedReceiver<crate::commands::voice::VoiceEvent>,
     pub settled_cache: SettledTranscriptCache,
     pub live_content_cache: LiveContentCache,
     pub live_reasoning_cache: LiveReasoningCache,
