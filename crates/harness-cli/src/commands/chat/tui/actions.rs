@@ -4,6 +4,7 @@ use std::collections::VecDeque;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use tokio_util::sync::CancellationToken;
 
 use harness_core::{
     ApprovalRequest, CompactionSetup, CompletionOptions, HarnessError, MemoryEngine, Message,
@@ -3708,6 +3709,163 @@ fn route_profile_command(env: &mut Env<'_>, st: &mut TuiState, arg: Option<&str>
     }
 }
 
+pub async fn handle_voice_slash_command(
+    env: &mut Env<'_>,
+    st: &mut TuiState,
+    arg: Option<&str>,
+) -> Result<(), HarnessError> {
+    let sub = arg.map(str::trim).map(str::to_ascii_lowercase);
+    match sub.as_deref() {
+        Some("status") => {
+            let status = if st.voice_active {
+                format!(
+                    "🎙 Voice mode is ON (provider: {}, wake word: '{}', barge-in: {})",
+                    env.config.voice.provider,
+                    env.config.voice.wake_word,
+                    if env.config.voice.enable_barge_in {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    }
+                )
+            } else {
+                "🎙 Voice mode is OFF (run `/voice on` to enable or `/voice setup` to configure)"
+                    .to_string()
+            };
+            st.system_notices.push(SystemNotice::new(status));
+        }
+        Some("setup" | "config" | "settings") => {
+            open_settings_menu(env, st, 10);
+        }
+        Some("off" | "stop" | "disable") => {
+            if st.voice_active {
+                deactivate_voice(env, st).await;
+            } else {
+                st.system_notices
+                    .push(SystemNotice::new("• Voice mode is already off"));
+            }
+        }
+        Some("on" | "start" | "enable") => {
+            if !st.voice_active {
+                activate_voice(env, st).await;
+            } else {
+                st.system_notices.push(SystemNotice::new(
+                    "✔ Voice mode is already active and listening",
+                ));
+            }
+        }
+        None => {
+            if st.voice_active {
+                deactivate_voice(env, st).await;
+            } else {
+                activate_voice(env, st).await;
+            }
+        }
+        Some(other) => {
+            st.system_notices.push(SystemNotice::new(format!(
+                "• Unknown voice option '{other}'. Usage: /voice [on|off|status|setup]"
+            )));
+        }
+    }
+    Ok(())
+}
+
+pub async fn activate_voice(env: &mut Env<'_>, st: &mut TuiState) {
+    st.voice_active = true;
+    env.agent.lock().await.set_voice_mode(true);
+
+    if let Some(old) = st.voice_cancel.take() {
+        old.cancel();
+    }
+    let cancel = CancellationToken::new();
+    st.voice_cancel = Some(cancel.clone());
+
+    let voice_tx = st.voice_tx.clone();
+    let config = env.config.clone();
+    let cred_manager = env.cred_manager.clone();
+    let discovery = env.discovery.clone();
+    tokio::spawn(async move {
+        crate::commands::voice::run_background_voice_listener(
+            config,
+            cred_manager,
+            discovery,
+            voice_tx,
+            cancel,
+        )
+        .await;
+    });
+
+    st.system_notices.push(SystemNotice::new(
+        "✔ Voice mode activated. Listening in background (type and talk anytime!). Voice-compatible output summaries enabled.",
+    ));
+}
+
+pub async fn deactivate_voice(env: &mut Env<'_>, st: &mut TuiState) {
+    st.voice_active = false;
+    env.agent.lock().await.set_voice_mode(false);
+
+    if let Some(cancel) = st.voice_cancel.take() {
+        cancel.cancel();
+    }
+    if let Some(pb_cancel) = st.voice_playback_cancel.take() {
+        pb_cancel.cancel();
+    }
+
+    st.system_notices
+        .push(SystemNotice::new("• Voice mode deactivated."));
+}
+
+pub async fn handle_incoming_voice_input(env: &Env<'_>, st: &mut TuiState, voice_query: String) {
+    let trimmed = voice_query.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    // Barge-in: interrupt ongoing speech playback immediately
+    if let Some(cancel) = st.voice_playback_cancel.take() {
+        cancel.cancel();
+    }
+
+    st.system_notices
+        .push(SystemNotice::new(format!("🎤 Heard: \"{trimmed}\"")));
+    if st.active_turn.is_some() {
+        match env.interrupt_handle.interrupt(trimmed) {
+            harness_core::InterruptOutcome::Streaming => {
+                st.system_notices
+                    .push(SystemNotice::new("↳ Voice interrupting current turn"));
+            }
+            harness_core::InterruptOutcome::Queued => {
+                st.system_notices
+                    .push(SystemNotice::new("↳ Voice queued after current tool"));
+            }
+            harness_core::InterruptOutcome::Idle => {
+                st.queue.push_back(trimmed.to_string());
+                env.ui.set_queue_depth(st.queue.len());
+            }
+        }
+    } else if env.compacting.load(Ordering::SeqCst) {
+        st.queue.push_back(trimmed.to_string());
+        env.ui.set_queue_depth(st.queue.len());
+    } else {
+        st.jump_to_latest();
+        let display = format!("🎤 {trimmed}");
+        launch_turn(
+            trimmed,
+            Some(&display),
+            &env.ui,
+            &st.turns,
+            st.process_expanded,
+            &st.pending_images,
+            &env.plan_mode,
+            &env.agent,
+            &env.in_flight_tools,
+            &mut st.current_cancel,
+            &mut st.current_query,
+            &mut st.turn_start,
+            &mut st.active_turn,
+        );
+    }
+}
+
 /// Run a slash command inside the TUI entirely with native modals and transcript output.
 pub async fn run_slash_command(
     env: &mut Env<'_>,
@@ -3790,6 +3948,10 @@ pub async fn run_slash_command(
         }
         "/thinking" | "/think" | "/reasoning" if arg.is_none() => {
             open_thinking_picker(env, st).await;
+            return Ok(Flow::Continue);
+        }
+        "/voice" => {
+            handle_voice_slash_command(env, st, arg).await?;
             return Ok(Flow::Continue);
         }
         "/settings" if arg.is_none() => {
@@ -4435,6 +4597,25 @@ pub async fn handle_turn_end(
                 set_all_process_expanded(st, false);
             }
             st.live_thinking_view = LiveThinkingView::Tail;
+            if st.voice_active && !outcome.reply.trim().is_empty() {
+                if let Some(prev) = st.voice_playback_cancel.take() {
+                    prev.cancel();
+                }
+                let pb_cancel = CancellationToken::new();
+                st.voice_playback_cancel = Some(pb_cancel.clone());
+                let reply_to_speak = outcome.reply.clone();
+                let config_clone = env.config.clone();
+                let cred_manager_clone = env.cred_manager.clone();
+                tokio::spawn(async move {
+                    crate::commands::voice::play_tts_response(
+                        &reply_to_speak,
+                        &config_clone,
+                        &cred_manager_clone,
+                        pb_cancel,
+                    )
+                    .await;
+                });
+            }
             if st.active_goal.is_some() {
                 goal_reply = Some(outcome.reply);
             }
@@ -4908,6 +5089,9 @@ pub async fn apply_compaction_completed(env: &Env<'_>, st: &mut TuiState) {
 
 /// Interrupt an active turn cleanly on `Esc` or `Ctrl+C`.
 pub async fn interrupt_turn(env: &Env<'_>, st: &mut TuiState) {
+    if let Some(cancel) = st.voice_playback_cancel.take() {
+        cancel.cancel();
+    }
     st.active_goal = None;
     env.ui.set_goal_status(None);
     let ctx_max = context_window(

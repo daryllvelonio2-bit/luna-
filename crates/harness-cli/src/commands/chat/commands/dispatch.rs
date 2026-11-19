@@ -203,6 +203,7 @@ impl<'a> SlashContext<'a> {
             "/help" | "/commands" | "/?" => self.cmd_help().await,
             "/profile" | "/profiles" => self.cmd_profile(arg).await,
             "/worker" => self.cmd_worker(arg).await,
+            "/voice" => self.cmd_voice(arg).await,
             "/settings" => self.cmd_settings(arg).await,
             "exit" | "quit" | "/exit" | "/quit" => self.cmd_exit().await,
             _ => self.cmd_fallback(cmd, name, arg).await,

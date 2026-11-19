@@ -281,7 +281,38 @@ async fn handle_help_and_feature_commands(
         handle_mcp_command(rt, query).await;
         return Ok(true);
     }
+    if query == "/voice" || query.starts_with("/voice ") {
+        handle_voice_command(rt, query).await;
+        return Ok(true);
+    }
     Ok(false)
+}
+
+async fn handle_voice_command(rt: &mut ChatRuntime, query: &str) {
+    let sub = query
+        .strip_prefix("/voice")
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    match sub.as_str() {
+        "status" => {
+            let is_on = rt.agent.lock().await.voice_mode();
+            println!("\nVoice mode: {}\n", if is_on { "ON" } else { "OFF" });
+        }
+        "off" | "disable" => {
+            rt.agent.lock().await.set_voice_mode(false);
+            println!("\nVoice mode turned OFF.\n");
+        }
+        "on" | "enable" => {
+            rt.agent.lock().await.set_voice_mode(true);
+            println!("\nVoice mode turned ON. Spoken voice-compatible summaries enabled.\n");
+        }
+        _ => {
+            let next = !rt.agent.lock().await.voice_mode();
+            rt.agent.lock().await.set_voice_mode(next);
+            println!("\nVoice mode turned {}.\n", if next { "ON" } else { "OFF" });
+        }
+    }
 }
 
 async fn handle_mcp_command(rt: &mut ChatRuntime, query: &str) {

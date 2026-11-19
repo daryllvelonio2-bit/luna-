@@ -295,6 +295,11 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         details: "Create, list, or delete named workers invoked as /<name> <task>",
     },
     SlashCommand {
+        name: "/voice",
+        details:
+            "Toggle hands-free voice mode or inspect audio status (/voice [on|off|status|setup])",
+    },
+    SlashCommand {
         name: "/settings",
         details: "Configure display, MCP, skills, memory, notes, and saver mode",
     },

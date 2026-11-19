@@ -114,6 +114,9 @@ pub struct AgentConfig {
     /// tables and a small ANSI SGR palette. Never read from the config file.
     #[serde(skip)]
     pub tui_output: bool,
+    /// Runtime-only: voice mode is active, requiring conversational, voice-compatible output summaries suitable for text-to-speech.
+    #[serde(skip)]
+    pub voice_mode: bool,
     /// Estimated transcript size at which the oldest turns are summarised.
     pub compact_at_tokens: usize,
     /// Trailing user turns kept verbatim when compacting.
@@ -239,6 +242,7 @@ impl Default for AgentConfig {
             profile_persona: None,
             profile_behavior: None,
             tui_output: false,
+            voice_mode: false,
             compact_at_tokens: 500_000,
             keep_recent_turns: 8,
             compaction_model: None,
@@ -743,6 +747,19 @@ where
     /// so they must not be invited to emit tables or ANSI color.
     pub fn set_tui_output(&mut self, enabled: bool) {
         self.config.tui_output = enabled;
+    }
+
+    /// Set whether voice mode is active.
+    ///
+    /// When true, the system prompt instructs the agent to produce a conversational,
+    /// voice-compatible summary suitable for spoken text-to-speech output.
+    pub fn set_voice_mode(&mut self, enabled: bool) {
+        self.config.voice_mode = enabled;
+    }
+
+    /// Whether voice mode is currently active on this agent.
+    pub fn voice_mode(&self) -> bool {
+        self.config.voice_mode
     }
 
     /// Update the context window bound when the model changes mid-session.

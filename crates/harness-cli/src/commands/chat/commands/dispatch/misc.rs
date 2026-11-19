@@ -211,6 +211,79 @@ impl<'a> SlashContext<'a> {
         Ok(SlashOutcome::Turn { prompt, display })
     }
 
+    pub(super) async fn cmd_voice(
+        &mut self,
+        arg: Option<&str>,
+    ) -> Result<SlashOutcome, HarnessError> {
+        let sub = arg.map(str::trim).map(str::to_ascii_lowercase);
+        match sub.as_deref() {
+            Some("status") => {
+                let is_on = self.agent.lock().await.voice_mode();
+                let status = if is_on {
+                    format!(
+                        "{} Voice mode is ON (provider: {}, wake word: '{}', barge-in: {})",
+                        "🎙".cyan(),
+                        self.config.voice.provider,
+                        self.config.voice.wake_word,
+                        if self.config.voice.enable_barge_in {
+                            "enabled"
+                        } else {
+                            "disabled"
+                        }
+                    )
+                } else {
+                    format!(
+                        "{} Voice mode is OFF (run /voice on to enable or /voice setup to configure)",
+                        "🎙".dimmed()
+                    )
+                };
+                self.ui.emit_above(&status);
+            }
+            Some("setup" | "config") => {
+                self.ui.emit_above(&format!(
+                    "{} Run {} from the shell or open {} in chat to configure voice settings",
+                    "•".cyan(),
+                    "luna voice setup".yellow().bold(),
+                    "/settings".yellow().bold()
+                ));
+            }
+            Some("off" | "stop" | "disable") => {
+                self.agent.lock().await.set_voice_mode(false);
+                self.ui
+                    .emit_above(&format!("{} Voice mode turned OFF", "•".dimmed()));
+            }
+            Some("on" | "start" | "enable") => {
+                self.agent.lock().await.set_voice_mode(true);
+                self.ui.emit_above(&format!(
+                    "{} Voice mode turned ON. Spoken voice-compatible summaries enabled (type or talk anytime!).",
+                    "✔".green().bold()
+                ));
+            }
+            None => {
+                let current = self.agent.lock().await.voice_mode();
+                let next = !current;
+                self.agent.lock().await.set_voice_mode(next);
+                if next {
+                    self.ui.emit_above(&format!(
+                        "{} Voice mode turned ON. Spoken voice-compatible summaries enabled (type or talk anytime!).",
+                        "✔".green().bold()
+                    ));
+                } else {
+                    self.ui
+                        .emit_above(&format!("{} Voice mode turned OFF", "•".dimmed()));
+                }
+            }
+            Some(other) => {
+                self.ui.emit_above(&format!(
+                    "{} Unknown voice option '{}'. Usage: /voice [on|off|status|setup]",
+                    "•".cyan(),
+                    other
+                ));
+            }
+        }
+        Ok(SlashOutcome::Continue)
+    }
+
     pub(super) async fn cmd_exit(&mut self) -> Result<SlashOutcome, HarnessError> {
         self.ui.clear_box_on_exit();
         clear_on_exit();

@@ -271,6 +271,13 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
                 }
             }
 
+            maybe_voice_query = st.voice_rx.recv() => {
+                if let Some(voice_query) = maybe_voice_query {
+                    actions::handle_incoming_voice_input(&env, &mut st, voice_query).await;
+                    needs_redraw = true;
+                }
+            }
+
             maybe_approval_reply = st.approval_reply_rx.recv() => {
                 if let Some(msg) = maybe_approval_reply {
                     if let ActiveModal::Approval {
@@ -711,6 +718,11 @@ async fn init_tui_state(env: &mut Env<'_>) -> Result<TuiState, HarnessError> {
     let initial_turns_len = turns.len();
     let (picker_tx, picker_rx) = tokio::sync::mpsc::unbounded_channel();
     let (approval_reply_tx, approval_reply_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (voice_tx, voice_rx) = tokio::sync::mpsc::unbounded_channel();
+    let voice_active = env.config.voice.enabled;
+    if voice_active {
+        env.agent.lock().await.set_voice_mode(true);
+    }
     let mut st = TuiState {
         turns,
         turn_meta,
@@ -781,6 +793,11 @@ async fn init_tui_state(env: &mut Env<'_>) -> Result<TuiState, HarnessError> {
         picker_rx,
         approval_reply_tx,
         approval_reply_rx,
+        voice_active,
+        voice_cancel: None,
+        voice_playback_cancel: None,
+        voice_tx,
+        voice_rx,
         settled_cache: state::SettledTranscriptCache::default(),
         live_content_cache: state::LiveContentCache::default(),
         live_reasoning_cache: state::LiveReasoningCache::default(),

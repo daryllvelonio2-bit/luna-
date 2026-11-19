@@ -75,8 +75,13 @@ where
             &rich_output,
         )?;
         let env_info = self.runtime_environment();
+        let voice_instruction = if self.config.voice_mode {
+            "\n\nVOICE MODE ACTIVE (CONVERSATIONAL SPOKEN OUTPUT):\n- Voice mode is active for this session.\n- Output a voice-compatible spoken summary that is natural, concise, and pleasant to hear when read aloud by text-to-speech (TTS).\n- Do not include raw Markdown tables, ASCII boxes, ANSI color escapes, code blocks, or unpronounceable formatting in the spoken response. State answers directly in simple, clear sentences."
+        } else {
+            ""
+        };
 
-        Ok(format!("{}{}", base, env_info))
+        Ok(format!("{}{}{}", base, env_info, voice_instruction))
     }
 
     /// The active profile's persona and behavior. `system_prompt_override` replaces only the

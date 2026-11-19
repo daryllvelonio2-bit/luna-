@@ -1405,6 +1405,8 @@ fn render_composer_card(
     if st.composer.text.is_empty() && rect.height >= 2 {
         let placeholder = if st.active_turn.is_some() {
             "Type to queue or steer next message..."
+        } else if st.voice_active {
+            "Type or talk anytime... (say \"Luna\" or type /voice off)"
         } else if is_landing {
             "Ask anything... \"Fix broken tests\""
         } else {
@@ -1476,7 +1478,7 @@ fn render_composer_card(
             text_muted()
         };
 
-        let footer = Line::from(vec![
+        let mut footer_spans = vec![
             Span::styled("▎", Style::default().fg(accent).bg(bg_surface())),
             Span::styled("  ", Style::default().bg(bg_surface())),
             Span::styled(
@@ -1502,7 +1504,21 @@ fn render_composer_card(
                 thinking_label,
                 Style::default().fg(thinking_color).bg(bg_surface()),
             ),
-        ]);
+        ];
+        if st.voice_active {
+            footer_spans.push(Span::styled(
+                " · ",
+                Style::default().fg(text_muted()).bg(bg_surface()),
+            ));
+            footer_spans.push(Span::styled(
+                "🎙 Voice ON",
+                Style::default()
+                    .fg(green_ok())
+                    .bg(bg_surface())
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        let footer = Line::from(footer_spans);
         frame.render_widget(
             Paragraph::new(footer),
             Rect {
@@ -6044,6 +6060,7 @@ mod tests {
     fn ensure_settled_transcript_caches_and_appends_incrementally() {
         let (picker_tx, picker_rx) = tokio::sync::mpsc::unbounded_channel();
         let (approval_reply_tx, approval_reply_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (voice_tx, voice_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut st = TuiState {
             turns: vec![TurnRecord {
                 user_query: "turn one".to_string(),
@@ -6117,6 +6134,11 @@ mod tests {
             picker_rx,
             approval_reply_tx,
             approval_reply_rx,
+            voice_active: false,
+            voice_cancel: None,
+            voice_playback_cancel: None,
+            voice_tx,
+            voice_rx,
             settled_cache: super::super::state::SettledTranscriptCache::default(),
             live_content_cache: super::super::state::LiveContentCache::default(),
             live_reasoning_cache: super::super::state::LiveReasoningCache::default(),
@@ -6722,6 +6744,7 @@ mod tests {
     fn test_dummy_tui_state() -> TuiState {
         let (picker_tx, picker_rx) = tokio::sync::mpsc::unbounded_channel();
         let (approval_reply_tx, approval_reply_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (voice_tx, voice_rx) = tokio::sync::mpsc::unbounded_channel();
         let tmp = tempfile::tempdir().unwrap();
         let memory = std::sync::Arc::new(harness_memory::MemoryEngineKind::Sqlite(
             harness_memory::SqliteMemoryEngine::in_memory().unwrap(),
@@ -6816,6 +6839,11 @@ mod tests {
             picker_rx,
             approval_reply_tx,
             approval_reply_rx,
+            voice_active: false,
+            voice_cancel: None,
+            voice_playback_cancel: None,
+            voice_tx,
+            voice_rx,
             settled_cache: super::super::state::SettledTranscriptCache::default(),
             live_content_cache: super::super::state::LiveContentCache::default(),
             live_reasoning_cache: super::super::state::LiveReasoningCache::default(),

@@ -1434,6 +1434,16 @@ pub struct TuiState {
     pub approval_reply_tx: tokio::sync::mpsc::UnboundedSender<ApprovalReply>,
     /// Receiver polled by the event loop to display approval-assistant answers in place.
     pub approval_reply_rx: tokio::sync::mpsc::UnboundedReceiver<ApprovalReply>,
+    /// Whether hands-free voice mode is active.
+    pub voice_active: bool,
+    /// Cancellation token for background voice listening loop.
+    pub voice_cancel: Option<CancellationToken>,
+    /// Cancellation token for active text-to-speech audio playback.
+    pub voice_playback_cancel: Option<CancellationToken>,
+    /// Sender for transcribed voice inputs.
+    pub voice_tx: tokio::sync::mpsc::UnboundedSender<String>,
+    /// Receiver polled by the event loop for spoken voice inputs.
+    pub voice_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
     pub settled_cache: SettledTranscriptCache,
     pub live_content_cache: LiveContentCache,
     pub live_reasoning_cache: LiveReasoningCache,

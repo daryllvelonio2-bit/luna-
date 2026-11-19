@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use colored::Colorize;
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use futures_util::stream::BoxStream;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -286,4 +287,505 @@ fn build_voice_session(
         Arc::new(DefaultTextToSpeech),
         VoicePipelineConfig::default(),
     )
+}
+
+/// Run the continuous background voice listener.
+///
+/// Captures speech from the default microphone using CPAL and RMS energy VAD,
+/// transcribes utterances, and sends them to `voice_tx` for the chat loop.
+pub async fn run_background_voice_listener(
+    config: Config,
+    cred_manager: Arc<CredentialManager>,
+    _discovery: Arc<ModelDiscovery>,
+    voice_tx: tokio::sync::mpsc::UnboundedSender<String>,
+    cancel: CancellationToken,
+) {
+    tracing::info!(
+        "Starting background voice listener for wake word '{}' (provider: {})...",
+        config.voice.wake_word,
+        config.voice.provider
+    );
+
+    let (sample_rate_tx, sample_rate_rx) = tokio::sync::oneshot::channel::<u32>();
+    let (audio_sample_tx, mut audio_sample_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<i16>>();
+
+    let cancel_thread = cancel.clone();
+    std::thread::spawn(move || {
+        let host = cpal::default_host();
+        let Some(device) = host.default_input_device() else {
+            tracing::debug!("No default audio input device found for voice listener");
+            return;
+        };
+
+        let Ok(supported_config) = device.default_input_config() else {
+            tracing::debug!("Failed to query default input config");
+            return;
+        };
+
+        let sample_rate = supported_config.sample_rate().0;
+        let _ = sample_rate_tx.send(sample_rate);
+        let channels = supported_config.channels() as usize;
+
+        let stream_result = match supported_config.sample_format() {
+            cpal::SampleFormat::I16 => device.build_input_stream(
+                &supported_config.into(),
+                move |data: &[i16], _: &cpal::InputCallbackInfo| {
+                    let mono: Vec<i16> = if channels > 1 {
+                        data.chunks_exact(channels).map(|c| c[0]).collect()
+                    } else {
+                        data.to_vec()
+                    };
+                    let _ = audio_sample_tx.send(mono);
+                },
+                move |err| {
+                    tracing::warn!("Audio input stream error: {}", err);
+                },
+                None,
+            ),
+            cpal::SampleFormat::F32 => device.build_input_stream(
+                &supported_config.into(),
+                move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                    let mono: Vec<i16> = if channels > 1 {
+                        data.chunks_exact(channels)
+                            .map(|c| (c[0].clamp(-1.0, 1.0) * 32767.0) as i16)
+                            .collect()
+                    } else {
+                        data.iter()
+                            .map(|&s| (s.clamp(-1.0, 1.0) * 32767.0) as i16)
+                            .collect()
+                    };
+                    let _ = audio_sample_tx.send(mono);
+                },
+                move |err| {
+                    tracing::warn!("Audio input stream error: {}", err);
+                },
+                None,
+            ),
+            _ => {
+                tracing::debug!("Unsupported sample format for audio input");
+                return;
+            }
+        };
+
+        let stream = match stream_result {
+            Ok(s) => s,
+            Err(err) => {
+                tracing::debug!("Failed to build audio input stream: {}", err);
+                return;
+            }
+        };
+
+        if let Err(err) = stream.play() {
+            tracing::debug!("Failed to start audio input stream: {}", err);
+            return;
+        }
+
+        while !cancel_thread.is_cancelled() {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+
+        drop(stream);
+    });
+
+    let sample_rate = match sample_rate_rx.await {
+        Ok(sr) => sr,
+        Err(_) => {
+            let _ = cancel.cancelled().await;
+            return;
+        }
+    };
+
+    let silence_duration =
+        std::time::Duration::from_millis(config.voice.silence_threshold_ms.max(300));
+    let mut speech_buffer: Vec<i16> = Vec::new();
+    let mut is_speaking = false;
+    let mut last_speech_time = std::time::Instant::now();
+
+    while !cancel.is_cancelled() {
+        tokio::select! {
+            _ = cancel.cancelled() => break,
+            Some(samples) = audio_sample_rx.recv() => {
+                let rms = harness_voice::AudioProcessor::calculate_rms_energy(&samples);
+                let threshold = 350.0f32;
+
+                if rms > threshold {
+                    is_speaking = true;
+                    last_speech_time = std::time::Instant::now();
+                    speech_buffer.extend_from_slice(&samples);
+                } else if is_speaking {
+                    speech_buffer.extend_from_slice(&samples);
+                    if last_speech_time.elapsed() > silence_duration {
+                        is_speaking = false;
+                        if speech_buffer.len() >= (sample_rate as usize) / 2 {
+                            let wav_res = harness_voice::AudioProcessor::samples_to_wav(&speech_buffer, sample_rate);
+                            speech_buffer.clear();
+                            if let Ok(wav_bytes) = wav_res {
+                                if let Ok(transcript) = transcribe_audio_bytes(&wav_bytes, &config, &cred_manager).await {
+                                    let trimmed = transcript.trim();
+                                    if !trimmed.is_empty() {
+                                        let _ = voice_tx.send(trimmed.to_string());
+                                    }
+                                }
+                            }
+                        } else {
+                            speech_buffer.clear();
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn resolve_voice_api_key(
+    provider: &str,
+    cred_manager: &Arc<CredentialManager>,
+) -> Option<String> {
+    let p_lower = provider.to_lowercase();
+    let creds = cred_manager.get_credentials(&p_lower).await;
+    if let Some(c) = creds
+        .iter()
+        .find(|c| c.is_priority)
+        .or_else(|| creds.first())
+    {
+        return Some(c.api_key.clone());
+    }
+    match p_lower.as_str() {
+        "openai" => std::env::var("OPENAI_API_KEY").ok(),
+        "groq" => std::env::var("GROQ_API_KEY").ok(),
+        "antigravity" | "google" => std::env::var("GEMINI_API_KEY")
+            .ok()
+            .or_else(|| std::env::var("GOOGLE_API_KEY").ok()),
+        _ => None,
+    }
+}
+
+/// Transcribe recorded audio bytes into text.
+async fn transcribe_audio_bytes(
+    wav_bytes: &[u8],
+    config: &Config,
+    cred_manager: &Arc<CredentialManager>,
+) -> Result<String, HarnessError> {
+    let provider = config.voice.provider.to_ascii_lowercase();
+    let api_key = resolve_voice_api_key(&provider, cred_manager).await;
+
+    if provider == "groq" {
+        if let Some(key) = api_key {
+            return transcribe_groq_whisper(wav_bytes, &key, &config.voice.stt_model).await;
+        }
+    } else if provider == "openai" {
+        if let Some(key) = api_key {
+            return transcribe_openai_whisper(wav_bytes, &key, &config.voice.stt_model).await;
+        }
+    }
+
+    Ok(String::new())
+}
+
+async fn transcribe_openai_whisper(
+    wav_bytes: &[u8],
+    api_key: &str,
+    model: &str,
+) -> Result<String, HarnessError> {
+    let client = reqwest::Client::new();
+    let part = reqwest::multipart::Part::bytes(wav_bytes.to_vec())
+        .file_name("audio.wav")
+        .mime_str("audio/wav")
+        .map_err(|e| HarnessError::VoiceError(format!("Failed to create multipart: {e}")))?;
+
+    let form = reqwest::multipart::Form::new().part("file", part).text(
+        "model",
+        if model.is_empty() {
+            "whisper-1".to_string()
+        } else {
+            model.to_string()
+        },
+    );
+
+    let res = client
+        .post("https://api.openai.com/v1/audio/transcriptions")
+        .bearer_auth(api_key)
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| HarnessError::VoiceError(format!("Whisper request failed: {e}")))?;
+
+    if !res.status().is_success() {
+        return Ok(String::new());
+    }
+
+    let val: serde_json::Value = res.json().await.unwrap_or_default();
+    Ok(val["text"].as_str().unwrap_or("").to_string())
+}
+
+async fn transcribe_groq_whisper(
+    wav_bytes: &[u8],
+    api_key: &str,
+    model: &str,
+) -> Result<String, HarnessError> {
+    let client = reqwest::Client::new();
+    let part = reqwest::multipart::Part::bytes(wav_bytes.to_vec())
+        .file_name("audio.wav")
+        .mime_str("audio/wav")
+        .map_err(|e| HarnessError::VoiceError(format!("Failed to create multipart: {e}")))?;
+
+    let form = reqwest::multipart::Form::new().part("file", part).text(
+        "model",
+        if model.is_empty() {
+            "whisper-large-v3-turbo".to_string()
+        } else {
+            model.to_string()
+        },
+    );
+
+    let res = client
+        .post("https://api.groq.com/openai/v1/audio/transcriptions")
+        .bearer_auth(api_key)
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| HarnessError::VoiceError(format!("Groq Whisper request failed: {e}")))?;
+
+    if !res.status().is_success() {
+        return Ok(String::new());
+    }
+
+    let val: serde_json::Value = res.json().await.unwrap_or_default();
+    Ok(val["text"].as_str().unwrap_or("").to_string())
+}
+
+/// Synthesize and play text-to-speech audio for a turn reply.
+pub async fn play_tts_response(
+    text: &str,
+    config: &Config,
+    cred_manager: &Arc<CredentialManager>,
+    cancel: CancellationToken,
+) {
+    if cancel.is_cancelled() {
+        return;
+    }
+
+    let cleaned = clean_text_for_speech(text);
+    if cleaned.trim().is_empty() {
+        return;
+    }
+
+    let provider = config.voice.provider.to_ascii_lowercase();
+    let api_key = resolve_voice_api_key(&provider, cred_manager).await;
+
+    let audio_bytes = if provider == "openai" {
+        if let Some(key) = api_key {
+            generate_openai_tts(
+                &cleaned,
+                &key,
+                &config.voice.voice_name,
+                &config.voice.tts_model,
+            )
+            .await
+            .ok()
+        } else {
+            None
+        }
+    } else if provider == "antigravity" || provider == "google" {
+        if let Some(key) = api_key {
+            generate_gemini_tts(&cleaned, &key, &config.voice.voice_name)
+                .await
+                .ok()
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    if let Some(bytes) = audio_bytes {
+        if cancel.is_cancelled() {
+            return;
+        }
+        play_audio_stream(&bytes, cancel).await;
+    }
+}
+
+async fn generate_openai_tts(
+    text: &str,
+    api_key: &str,
+    voice: &str,
+    model: &str,
+) -> Result<Vec<u8>, HarnessError> {
+    let client = reqwest::Client::new();
+    let res = client
+        .post("https://api.openai.com/v1/audio/speech")
+        .bearer_auth(api_key)
+        .json(&serde_json::json!({
+            "model": if model.is_empty() { "tts-1" } else { model },
+            "input": text,
+            "voice": if voice.is_empty() { "alloy" } else { voice },
+            "response_format": "mp3"
+        }))
+        .send()
+        .await
+        .map_err(|e| HarnessError::VoiceError(format!("OpenAI TTS request failed: {e}")))?;
+
+    if !res.status().is_success() {
+        let err_text = res.text().await.unwrap_or_default();
+        return Err(HarnessError::VoiceError(format!(
+            "OpenAI TTS error: {err_text}"
+        )));
+    }
+
+    let bytes = res
+        .bytes()
+        .await
+        .map_err(|e| HarnessError::VoiceError(format!("Failed to read OpenAI TTS bytes: {e}")))?;
+    Ok(bytes.to_vec())
+}
+
+async fn generate_gemini_tts(
+    text: &str,
+    api_key: &str,
+    voice: &str,
+) -> Result<Vec<u8>, HarnessError> {
+    let client = reqwest::Client::new();
+    let url = format!(
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={}",
+        api_key
+    );
+    let voice_name = if voice.is_empty() { "Puck" } else { voice };
+    let payload = serde_json::json!({
+        "contents": [{
+            "parts": [{ "text": text }]
+        }],
+        "generationConfig": {
+            "responseModalities": ["AUDIO"],
+            "speechConfig": {
+                "voiceConfig": {
+                    "prebuiltVoiceConfig": {
+                        "voiceName": voice_name
+                    }
+                }
+            }
+        }
+    });
+
+    let res = client
+        .post(&url)
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| HarnessError::VoiceError(format!("Gemini TTS request failed: {e}")))?;
+
+    if !res.status().is_success() {
+        let err_text = res.text().await.unwrap_or_default();
+        return Err(HarnessError::VoiceError(format!(
+            "Gemini TTS error: {err_text}"
+        )));
+    }
+
+    let val: serde_json::Value = res
+        .json()
+        .await
+        .map_err(|e| HarnessError::VoiceError(format!("Failed to parse Gemini TTS json: {e}")))?;
+
+    let pcm_b64 = val["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
+        .as_str()
+        .ok_or_else(|| HarnessError::VoiceError("No inline audio data in Gemini reply".into()))?;
+
+    use base64::Engine;
+    let pcm_bytes = base64::engine::general_purpose::STANDARD
+        .decode(pcm_b64.trim())
+        .map_err(|e| HarnessError::VoiceError(format!("Failed to decode base64 audio: {e}")))?;
+
+    #[allow(clippy::chunks_exact_to_as_chunks)]
+    let samples: Vec<i16> = pcm_bytes
+        .chunks_exact(2)
+        .map(|c| i16::from_le_bytes([c[0], c[1]]))
+        .collect();
+
+    harness_voice::AudioProcessor::samples_to_wav(&samples, 24000)
+}
+
+async fn play_audio_stream(audio_bytes: &[u8], cancel: CancellationToken) {
+    let bytes_vec = audio_bytes.to_vec();
+    tokio::task::spawn_blocking(move || {
+        let (_stream, stream_handle) = match rodio::OutputStream::try_default() {
+            Ok(pair) => pair,
+            Err(e) => {
+                tracing::debug!("Failed to open audio output stream: {}", e);
+                return;
+            }
+        };
+
+        let sink = match rodio::Sink::try_new(&stream_handle) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::debug!("Failed to create audio sink: {}", e);
+                return;
+            }
+        };
+
+        let cursor = std::io::Cursor::new(bytes_vec);
+        if let Ok(source) = rodio::Decoder::new(cursor) {
+            sink.append(source);
+            while !sink.empty() {
+                if cancel.is_cancelled() {
+                    sink.stop();
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+    })
+    .await
+    .ok();
+}
+
+/// Clean conversational response text for speech synthesis.
+pub fn clean_text_for_speech(text: &str) -> String {
+    let mut cleaned = String::new();
+    let mut in_code_block = false;
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") {
+            in_code_block = !in_code_block;
+            continue;
+        }
+        if in_code_block {
+            continue;
+        }
+        if trimmed.starts_with('|') || trimmed.starts_with("---") {
+            continue;
+        }
+        let stripped = trimmed.trim_start_matches(['#', '*', '-', '•']).trim();
+        if !stripped.is_empty() {
+            cleaned.push_str(stripped);
+            cleaned.push(' ');
+        }
+    }
+
+    if cleaned.len() > 800 {
+        if let Some(pos) = cleaned[..800].rfind(['.', '!', '?']) {
+            cleaned.truncate(pos + 1);
+        } else {
+            cleaned.truncate(800);
+        }
+    }
+
+    cleaned.trim().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_clean_text_for_speech_strips_code_blocks_and_markdown() {
+        let input = "Here is the result:\n```rust\nfn main() {}\n```\n| Col1 | Col2 |\n|---|---|\n- Fast and responsive.\n**Done!**";
+        let out = clean_text_for_speech(input);
+        assert!(!out.contains("fn main"));
+        assert!(!out.contains("Col1"));
+        assert!(out.contains("Here is the result:"));
+        assert!(out.contains("Fast and responsive."));
+        assert!(out.contains("Done!"));
+    }
 }

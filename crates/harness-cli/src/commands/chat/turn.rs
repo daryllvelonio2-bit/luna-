@@ -164,14 +164,20 @@ pub(super) fn launch_turn(
     // its pixels rather than a path the model would have to OCR through a shell tool.
     let images = std::mem::take(&mut *pending_images.lock().unwrap_or_else(|e| e.into_inner()));
     let inlined_query = crate::commands::prompt_images::inline_image_paths(query);
-    let q = if plan_mode.load(std::sync::atomic::Ordering::SeqCst) {
-        format!(
+    let mut q = inlined_query;
+    if plan_mode.load(std::sync::atomic::Ordering::SeqCst) {
+        q = format!(
             "[PLAN MODE ACTIVE: Formulate a detailed, step-by-step plan/blueprint. Do not attempt to modify files or execute mutating commands until the plan is approved.]\n\n{}",
-            inlined_query
-        )
-    } else {
-        inlined_query
-    };
+            q
+        );
+    }
+    let is_voice = agent.try_lock().map(|ag| ag.voice_mode()).unwrap_or(false);
+    if is_voice {
+        q = format!(
+            "[VOICE MODE ACTIVE: Output a concise, voice-compatible conversational spoken summary suitable for text-to-speech. Avoid raw Markdown tables, ASCII boxes, or unpronounceable formatting.]\n\n{}",
+            q
+        );
+    }
     let q_with_images = if images.is_empty() {
         q
     } else {
