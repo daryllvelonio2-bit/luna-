@@ -117,6 +117,31 @@ fn setup_web_direct_value_updates_config() {
 }
 
 #[test]
+fn setup_voice_direct_value_updates_config() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let config_path = tmp.path().join("config.yaml");
+
+    let out = run_luna(&["setup", "voice", "antigravity"], &config_path);
+    assert!(
+        out.status.success(),
+        "stdout: {}, stderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let cfg = read_config(&config_path);
+    assert_eq!(cfg["voice"]["enabled"].as_bool(), Some(true));
+    assert_eq!(cfg["voice"]["provider"].as_str(), Some("antigravity"));
+    assert_eq!(cfg["voice"]["voice_name"].as_str(), Some("Aoede"));
+    assert_eq!(cfg["first_run"].as_bool(), Some(false));
+
+    let out = run_luna(&["setup", "voice", "off"], &config_path);
+    assert!(out.status.success());
+    let cfg = read_config(&config_path);
+    assert_eq!(cfg["voice"]["enabled"].as_bool(), Some(false));
+}
+
+#[test]
 fn setup_unknown_target_returns_error() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let config_path = tmp.path().join("config.yaml");

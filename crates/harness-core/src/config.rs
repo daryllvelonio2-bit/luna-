@@ -116,6 +116,9 @@ pub struct Config {
     /// Persistent timed-disable schedules for optional features (`mcp`, `skills`, `memory`, `notes`).
     #[serde(default)]
     pub features: FeatureSettings,
+    /// Hands-free voice interface and audio settings.
+    #[serde(default)]
+    pub voice: VoiceSettings,
 }
 
 pub const AUTO_COMPACT_MIN_THRESHOLD: usize = 100_000;
@@ -171,6 +174,7 @@ impl Default for Config {
             display: DisplaySettings::default(),
             goal: GoalSettings::default(),
             features: FeatureSettings::default(),
+            voice: VoiceSettings::default(),
         }
     }
 }
@@ -306,6 +310,7 @@ impl Config {
             }
         }
         crate::goal::validate_max_iterations(self.goal.max_iterations)?;
+        self.voice.validate()?;
         Ok(())
     }
 }
@@ -440,6 +445,67 @@ impl Default for GatewaySettings {
             port: 8080,
             allow_mutating_tools: false,
         }
+    }
+}
+
+/// Hands-free voice interface and audio settings.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct VoiceSettings {
+    /// Enable voice interface. Default `false`.
+    pub enabled: bool,
+    /// Active voice provider / engine: "antigravity", "openai", "groq", "custom", or "none".
+    pub provider: String,
+    /// Wake word to listen for in hands-free mode. Default "Luna".
+    pub wake_word: String,
+    /// Voice name / personality (e.g. "Aoede", "Puck", "Charon", "Fenrir", "Kore", "alloy", "echo", etc.).
+    pub voice_name: String,
+    /// Speech-to-text model override.
+    pub stt_model: String,
+    /// Text-to-speech model override.
+    pub tts_model: String,
+    /// Custom base URL for custom voice endpoints.
+    pub base_url: Option<String>,
+    /// Custom API key environment variable name.
+    pub api_key_env: Option<String>,
+    /// Silence detection threshold in milliseconds before ending a speech turn. Default 800.
+    pub silence_threshold_ms: u64,
+    /// Enable barge-in (interrupt playback when user starts speaking or says wake word). Default true.
+    pub enable_barge_in: bool,
+    /// Audio input device name (None = default system microphone).
+    pub input_device: Option<String>,
+    /// Audio output device name (None = default system speaker).
+    pub output_device: Option<String>,
+}
+
+impl Default for VoiceSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider: "antigravity".to_string(),
+            wake_word: "Luna".to_string(),
+            voice_name: "Aoede".to_string(),
+            stt_model: String::new(),
+            tts_model: String::new(),
+            base_url: None,
+            api_key_env: None,
+            silence_threshold_ms: 800,
+            enable_barge_in: true,
+            input_device: None,
+            output_device: None,
+        }
+    }
+}
+
+impl VoiceSettings {
+    pub fn validate(&self) -> Result<(), HarnessError> {
+        if self.silence_threshold_ms < 100 || self.silence_threshold_ms > 10000 {
+            return Err(HarnessError::ConfigurationError(format!(
+                "voice.silence_threshold_ms must be between 100 and 10000, got {}",
+                self.silence_threshold_ms
+            )));
+        }
+        Ok(())
     }
 }
 

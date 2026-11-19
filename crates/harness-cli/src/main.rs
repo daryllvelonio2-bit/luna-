@@ -1091,12 +1091,13 @@ async fn handle_setup_command(
         }
         Some("gateway" | "gw") => setup_gateway(layers)?,
         Some("web" | "search" | "fetch" | "browser") => setup_web(layers, value)?,
+        Some("voice" | "audio" | "mic" | "speech" | "talk") => setup_voice(layers, value)?,
         Some("auth" | "credentials" | "creds" | "keys" | "provider" | "providers") => {
             handle_interactive_auth(cred_manager).await?;
         }
         Some(other) => {
             return Err(harness_core::HarnessError::ConfigurationError(format!(
-                "unknown setup target: '{other}'. Available targets: memory, notes, compact, gateway, web, auth, all"
+                "unknown setup target: '{other}'. Available targets: memory, notes, compact, gateway, web, voice, auth, all"
             )));
         }
     }
@@ -1261,6 +1262,56 @@ fn setup_web(
             "tools.web.enabled = {}, search_backend = {} written to {}",
             web.enabled,
             web.backend.as_str(),
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn setup_voice(
+    layers: &harness_core::config::Layers,
+    value: Option<String>,
+) -> Result<(), harness_core::HarnessError> {
+    if let Some(val) = value {
+        let trimmed = val.trim().to_ascii_lowercase();
+        let sel = match trimmed.as_str() {
+            "off" | "false" | "disable" | "disabled" | "0" | "none" => {
+                harness_onboarding::VoiceSelection::disabled()
+            }
+            "antigravity" | "agy" | "google" => {
+                harness_onboarding::VoiceSelection::antigravity(None)
+            }
+            "openai" | "whisper" => harness_onboarding::VoiceSelection::openai(None, None),
+            "groq" | "edge" => harness_onboarding::VoiceSelection::groq(None),
+            "custom" => {
+                let (voice, path) = harness_onboarding::run_voice_interactive(layers)?;
+                println!(
+                    "voice.provider = {} (enabled = {}) written to {}",
+                    voice.provider,
+                    voice.enabled,
+                    path.display()
+                );
+                return Ok(());
+            }
+            _ => {
+                return Err(harness_core::HarnessError::ConfigurationError(format!(
+                    "unknown voice option: '{val}'. Expected 'antigravity', 'openai', 'groq', 'custom', or 'off'."
+                )));
+            }
+        };
+        let path = harness_onboarding::persist_voice(layers, &sel)?;
+        println!(
+            "voice.provider = {} (enabled = {}) written to {}",
+            sel.provider,
+            sel.enabled,
+            path.display()
+        );
+    } else {
+        let (voice, path) = harness_onboarding::run_voice_interactive(layers)?;
+        println!(
+            "voice.provider = {} (enabled = {}) written to {}",
+            voice.provider,
+            voice.enabled,
             path.display()
         );
     }

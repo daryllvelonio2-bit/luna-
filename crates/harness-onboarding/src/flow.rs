@@ -65,6 +65,8 @@ pub struct Outcome {
     pub gateway: store::GatewaySelection,
     /// Web access settings (`web_search` / `web_fetch`).
     pub web: store::WebSelection,
+    /// Hands-free voice interface settings.
+    pub voice: store::VoiceSelection,
     /// The config file the choice was written to.
     pub config_path: PathBuf,
 }
@@ -113,7 +115,18 @@ where
     // Phase 2f: whether the agent may search and read the web.
     let web = crate::web_step::select(&mut writer, reader)?;
 
-    let config_path = store::persist(layers, memory, &notes_dir, &auto_compact, &gateway, &web)?;
+    // Phase 2g: hands-free voice interface setup.
+    let voice = crate::voice_step::select(&mut writer, reader)?;
+
+    let config_path = store::persist(
+        layers,
+        memory,
+        &notes_dir,
+        &auto_compact,
+        &gateway,
+        &web,
+        &voice,
+    )?;
 
     let mut writer = Typewriter::new(out, pacer, size);
     confirmation(
@@ -123,6 +136,7 @@ where
         &auto_compact,
         &gateway,
         &web,
+        &voice,
         &config_path,
     )?;
 
@@ -133,6 +147,7 @@ where
         auto_compact,
         gateway,
         web,
+        voice,
         config_path,
     })
 }
@@ -336,6 +351,43 @@ pub fn run_web_interactive(
     run_web(layers, &mut reader, &mut out, &mut pacer, &size)
 }
 
+/// Run only the voice configuration step against any reader/writer pair.
+pub fn run_voice<R, W, P>(
+    layers: &Layers,
+    reader: &mut R,
+    out: &mut W,
+    pacer: &mut P,
+    size: &dyn Fn() -> Size,
+) -> Result<(store::VoiceSelection, PathBuf), HarnessError>
+where
+    R: BufRead,
+    W: Write,
+    P: Pacer,
+{
+    let _guard = CursorGuard::new();
+    let mut writer = Typewriter::new(out, pacer, size);
+    let voice = crate::voice_step::select(&mut writer, reader)?;
+    let config_path = store::persist_voice(layers, &voice)?;
+    Ok((voice, config_path))
+}
+
+/// Run only the voice configuration step on the real terminal.
+pub fn run_voice_interactive(
+    layers: &Layers,
+) -> Result<(store::VoiceSelection, PathBuf), HarnessError> {
+    crate::signal::install()?;
+    let size = || match crossterm::terminal::size() {
+        Ok((columns, rows)) => Size::new(columns, rows),
+        _ => Size::fallback(),
+    };
+    let stdin = std::io::stdin();
+    let mut reader = stdin.lock();
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    let mut pacer = RealPacer;
+    run_voice(layers, &mut reader, &mut out, &mut pacer, &size)
+}
+
 /// Phase 1: clear the screen, hide the cursor, stream the briefing.
 fn briefing<W: Write, P: Pacer>(writer: &mut Typewriter<'_, W, P>) -> Result<(), HarnessError> {
     writer.clear_screen()?;
@@ -378,6 +430,7 @@ fn confirmation<W: Write, P: Pacer>(
     auto_compact: &store::AutoCompactSelection,
     gateway: &store::GatewaySelection,
     web: &store::WebSelection,
+    voice: &store::VoiceSelection,
     config_path: &Path,
 ) -> Result<(), HarnessError> {
     writer.clear_screen()?;
@@ -388,6 +441,7 @@ fn confirmation<W: Write, P: Pacer>(
         auto_compact,
         gateway,
         web,
+        voice,
         config_path,
         writer.size(),
     );
@@ -396,12 +450,14 @@ fn confirmation<W: Write, P: Pacer>(
 }
 
 /// The centered confirmation block, sized for the terminal it will land in.
+#[allow(clippy::too_many_arguments)]
 pub fn confirmation_lines(
     memory: MemoryMode,
     notes_dir: &Path,
     auto_compact: &store::AutoCompactSelection,
     gateway: &store::GatewaySelection,
     web: &store::WebSelection,
+    voice: &store::VoiceSelection,
     config_path: &Path,
     size: Size,
 ) -> Vec<Line> {
@@ -448,6 +504,9 @@ pub fn confirmation_lines(
     let web_summary = crate::web_step::summary(web);
     push_labeled(&mut lines, "Web access", &web_summary, limit);
     lines.push(Line::blank());
+    let voice_summary = crate::voice_step::summary(voice);
+    push_labeled(&mut lines, "Voice mode", &voice_summary, limit);
+    lines.push(Line::blank());
     for wrapped in screen::wrap(
         &format!("Config written to {}", config_path.display()),
         limit,
@@ -492,12 +551,14 @@ mod tests {
         let ac = store::AutoCompactSelection::default();
         let gw = store::GatewaySelection::default();
         let web = store::WebSelection::default();
+        let voice = store::VoiceSelection::default();
         let block = confirmation_lines(
             MemoryMode::Background,
             &notes_dir,
             &ac,
             &gw,
             &web,
+            &voice,
             &path,
             Size::new(90, 24),
         )
@@ -528,12 +589,14 @@ mod tests {
                 backend: harness_core::config::SearchBackend::Brave,
                 api_key_env: Some("A_VERY_LONG_ENVIRONMENT_VARIABLE_NAME".to_string()),
             };
+            let voice = store::VoiceSelection::default();
             for line in confirmation_lines(
                 MemoryMode::Session,
                 &notes_dir,
                 &ac,
                 &gw,
                 &web,
+                &voice,
                 &PathBuf::from("~/.luna/config.yaml"),
                 Size::new(columns, 24),
             ) {

@@ -52,6 +52,26 @@ pub const WEB_BACKEND_KEY: &str = "tools.web.search_backend";
 /// The config key holding the environment variable a key is read from. The key itself is never
 /// written here — see the `WebSettings` documentation.
 pub const WEB_API_KEY_ENV_KEY: &str = "tools.web.search_api_key_env";
+/// The config key holding whether voice mode is enabled.
+pub const VOICE_ENABLED_KEY: &str = "voice.enabled";
+/// The config key holding which voice provider / backend is active.
+pub const VOICE_PROVIDER_KEY: &str = "voice.provider";
+/// The config key holding the wake word.
+pub const VOICE_WAKE_WORD_KEY: &str = "voice.wake_word";
+/// The config key holding the voice personality/name.
+pub const VOICE_NAME_KEY: &str = "voice.voice_name";
+/// The config key holding the speech-to-text model.
+pub const VOICE_STT_MODEL_KEY: &str = "voice.stt_model";
+/// The config key holding the text-to-speech model.
+pub const VOICE_TTS_MODEL_KEY: &str = "voice.tts_model";
+/// The config key holding custom base URL for voice endpoints.
+pub const VOICE_BASE_URL_KEY: &str = "voice.base_url";
+/// The config key holding the environment variable for voice API key.
+pub const VOICE_API_KEY_ENV_KEY: &str = "voice.api_key_env";
+/// The config key holding silence duration threshold in milliseconds.
+pub const VOICE_SILENCE_THRESHOLD_MS_KEY: &str = "voice.silence_threshold_ms";
+/// The config key holding whether speech barge-in is enabled.
+pub const VOICE_ENABLE_BARGE_IN_KEY: &str = "voice.enable_barge_in";
 /// The config key that switches the first-run flow off.
 pub const FIRST_RUN_KEY: &str = "first_run";
 
@@ -84,6 +104,90 @@ impl Default for WebSelection {
             backend: SearchBackend::DuckDuckGo,
             api_key_env: None,
         }
+    }
+}
+
+/// The voice interface answer: whether voice mode is enabled, which provider backs it,
+/// voice name, models, and latency / barge-in settings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VoiceSelection {
+    pub enabled: bool,
+    pub provider: String,
+    pub wake_word: String,
+    pub voice_name: String,
+    pub stt_model: String,
+    pub tts_model: String,
+    pub base_url: Option<String>,
+    pub api_key_env: Option<String>,
+    pub silence_threshold_ms: u64,
+    pub enable_barge_in: bool,
+}
+
+impl VoiceSelection {
+    pub fn disabled() -> Self {
+        Self {
+            enabled: false,
+            provider: "none".to_string(),
+            wake_word: "Luna".to_string(),
+            voice_name: "none".to_string(),
+            stt_model: String::new(),
+            tts_model: String::new(),
+            base_url: None,
+            api_key_env: None,
+            silence_threshold_ms: 800,
+            enable_barge_in: false,
+        }
+    }
+
+    pub fn antigravity(voice_name: Option<String>) -> Self {
+        Self {
+            enabled: true,
+            provider: "antigravity".to_string(),
+            wake_word: "Luna".to_string(),
+            voice_name: voice_name.unwrap_or_else(|| "Aoede".to_string()),
+            stt_model: String::new(),
+            tts_model: String::new(),
+            base_url: None,
+            api_key_env: None,
+            silence_threshold_ms: 800,
+            enable_barge_in: true,
+        }
+    }
+
+    pub fn openai(voice_name: Option<String>, api_key_env: Option<String>) -> Self {
+        Self {
+            enabled: true,
+            provider: "openai".to_string(),
+            wake_word: "Luna".to_string(),
+            voice_name: voice_name.unwrap_or_else(|| "alloy".to_string()),
+            stt_model: "whisper-1".to_string(),
+            tts_model: "tts-1".to_string(),
+            base_url: None,
+            api_key_env: api_key_env.or_else(|| Some("OPENAI_API_KEY".to_string())),
+            silence_threshold_ms: 800,
+            enable_barge_in: true,
+        }
+    }
+
+    pub fn groq(api_key_env: Option<String>) -> Self {
+        Self {
+            enabled: true,
+            provider: "groq".to_string(),
+            wake_word: "Luna".to_string(),
+            voice_name: "en-US-EmmaNeural".to_string(),
+            stt_model: "whisper-large-v3".to_string(),
+            tts_model: "edge-tts".to_string(),
+            base_url: None,
+            api_key_env: api_key_env.or_else(|| Some("GROQ_API_KEY".to_string())),
+            silence_threshold_ms: 800,
+            enable_barge_in: true,
+        }
+    }
+}
+
+impl Default for VoiceSelection {
+    fn default() -> Self {
+        Self::antigravity(None)
     }
 }
 
@@ -131,6 +235,7 @@ pub fn persist(
     auto_compact: &AutoCompactSelection,
     gateway: &GatewaySelection,
     web: &WebSelection,
+    voice: &VoiceSelection,
 ) -> Result<PathBuf, HarnessError> {
     config::set_in_file(layers, MEMORY_MODE_KEY, memory.as_str())?;
     config::set_in_file(layers, NOTES_DIR_KEY, &notes_dir.to_string_lossy())?;
@@ -187,6 +292,72 @@ pub fn persist(
         layers,
         WEB_API_KEY_ENV_KEY,
         web.api_key_env.as_deref().unwrap_or(""),
+    )?;
+    config::set_in_file(
+        layers,
+        VOICE_ENABLED_KEY,
+        if voice.enabled { "true" } else { "false" },
+    )?;
+    config::set_in_file(layers, VOICE_PROVIDER_KEY, &voice.provider)?;
+    config::set_in_file(layers, VOICE_WAKE_WORD_KEY, &voice.wake_word)?;
+    config::set_in_file(layers, VOICE_NAME_KEY, &voice.voice_name)?;
+    config::set_in_file(layers, VOICE_STT_MODEL_KEY, &voice.stt_model)?;
+    config::set_in_file(layers, VOICE_TTS_MODEL_KEY, &voice.tts_model)?;
+    if let Some(base_url) = &voice.base_url {
+        config::set_in_file(layers, VOICE_BASE_URL_KEY, base_url)?;
+    }
+    if let Some(env_var) = &voice.api_key_env {
+        config::set_in_file(layers, VOICE_API_KEY_ENV_KEY, env_var)?;
+    }
+    config::set_in_file(
+        layers,
+        VOICE_SILENCE_THRESHOLD_MS_KEY,
+        &voice.silence_threshold_ms.to_string(),
+    )?;
+    config::set_in_file(
+        layers,
+        VOICE_ENABLE_BARGE_IN_KEY,
+        if voice.enable_barge_in {
+            "true"
+        } else {
+            "false"
+        },
+    )?;
+    config::set_in_file(layers, FIRST_RUN_KEY, "false")?;
+    config_file(layers)
+}
+
+/// Write the voice selection, returning the config file path that was written.
+pub fn persist_voice(layers: &Layers, voice: &VoiceSelection) -> Result<PathBuf, HarnessError> {
+    config::set_in_file(
+        layers,
+        VOICE_ENABLED_KEY,
+        if voice.enabled { "true" } else { "false" },
+    )?;
+    config::set_in_file(layers, VOICE_PROVIDER_KEY, &voice.provider)?;
+    config::set_in_file(layers, VOICE_WAKE_WORD_KEY, &voice.wake_word)?;
+    config::set_in_file(layers, VOICE_NAME_KEY, &voice.voice_name)?;
+    config::set_in_file(layers, VOICE_STT_MODEL_KEY, &voice.stt_model)?;
+    config::set_in_file(layers, VOICE_TTS_MODEL_KEY, &voice.tts_model)?;
+    if let Some(base_url) = &voice.base_url {
+        config::set_in_file(layers, VOICE_BASE_URL_KEY, base_url)?;
+    }
+    if let Some(env_var) = &voice.api_key_env {
+        config::set_in_file(layers, VOICE_API_KEY_ENV_KEY, env_var)?;
+    }
+    config::set_in_file(
+        layers,
+        VOICE_SILENCE_THRESHOLD_MS_KEY,
+        &voice.silence_threshold_ms.to_string(),
+    )?;
+    config::set_in_file(
+        layers,
+        VOICE_ENABLE_BARGE_IN_KEY,
+        if voice.enable_barge_in {
+            "true"
+        } else {
+            "false"
+        },
     )?;
     config::set_in_file(layers, FIRST_RUN_KEY, "false")?;
     config_file(layers)
