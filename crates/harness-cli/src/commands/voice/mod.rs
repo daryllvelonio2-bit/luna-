@@ -36,8 +36,9 @@ pub use playback::VoiceSpeechQueue;
 #[allow(unused_imports)]
 pub use summary::{
     clean_text_for_speech, extract_ready_speech_chunks, fallback_voice_summary,
-    generate_pre_task_voice_ack, generate_separate_voice_summary, needs_separate_voice_summary,
-    spawn_pre_task_voice_ack, spawn_separate_voice_reply, split_sentences_for_tts,
+    generate_pre_task_voice_ack, generate_separate_voice_summary, is_filler_speech,
+    needs_separate_voice_summary, spawn_pre_task_voice_ack, spawn_separate_voice_reply,
+    split_sentences_for_tts,
 };
 #[allow(unused_imports)]
 pub use tts::build_gemini_tts_payload;
@@ -128,31 +129,6 @@ pub async fn run_voice_loop(
     let current_query_shared: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
     let turn_voice_cancel: Arc<Mutex<CancellationToken>> =
         Arc::new(Mutex::new(CancellationToken::new()));
-    let obs_cfg = config.clone();
-    let obs_creds = cred_manager.clone();
-    let obs_queue = speech_queue.clone();
-    let obs_tx = voice_tx.clone();
-    let obs_ack = ack_sent_flag.clone();
-    let obs_query = current_query_shared.clone();
-    let obs_cancel = turn_voice_cancel.clone();
-    agent_inst = agent_inst.with_observer(Arc::new(move |ev| {
-        if let harness_core::AgentEvent::ToolExecuting { name, arguments } = ev {
-            if !obs_ack.swap(true, Ordering::SeqCst) {
-                let q = obs_query.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                let c = obs_cancel.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                let hint = format!("{name} {arguments}");
-                spawn_pre_task_voice_ack(
-                    q,
-                    Some(hint),
-                    obs_cfg.clone(),
-                    obs_creds.clone(),
-                    obs_queue.clone(),
-                    Some(obs_tx.clone()),
-                    c,
-                );
-            }
-        }
-    }));
     let agent = Arc::new(agent_inst);
 
     let listener_cfg = config.clone();

@@ -227,3 +227,17 @@ async fn test_strict_voice_routing_zero_fallbacks() {
     let msg = err.to_string();
     assert!(msg.contains("Unsupported voice provider 'nonexistent_provider'"));
 }
+
+#[test]
+fn test_is_filler_speech_detects_chatter() {
+    assert!(is_filler_speech("Alright, I'll check that now."));
+    assert!(is_filler_speech("Alright, on it — working on that now."));
+    assert!(is_filler_speech("Sure thing, let me look into this."));
+    assert!(is_filler_speech("Working on that now."));
+    assert!(is_filler_speech("Searching now."));
+    assert!(!is_filler_speech("Found 3 open issues in the repository."));
+    assert!(!is_filler_speech("The build passed with zero errors."));
+    assert!(!is_filler_speech(
+        "Error code 524 indicates you do not have permission to join this experience."
+    ));
+}

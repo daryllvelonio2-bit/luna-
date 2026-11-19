@@ -241,6 +241,9 @@ pub async fn handle_turn_end(
                     let cleaned = crate::commands::voice::clean_text_for_speech(tail);
                     if !cleaned.is_empty() {
                         for sentence in crate::commands::voice::split_sentences_for_tts(&cleaned) {
+                            if crate::commands::voice::is_filler_speech(&sentence) {
+                                continue;
+                            }
                             st.voice_speech_queue.enqueue(
                                 &sentence,
                                 env.config,
@@ -253,6 +256,9 @@ pub async fn handle_turn_end(
                 } else if !st.voice_spoken_any && !reply_trim.is_empty() {
                     let summary = crate::commands::voice::fallback_voice_summary(reply_trim);
                     for sentence in crate::commands::voice::split_sentences_for_tts(&summary) {
+                        if crate::commands::voice::is_filler_speech(&sentence) {
+                            continue;
+                        }
                         st.voice_speech_queue.enqueue(
                             &sentence,
                             env.config,

@@ -119,23 +119,8 @@ pub async fn deactivate_voice(env: &Env<'_>, st: &mut TuiState) {
         .push(SystemNotice::new("• Voice mode deactivated."));
 }
 
-fn fast_tool_ack(tool_name: &str) -> &'static str {
-    let lower = tool_name.to_ascii_lowercase();
-    if lower.contains("search") || lower.contains("find") {
-        "Searching now."
-    } else if lower.contains("read") || lower.contains("view") || lower.contains("list") {
-        "Checking that now."
-    } else if lower.contains("write") || lower.contains("patch") {
-        "Making changes now."
-    } else if lower.contains("terminal") || lower.contains("run") || lower.contains("exec") {
-        "Running that now."
-    } else {
-        "Working on that now."
-    }
-}
-
-/// Stream newly completed sentences from the live assistant response into `VoiceSpeechQueue`
-/// in real time while tokens are generating, matching Antigravity's instant voice feel.
+/// Stream newly completed substantive sentences from the live assistant response into `VoiceSpeechQueue`
+/// in real time while tokens are generating, suppressing trivial preamble chatter ("Alright, I'll...").
 pub fn pump_voice_streaming_tts(env: &Env<'_>, st: &mut TuiState) {
     if !st.voice_active || st.active_turn.is_none() || st.voice_speech_queue.is_turn_muted() {
         return;
@@ -150,7 +135,6 @@ pub fn pump_voice_streaming_tts(env: &Env<'_>, st: &mut TuiState) {
     }
 
     if live_text.len() > st.voice_stream_offset {
-        // Cancel any pending pre-task ack since live assistant response tokens are flowing!
         if let Some(c) = st.voice_reply_cancel.take() {
             c.cancel();
         }
@@ -162,46 +146,12 @@ pub fn pump_voice_streaming_tts(env: &Env<'_>, st: &mut TuiState) {
         );
         st.voice_stream_offset += consumed;
         for chunk in chunks {
+            // Suppress trivial conversational filler / acknowledgment chatter
+            if crate::commands::voice::is_filler_speech(&chunk) {
+                continue;
+            }
             st.voice_speech_queue.enqueue(
                 &chunk,
-                env.config,
-                &env.cred_manager,
-                Some(st.voice_tx.clone()),
-            );
-            st.voice_spoken_any = true;
-        }
-        return;
-    }
-
-    // Only if no response text has arrived yet and tools started running or thinking ran long (>1500ms):
-    if !st.voice_ack_sent && !st.voice_spoken_any {
-        let (first_tool_hint, elapsed) = {
-            let tools = env
-                .in_flight_tools
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            let first_tool = tools
-                .iter()
-                .find(|it| !it.is_thinking() && !it.is_assistant_text() && !it.is_user_message())
-                .map(|it| it.call_formatted.clone());
-            (first_tool, st.turn_start.elapsed())
-        };
-
-        if let Some(tool_hint) = first_tool_hint {
-            st.voice_ack_sent = true;
-            let ack = fast_tool_ack(&tool_hint);
-            st.voice_speech_queue.enqueue(
-                ack,
-                env.config,
-                &env.cred_manager,
-                Some(st.voice_tx.clone()),
-            );
-            st.voice_spoken_any = true;
-        } else if elapsed >= std::time::Duration::from_millis(2000) {
-            st.voice_ack_sent = true;
-            let ack = "Working on that now.";
-            st.voice_speech_queue.enqueue(
-                ack,
                 env.config,
                 &env.cred_manager,
                 Some(st.voice_tx.clone()),

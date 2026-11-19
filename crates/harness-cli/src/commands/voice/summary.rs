@@ -224,6 +224,35 @@ pub fn needs_separate_voice_summary(reply: &str) -> bool {
     split_sentences_for_tts(&cleaned).len() > 3
 }
 
+/// Check if a sentence is trivial conversational filler / acknowledgment chatter
+/// (e.g. "Alright, I'll...", "Sure thing, let me...", "Working on that now...").
+pub fn is_filler_speech(sentence: &str) -> bool {
+    let s = sentence.trim().to_ascii_lowercase();
+    let s = s.trim_start_matches(|c: char| !c.is_alphabetic());
+    s.starts_with("alright, i'll")
+        || s.starts_with("alright i'll")
+        || s.starts_with("alright, let me")
+        || s.starts_with("alright let me")
+        || s.starts_with("alright, on it")
+        || s.starts_with("alright on it")
+        || s.starts_with("sure, i'll")
+        || s.starts_with("sure i'll")
+        || s.starts_with("sure thing, let me")
+        || s.starts_with("sure thing, i'll")
+        || s.starts_with("okay, i'll")
+        || s.starts_with("okay i'll")
+        || s.starts_with("ok, i'll")
+        || s.starts_with("ok i'll")
+        || s.starts_with("working on that")
+        || s.starts_with("searching now")
+        || s.starts_with("checking that now")
+        || s.starts_with("running that now")
+        || s.starts_with("making changes now")
+        || s.starts_with("let me check")
+        || s.starts_with("i'll check")
+        || s.starts_with("i will check")
+}
+
 /// Deterministic fallback spoken summary when an LLM summary call is unavailable.
 pub fn fallback_voice_summary(reply: &str) -> String {
     let cleaned = clean_text_for_speech(reply);
@@ -232,7 +261,7 @@ pub fn fallback_voice_summary(reply: &str) -> String {
     }
     let sentences = split_sentences_for_tts(&cleaned);
     let mut out = String::new();
-    for s in sentences.iter().take(2) {
+    for s in sentences.iter().filter(|s| !is_filler_speech(s)).take(2) {
         if out.len() + s.len() > 240 && !out.is_empty() {
             break;
         }
@@ -242,7 +271,13 @@ pub fn fallback_voice_summary(reply: &str) -> String {
         out.push_str(s);
     }
     if out.is_empty() {
-        out = cleaned.chars().take(220).collect();
+        // If all initial sentences were filler, take the first non-filler clause or the substantive tail
+        let non_filler: Vec<&String> = sentences.iter().filter(|s| !is_filler_speech(s)).collect();
+        if let Some(first_real) = non_filler.first() {
+            out.push_str(first_real);
+        } else {
+            out = cleaned.chars().take(220).collect();
+        }
     }
     if reply.contains('|') || reply.contains("```") {
         if !out.ends_with(['.', '!', '?']) {
@@ -348,6 +383,7 @@ pub async fn generate_fast_voice_text(
 }
 
 /// Generate a brief, natural spoken acknowledgment before or as Luna begins executing tools.
+#[allow(dead_code)]
 pub async fn generate_pre_task_voice_ack(
     user_query: &str,
     tool_hint: Option<&str>,
@@ -419,6 +455,7 @@ pub async fn generate_separate_voice_summary(
 }
 
 /// Spawn an immediate pre-task spoken acknowledgment without blocking the turn or UI loop.
+#[allow(dead_code)]
 pub fn spawn_pre_task_voice_ack(
     user_query: String,
     tool_hint: Option<String>,
