@@ -151,9 +151,10 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
         if needs_redraw {
             let t_draw = std::time::Instant::now();
             // Render current frame (never await env.agent.lock() here — the running turn holds it!).
-            // Keep the thinking display and theme settings in step with `/settings` changes.
+            // Keep the thinking display, theme, and voice settings in step with `/settings` changes.
             st.auto_hide_thinking = env.config.display.auto_hide_thinking;
             st.block_limit = env.config.display.block_limit;
+            st.voice_auto_send = env.config.voice.auto_send;
             theme::set_active_theme(env.config.display.theme);
             let w = terminal.size().map(|s| s.width as usize).unwrap_or(100);
             snap = env.ui.tui_snapshot(w);
@@ -279,6 +280,16 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
                 }
             }
 
+            _ = async {
+                match st.voice_pending_autosend_at {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                actions::flush_voice_pending_autosend(&mut env, &mut st, &mut terminal).await?;
+                needs_redraw = true;
+            }
+
             maybe_approval_reply = st.approval_reply_rx.recv() => {
                 if let Some(msg) = maybe_approval_reply {
                     if let ActiveModal::Approval {
@@ -327,6 +338,9 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
                             ..
                         }
                 )
+                || st.voice_speaking_detected
+                || st.voice_transcribing
+                || st.voice_is_playing.load(Ordering::SeqCst)
                 || !st.queue.is_empty() => {
                 needs_redraw = true;
                 st.spinner_tick = st.spinner_tick.wrapping_add(1);
@@ -797,6 +811,11 @@ async fn init_tui_state(env: &mut Env<'_>) -> Result<TuiState, HarnessError> {
         voice_cancel: None,
         voice_speech_queue,
         voice_is_playing,
+        voice_speaking_detected: false,
+        voice_transcribing: false,
+        voice_audio_level: 0.0,
+        voice_auto_send: env.config.voice.auto_send,
+        voice_pending_autosend_at: None,
         voice_stream_offset: 0,
         voice_stream_in_code: false,
         voice_spoken_any: false,

@@ -472,6 +472,8 @@ pub struct VoiceSettings {
     pub silence_threshold_ms: u64,
     /// Enable barge-in (interrupt playback when user starts speaking or says wake word). Default true.
     pub enable_barge_in: bool,
+    /// Automatically submit transcribed voice input (`true`, default) or place in the input box to verify before sending (`false`).
+    pub auto_send: bool,
     /// Audio input device name (None = default system microphone).
     pub input_device: Option<String>,
     /// Audio output device name (None = default system speaker).
@@ -491,6 +493,7 @@ impl Default for VoiceSettings {
             api_key_env: None,
             silence_threshold_ms: 800,
             enable_barge_in: true,
+            auto_send: true,
             input_device: None,
             output_device: None,
         }

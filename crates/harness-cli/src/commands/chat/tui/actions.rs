@@ -1493,7 +1493,7 @@ fn feature_status_badge(env: &Env<'_>, feature: Feature) -> String {
     }
 }
 
-fn open_settings_menu(env: &Env<'_>, st: &mut TuiState, selected: usize) {
+pub(crate) fn open_settings_menu(env: &Env<'_>, st: &mut TuiState, selected: usize) {
     let config = &env.config;
     let limit = match config.display.block_limit {
         None => "uncapped".to_string(),
@@ -1520,9 +1520,12 @@ fn open_settings_menu(env: &Env<'_>, st: &mut TuiState, selected: usize) {
     };
     let approval_model = format_approval_model_badge(env, st);
     let voice_label = if config.voice.enabled {
-        format!("on ({})", config.voice.provider)
+        format!(
+            "on ({} · {})",
+            config.voice.provider, config.voice.voice_name
+        )
     } else {
-        "off".to_string()
+        format!("off ({})", config.voice.voice_name)
     };
     st.modal = ActiveModal::SelectModal {
         title: "CLI Settings".to_string(),
@@ -2444,78 +2447,118 @@ pub async fn run_select_action(
             }
             2..=8 => toggle_settings_main_item(env, st, choice).await,
             9 => open_provider_picker_for(env, st, ModelTarget::Approval).await,
-            10 => {
-                let items = vec![
-                    if env.config.voice.enabled {
-                        "Disable Voice Mode".to_string()
-                    } else {
-                        "Enable Voice Mode".to_string()
-                    },
-                    "Provider: Antigravity (Google Live Voice)".to_string(),
-                    "Provider: OpenAI (Whisper STT + TTS)".to_string(),
-                    "Provider: Groq (Whisper STT + Edge TTS)".to_string(),
-                    format!(
-                        "Toggle Barge-in Interrupt · [{}]",
-                        if env.config.voice.enable_barge_in {
-                            "Enabled"
-                        } else {
-                            "Disabled"
-                        }
-                    ),
-                ];
-                st.modal = ActiveModal::SelectModal {
-                    title: "Voice Mode Settings".to_string(),
-                    items,
-                    selected: 0,
-                    action: SelectAction::SettingsVoice,
-                };
-            }
+            10 => open_settings_voice_menu(env, st, 0),
             _ => {
                 let summary = format_settings_summary(env.config, Some(env.feature_toggles));
                 show_text_modal(st, "Current CLI Settings", &summary);
             }
         },
-        SelectAction::SettingsVoice => {
-            let arg = match choice {
-                0 => {
-                    if env.config.voice.enabled {
-                        "voice off"
-                    } else {
-                        "voice on"
+        SelectAction::SettingsVoice => match choice {
+            1 => open_settings_voice_list_menu(env, st),
+            7 => open_settings_menu(env, st, 10),
+            _ => {
+                let prev_provider = env.config.voice.provider.clone();
+                let arg = match choice {
+                    0 => {
+                        if env.config.voice.enabled {
+                            "voice off"
+                        } else {
+                            "voice on"
+                        }
+                    }
+                    2 => {
+                        if env.config.voice.auto_send {
+                            "voice auto-send off"
+                        } else {
+                            "voice auto-send on"
+                        }
+                    }
+                    3 => "voice antigravity",
+                    4 => "voice openai",
+                    5 => "voice groq",
+                    6 => {
+                        if env.config.voice.enable_barge_in {
+                            "voice barge off"
+                        } else {
+                            "voice barge on"
+                        }
+                    }
+                    _ => "voice show",
+                };
+                if let Err(error) = handle_settings_command(
+                    None,
+                    &env.ui,
+                    env.config,
+                    &env.display_settings,
+                    &mut st.process_expanded,
+                    Some(arg),
+                )
+                .await
+                {
+                    env.ui
+                        .set_transient_error(Some(format!("Settings failed: {error}")));
+                } else {
+                    st.voice_auto_send = env.config.voice.auto_send;
+                    let provider_changed = env.config.voice.provider != prev_provider;
+                    if env.config.voice.enabled && (!st.voice_active || provider_changed) {
+                        activate_voice(env, st).await;
+                    } else if !env.config.voice.enabled && st.voice_active {
+                        deactivate_voice(env, st).await;
                     }
                 }
-                1 => "voice antigravity",
-                2 => "voice openai",
-                3 => "voice groq",
-                4 => {
-                    if env.config.voice.enable_barge_in {
-                        "voice barge off"
-                    } else {
-                        "voice barge on"
+                open_settings_voice_menu(env, st, choice);
+            }
+        },
+        SelectAction::SettingsVoiceList => {
+            let catalog = crate::commands::voice::available_voices();
+            if choice == catalog.len() {
+                st.modal = ActiveModal::InputModal {
+                    title: "Custom Voice ID".to_string(),
+                    prompt: "Enter any voice ID (e.g. voice_..., ja-JP-NanamiNeural, Aoede):"
+                        .to_string(),
+                    value: env.config.voice.voice_name.clone(),
+                    secret: false,
+                    action: InputAction::VoiceCustomName,
+                };
+                return;
+            }
+            if choice > catalog.len() {
+                open_settings_voice_menu(env, st, 1);
+                return;
+            }
+            if let Some(entry) = catalog.get(choice) {
+                let arg = format!("voice name {}", entry.id);
+                if let Err(error) = handle_settings_command(
+                    None,
+                    &env.ui,
+                    env.config,
+                    &env.display_settings,
+                    &mut st.process_expanded,
+                    Some(&arg),
+                )
+                .await
+                {
+                    env.ui
+                        .set_transient_error(Some(format!("Settings failed: {error}")));
+                } else if entry.provider == "antigravity"
+                    && env.config.voice.provider.eq_ignore_ascii_case("openai")
+                {
+                    // Switching from OpenAI to a Gemini/Antigravity voice needs Gemini TTS routing.
+                    let _ = handle_settings_command(
+                        None,
+                        &env.ui,
+                        env.config,
+                        &env.display_settings,
+                        &mut st.process_expanded,
+                        Some("voice antigravity"),
+                    )
+                    .await;
+                    if st.voice_active {
+                        activate_voice(env, st).await;
                     }
-                }
-                _ => "voice show",
-            };
-            if let Err(error) = handle_settings_command(
-                None,
-                &env.ui,
-                env.config,
-                &env.display_settings,
-                &mut st.process_expanded,
-                Some(arg),
-            )
-            .await
-            {
-                env.ui
-                    .set_transient_error(Some(format!("Settings failed: {error}")));
-            } else {
-                if env.config.voice.enabled {
-                    activate_voice(env, st).await;
-                } else if st.voice_active {
-                    deactivate_voice(env, st).await;
                 }
             }
-            open_settings_menu(env, st, 10);
+            open_settings_voice_menu(env, st, 1);
         }
         SelectAction::SettingsTheme => {
             let arg = if choice == 1 {
@@ -3298,7 +3341,106 @@ pub async fn run_input_action(
                 )));
             }
         }
+        InputAction::VoiceCustomName => {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                let arg = format!("voice name {trimmed}");
+                if let Err(error) = handle_settings_command(
+                    None,
+                    &env.ui,
+                    env.config,
+                    &env.display_settings,
+                    &mut st.process_expanded,
+                    Some(&arg),
+                )
+                .await
+                {
+                    env.ui
+                        .set_transient_error(Some(format!("Settings failed: {error}")));
+                }
+            }
+            open_settings_voice_menu(env, st, 1);
+        }
     }
+}
+
+pub(crate) fn open_settings_voice_menu(env: &Env<'_>, st: &mut TuiState, selected: usize) {
+    let active_mark = |p: &str| {
+        if env.config.voice.provider.eq_ignore_ascii_case(p) {
+            " ✓"
+        } else {
+            ""
+        }
+    };
+    let send_mode = if env.config.voice.auto_send {
+        "Auto-send (default)"
+    } else {
+        "Verify before send"
+    };
+    let items = vec![
+        if env.config.voice.enabled {
+            "Disable Voice Mode".to_string()
+        } else {
+            "Enable Voice Mode".to_string()
+        },
+        format!("Voice · [{}]", env.config.voice.voice_name),
+        format!("Voice Send Mode · [{send_mode}]"),
+        format!(
+            "Provider: Antigravity (Google Live Voice){}",
+            active_mark("antigravity")
+        ),
+        format!(
+            "Provider: OpenAI (Whisper STT + TTS){}",
+            active_mark("openai")
+        ),
+        format!(
+            "Provider: Groq (Whisper STT + Edge TTS){}",
+            active_mark("groq")
+        ),
+        format!(
+            "Toggle Barge-in Interrupt · [{}]",
+            if env.config.voice.enable_barge_in {
+                "Enabled"
+            } else {
+                "Disabled"
+            }
+        ),
+        "← Back to CLI Settings".to_string(),
+    ];
+    st.modal = ActiveModal::SelectModal {
+        title: "Voice Mode Settings".to_string(),
+        items,
+        selected: selected.min(7),
+        action: SelectAction::SettingsVoice,
+    };
+}
+
+pub(crate) fn open_settings_voice_list_menu(env: &Env<'_>, st: &mut TuiState) {
+    let catalog = crate::commands::voice::available_voices();
+    let current = env.config.voice.voice_name.trim();
+    let selected = catalog
+        .iter()
+        .position(|v| v.id.eq_ignore_ascii_case(current))
+        .unwrap_or(0);
+    let mut items: Vec<String> = catalog
+        .iter()
+        .map(|v| {
+            let mark = if v.id.eq_ignore_ascii_case(current) {
+                " ✓"
+            } else {
+                ""
+            };
+            format!("[{}] {} — {}{mark}", v.provider_label, v.id, v.description)
+        })
+        .collect();
+    items.push("Custom voice ID...".to_string());
+    items.push("← Back to Voice Settings".to_string());
+    st.modal = ActiveModal::SelectModal {
+        title: format!("Available Voices ({} built-in)", catalog.len()),
+        items,
+        selected,
+        action: SelectAction::SettingsVoiceList,
+    };
 }
 
 async fn apply_feature_live(env: &Env<'_>, feature: Feature, enabled: bool) {
@@ -3828,6 +3970,10 @@ pub async fn deactivate_voice(env: &Env<'_>, st: &mut TuiState) {
     st.voice_stream_offset = 0;
     st.voice_stream_in_code = false;
     st.voice_spoken_any = false;
+    st.voice_speaking_detected = false;
+    st.voice_transcribing = false;
+    st.voice_audio_level = 0.0;
+    st.voice_pending_autosend_at = None;
 
     st.system_notices
         .push(SystemNotice::new("• Voice mode deactivated."));
@@ -3874,7 +4020,30 @@ pub async fn handle_voice_event(
 ) {
     match evt {
         crate::commands::voice::VoiceEvent::Transcript(query) => {
+            st.voice_speaking_detected = false;
+            st.voice_transcribing = false;
+            st.voice_audio_level = 0.0;
             handle_incoming_voice_input(env, st, query).await;
+        }
+        crate::commands::voice::VoiceEvent::SpeechDetected(level) => {
+            st.voice_speaking_detected = true;
+            st.voice_transcribing = false;
+            st.voice_audio_level = level;
+        }
+        crate::commands::voice::VoiceEvent::SpeechLevel(level) => {
+            if st.voice_speaking_detected {
+                st.voice_audio_level = level;
+            }
+        }
+        crate::commands::voice::VoiceEvent::Transcribing => {
+            st.voice_speaking_detected = false;
+            st.voice_transcribing = true;
+            st.voice_audio_level = 0.0;
+        }
+        crate::commands::voice::VoiceEvent::SpeechIdle => {
+            st.voice_speaking_detected = false;
+            st.voice_transcribing = false;
+            st.voice_audio_level = 0.0;
         }
         crate::commands::voice::VoiceEvent::BargeIn => {
             // Immediate barge-in: stop TTS instantly, mute rest of interrupted turn until new input
@@ -3885,12 +4054,18 @@ pub async fn handle_voice_event(
             st.voice_stream_offset = 0;
             st.voice_stream_in_code = false;
             st.voice_spoken_any = false;
+            st.voice_speaking_detected = true;
+            st.voice_transcribing = false;
+            st.voice_audio_level = 0.6;
             st.system_notices.push(SystemNotice::new("🎤 Listening..."));
         }
         crate::commands::voice::VoiceEvent::Notice(msg) => {
             st.system_notices.push(SystemNotice::new(msg));
         }
         crate::commands::voice::VoiceEvent::Error(err) => {
+            st.voice_speaking_detected = false;
+            st.voice_transcribing = false;
+            st.voice_audio_level = 0.0;
             env.ui.set_transient_error(Some(err.clone()));
             st.system_notices
                 .push(SystemNotice::new(format!("✖ {err}")));
@@ -3910,6 +4085,65 @@ pub async fn handle_incoming_voice_input(env: &Env<'_>, st: &mut TuiState, voice
     st.voice_stream_in_code = false;
     st.voice_spoken_any = false;
 
+    if !env.config.voice.auto_send {
+        // Verify before send: type detected transcript into the composer text box for review/editing.
+        st.voice_pending_autosend_at = None;
+        st.composer.move_end();
+        if !st.composer.text.is_empty()
+            && !st
+                .composer
+                .text
+                .chars()
+                .next_back()
+                .is_some_and(char::is_whitespace)
+        {
+            st.composer.insert_char(' ');
+        }
+        st.composer.insert_str(trimmed);
+        sync_slash_popup(env, st);
+        st.system_notices.push(SystemNotice::new(
+            "🎤 Transcribed into input box — verify & press Enter to send",
+        ));
+        return;
+    }
+
+    // Auto-send (default): type into the text box and auto-submit after a brief visual beat
+    // unless the user already has a manual draft typed in the composer.
+    if st.composer.text.trim().is_empty() || st.voice_pending_autosend_at.is_some() {
+        st.composer.move_end();
+        if !st.composer.text.is_empty()
+            && !st
+                .composer
+                .text
+                .chars()
+                .next_back()
+                .is_some_and(char::is_whitespace)
+        {
+            st.composer.insert_char(' ');
+        }
+        st.composer.insert_str(trimmed);
+        sync_slash_popup(env, st);
+        st.voice_pending_autosend_at =
+            Some(tokio::time::Instant::now() + std::time::Duration::from_millis(160));
+        return;
+    }
+
+    dispatch_voice_turn_direct(env, st, trimmed);
+}
+
+pub async fn flush_voice_pending_autosend(
+    env: &mut Env<'_>,
+    st: &mut TuiState,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+) -> Result<Flow, HarnessError> {
+    st.voice_pending_autosend_at = None;
+    if st.composer.text.trim().is_empty() {
+        return Ok(Flow::Continue);
+    }
+    submit_composer(env, st, terminal).await
+}
+
+fn dispatch_voice_turn_direct(env: &Env<'_>, st: &mut TuiState, trimmed: &str) {
     st.system_notices
         .push(SystemNotice::new(format!("🎤 Heard: \"{trimmed}\"")));
     if st.active_turn.is_some() {

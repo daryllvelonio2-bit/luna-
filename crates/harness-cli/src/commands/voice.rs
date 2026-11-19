@@ -36,7 +36,7 @@ fn voice_http_client() -> &'static reqwest::Client {
 /// Events emitted by background voice capture, transcription, and playback tasks.
 #[derive(Debug, Clone)]
 pub enum VoiceEvent {
-    /// A non-empty user speech transcript ready to dispatch as a turn.
+    /// A non-empty user speech transcript ready to dispatch or stage in the composer.
     Transcript(String),
     /// Informational status notice (e.g. microphone ready).
     Notice(String),
@@ -45,6 +45,489 @@ pub enum VoiceEvent {
     /// Immediate barge-in signal: user started speaking during TTS playback.
     /// Sent before full transcript to allow instant TTS interruption.
     BargeIn,
+    /// User voice activity started; payload is normalized RMS energy `[0.0, 1.0]`.
+    SpeechDetected(f32),
+    /// Periodic live microphone energy level `[0.0, 1.0]` while user is speaking.
+    SpeechLevel(f32),
+    /// Utterance capture finished and speech-to-text transcription is in progress.
+    Transcribing,
+    /// Speech capture/transcription returned to idle listening.
+    SpeechIdle,
+}
+
+/// Catalog entry for a built-in TTS voice across Antigravity/Gemini, OpenAI, and Edge TTS.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VoiceCatalogEntry {
+    pub id: &'static str,
+    pub provider: &'static str,
+    pub provider_label: &'static str,
+    pub description: &'static str,
+}
+
+/// Return all available built-in voices across Gemini/Antigravity, OpenAI, and Edge TTS.
+pub fn available_voices() -> Vec<VoiceCatalogEntry> {
+    vec![
+        // Antigravity / Gemini Prebuilt Voices (30)
+        VoiceCatalogEntry {
+            id: "Aoede",
+            provider: "antigravity",
+            provider_label: "Gemini / Agy",
+            description: "Breezy (default)",
+        },
+        VoiceCatalogEntry {
+            id: "Zephyr",
+            provider: "antigravity",
+            provider_label: "Gemini / Agy",
+            description: "Bright",
+        },
+        VoiceCatalogEntry {
+            id: "Puck",
+            provider: "antigravity",
+            provider_label: "Gemini / Agy",
+            description: "Upbeat",
+        },
+        VoiceCatalogEntry {
+            id: "Charon",
+            provider: "antigravity",
+            provider_label: "Gemini / Agy",
+            description: "Informative",
+        },
+        VoiceCatalogEntry {
+            id: "Kore",
+            provider: "antigravity",
+            provider_label: "Gemini / Agy",
+            description: "Firm",
+        },
+        VoiceCatalogEntry {
+            id: "Fenrir",
+            provider: "antigravity",
+            provider_label: "Gemini / Agy",
+            description: "Excitable",
+        },
+        VoiceCatalogEntry {
+            id: "Leda",
+            provider: "antigravity",
+            provider_label: "Gemini / Agy",
+            description: "Youthful",
+        },
+        VoiceCatalogEntry {
+            id: "Orus",
+            provider: "antigravity",
+            provider_label: "Gemini / Agy",
+            description: "Firm",
+        },
+        VoiceCatalogEntry {
+            id: "Callirrhoe",
+            provider: "antigravity",
+            provider_label: "Gemini / Agy",
+            description: "Easy-going",
+        },
+        VoiceCatalogEntry {
+            id: "Autonoe",
+            provider: "antigravity",
+            provider_label: "Gemini / Agy",
+            description: "Bright",
+        },
+        VoiceCatalogEntry {
+            id: "Enceladus",
+            provider: "antigravity",
+            provider_label: "Gemini / Agy",
+            description: "Breathy",
+        },
+        VoiceCatalogEntry {
+            id: "Iapetus",
+            provider: "antigravity",
+            provider_label: "Gemini / Agy",
+            description: "Clear",
+        },
+        VoiceCatalogEntry {
+            id: "Umbriel",
+            provider: "antigravity",
+            provider_label: "Gemini / Agy",
+            description: "Easy-going",
+        },
+        VoiceCatalogEntry {
+            id: "Algieba",
+            provider: "antigravity",
+            provider_label: "Gemini / Agy",
+            description: "Smooth",
+        },
+        VoiceCatalogEntry {
+            id: "Despina",
+            provider: "antigravity",
+            provider_label: "Gemini / Agy",
+            description: "Smooth",
+        },
+        VoiceCatalogEntry {
+            id: "Erinome",
+            provider: "antigravity",
+            provider_label: "Gemini / Agy",
+            description: "Clear",
+        },
+        VoiceCatalogEntry {
+            id: "Algenib",
+            provider: "antigravity",
+            provider_label: "Gemini / Agy",
+            description: "Gravelly",
+        },
+        VoiceCatalogEntry {
+            id: "Rasalgethi",
+            provider: "antigravity",
+            provider_label: "Gemini / Agy",
+            description: "Informative",
+        },
+        VoiceCatalogEntry {
+            id: "Laomedeia",
+            provider: "antigravity",
+            provider_label: "Gemini / Agy",
+            description: "Upbeat",
+        },
+        VoiceCatalogEntry {
+            id: "Achernar",
+            provider: "antigravity",
+            provider_label: "Gemini / Agy",
+            description: "Soft",
+        },
+        VoiceCatalogEntry {
+            id: "Alnilam",
+            provider: "antigravity",
+            provider_label: "Gemini / Agy",
+            description: "Firm",
+        },
+        VoiceCatalogEntry {
+            id: "Schedar",
+            provider: "antigravity",
+            provider_label: "Gemini / Agy",
+            description: "Even",
+        },
+        VoiceCatalogEntry {
+            id: "Gacrux",
+            provider: "antigravity",
+            provider_label: "Gemini / Agy",
+            description: "Mature",
+        },
+        VoiceCatalogEntry {
+            id: "Pulcherrima",
+            provider: "antigravity",
+            provider_label: "Gemini / Agy",
+            description: "Forward",
+        },
+        VoiceCatalogEntry {
+            id: "Achird",
+            provider: "antigravity",
+            provider_label: "Gemini / Agy",
+            description: "Friendly",
+        },
+        VoiceCatalogEntry {
+            id: "Zubenelgenubi",
+            provider: "antigravity",
+            provider_label: "Gemini / Agy",
+            description: "Casual",
+        },
+        VoiceCatalogEntry {
+            id: "Vindemiatrix",
+            provider: "antigravity",
+            provider_label: "Gemini / Agy",
+            description: "Gentle",
+        },
+        VoiceCatalogEntry {
+            id: "Sadachbia",
+            provider: "antigravity",
+            provider_label: "Gemini / Agy",
+            description: "Lively",
+        },
+        VoiceCatalogEntry {
+            id: "Sadaltager",
+            provider: "antigravity",
+            provider_label: "Gemini / Agy",
+            description: "Knowledgeable",
+        },
+        VoiceCatalogEntry {
+            id: "Sulafat",
+            provider: "antigravity",
+            provider_label: "Gemini / Agy",
+            description: "Warm",
+        },
+        // OpenAI Voices (13)
+        VoiceCatalogEntry {
+            id: "alloy",
+            provider: "openai",
+            provider_label: "OpenAI",
+            description: "Balanced, neutral",
+        },
+        VoiceCatalogEntry {
+            id: "ash",
+            provider: "openai",
+            provider_label: "OpenAI",
+            description: "Clear, precise",
+        },
+        VoiceCatalogEntry {
+            id: "ballad",
+            provider: "openai",
+            provider_label: "OpenAI",
+            description: "Melodic, warm",
+        },
+        VoiceCatalogEntry {
+            id: "coral",
+            provider: "openai",
+            provider_label: "OpenAI",
+            description: "Expressive, bright",
+        },
+        VoiceCatalogEntry {
+            id: "echo",
+            provider: "openai",
+            provider_label: "OpenAI",
+            description: "Smooth, male",
+        },
+        VoiceCatalogEntry {
+            id: "fable",
+            provider: "openai",
+            provider_label: "OpenAI",
+            description: "Storytelling",
+        },
+        VoiceCatalogEntry {
+            id: "nova",
+            provider: "openai",
+            provider_label: "OpenAI",
+            description: "Energetic, bright",
+        },
+        VoiceCatalogEntry {
+            id: "onyx",
+            provider: "openai",
+            provider_label: "OpenAI",
+            description: "Deep, authoritative",
+        },
+        VoiceCatalogEntry {
+            id: "sage",
+            provider: "openai",
+            provider_label: "OpenAI",
+            description: "Calm, thoughtful",
+        },
+        VoiceCatalogEntry {
+            id: "shimmer",
+            provider: "openai",
+            provider_label: "OpenAI",
+            description: "Gentle, airy",
+        },
+        VoiceCatalogEntry {
+            id: "verse",
+            provider: "openai",
+            provider_label: "OpenAI",
+            description: "Versatile, dynamic",
+        },
+        VoiceCatalogEntry {
+            id: "marin",
+            provider: "openai",
+            provider_label: "OpenAI",
+            description: "Warm, natural",
+        },
+        VoiceCatalogEntry {
+            id: "cedar",
+            provider: "openai",
+            provider_label: "OpenAI",
+            description: "Grounded, steady",
+        },
+        // Edge TTS / Groq Neural Voices (30)
+        VoiceCatalogEntry {
+            id: "en-US-EmmaMultilingualNeural",
+            provider: "groq",
+            provider_label: "Edge TTS",
+            description: "US Female · Cheerful",
+        },
+        VoiceCatalogEntry {
+            id: "en-US-AndrewMultilingualNeural",
+            provider: "groq",
+            provider_label: "Edge TTS",
+            description: "US Male · Warm",
+        },
+        VoiceCatalogEntry {
+            id: "en-US-AvaMultilingualNeural",
+            provider: "groq",
+            provider_label: "Edge TTS",
+            description: "US Female · Expressive",
+        },
+        VoiceCatalogEntry {
+            id: "en-US-BrianMultilingualNeural",
+            provider: "groq",
+            provider_label: "Edge TTS",
+            description: "US Male · Casual",
+        },
+        VoiceCatalogEntry {
+            id: "en-US-AriaNeural",
+            provider: "groq",
+            provider_label: "Edge TTS",
+            description: "US Female · Positive",
+        },
+        VoiceCatalogEntry {
+            id: "en-US-JennyNeural",
+            provider: "groq",
+            provider_label: "Edge TTS",
+            description: "US Female · Clear",
+        },
+        VoiceCatalogEntry {
+            id: "en-US-GuyNeural",
+            provider: "groq",
+            provider_label: "Edge TTS",
+            description: "US Male · Friendly",
+        },
+        VoiceCatalogEntry {
+            id: "en-US-ChristopherNeural",
+            provider: "groq",
+            provider_label: "Edge TTS",
+            description: "US Male · Reliable",
+        },
+        VoiceCatalogEntry {
+            id: "en-US-EricNeural",
+            provider: "groq",
+            provider_label: "Edge TTS",
+            description: "US Male · Rational",
+        },
+        VoiceCatalogEntry {
+            id: "en-US-MichelleNeural",
+            provider: "groq",
+            provider_label: "Edge TTS",
+            description: "US Female · Pleasant",
+        },
+        VoiceCatalogEntry {
+            id: "en-US-RogerNeural",
+            provider: "groq",
+            provider_label: "Edge TTS",
+            description: "US Male · Lively",
+        },
+        VoiceCatalogEntry {
+            id: "en-US-SteffanNeural",
+            provider: "groq",
+            provider_label: "Edge TTS",
+            description: "US Male · Mature",
+        },
+        VoiceCatalogEntry {
+            id: "en-US-AnaNeural",
+            provider: "groq",
+            provider_label: "Edge TTS",
+            description: "US Female · Cute",
+        },
+        VoiceCatalogEntry {
+            id: "en-GB-SoniaNeural",
+            provider: "groq",
+            provider_label: "Edge TTS",
+            description: "UK Female · Friendly",
+        },
+        VoiceCatalogEntry {
+            id: "en-GB-RyanNeural",
+            provider: "groq",
+            provider_label: "Edge TTS",
+            description: "UK Male · Friendly",
+        },
+        VoiceCatalogEntry {
+            id: "en-GB-LibbyNeural",
+            provider: "groq",
+            provider_label: "Edge TTS",
+            description: "UK Female · Bright",
+        },
+        VoiceCatalogEntry {
+            id: "en-GB-MaisieNeural",
+            provider: "groq",
+            provider_label: "Edge TTS",
+            description: "UK Female · Youthful",
+        },
+        VoiceCatalogEntry {
+            id: "en-GB-ThomasNeural",
+            provider: "groq",
+            provider_label: "Edge TTS",
+            description: "UK Male · Calm",
+        },
+        VoiceCatalogEntry {
+            id: "en-AU-NatashaNeural",
+            provider: "groq",
+            provider_label: "Edge TTS",
+            description: "AU Female · Friendly",
+        },
+        VoiceCatalogEntry {
+            id: "en-AU-WilliamMultilingualNeural",
+            provider: "groq",
+            provider_label: "Edge TTS",
+            description: "AU Male · Friendly",
+        },
+        VoiceCatalogEntry {
+            id: "en-CA-ClaraNeural",
+            provider: "groq",
+            provider_label: "Edge TTS",
+            description: "CA Female · Friendly",
+        },
+        VoiceCatalogEntry {
+            id: "en-CA-LiamNeural",
+            provider: "groq",
+            provider_label: "Edge TTS",
+            description: "CA Male · Friendly",
+        },
+        VoiceCatalogEntry {
+            id: "en-IE-EmilyNeural",
+            provider: "groq",
+            provider_label: "Edge TTS",
+            description: "IE Female · Friendly",
+        },
+        VoiceCatalogEntry {
+            id: "en-IE-ConnorNeural",
+            provider: "groq",
+            provider_label: "Edge TTS",
+            description: "IE Male · Friendly",
+        },
+        VoiceCatalogEntry {
+            id: "en-IN-NeerjaExpressiveNeural",
+            provider: "groq",
+            provider_label: "Edge TTS",
+            description: "IN Female · Expressive",
+        },
+        VoiceCatalogEntry {
+            id: "en-IN-PrabhatNeural",
+            provider: "groq",
+            provider_label: "Edge TTS",
+            description: "IN Male · Friendly",
+        },
+        VoiceCatalogEntry {
+            id: "en-PH-RosaNeural",
+            provider: "groq",
+            provider_label: "Edge TTS",
+            description: "PH Female · Friendly",
+        },
+        VoiceCatalogEntry {
+            id: "en-PH-JamesNeural",
+            provider: "groq",
+            provider_label: "Edge TTS",
+            description: "PH Male · Friendly",
+        },
+        VoiceCatalogEntry {
+            id: "en-SG-LunaNeural",
+            provider: "groq",
+            provider_label: "Edge TTS",
+            description: "SG Female · Friendly",
+        },
+        VoiceCatalogEntry {
+            id: "en-SG-WayneNeural",
+            provider: "groq",
+            provider_label: "Edge TTS",
+            description: "SG Male · Friendly",
+        },
+    ]
+}
+
+fn is_openai_voice(voice: &str) -> bool {
+    matches!(
+        voice.trim(),
+        "alloy"
+            | "ash"
+            | "ballad"
+            | "coral"
+            | "echo"
+            | "fable"
+            | "nova"
+            | "onyx"
+            | "sage"
+            | "shimmer"
+            | "verse"
+            | "marin"
+            | "cedar"
+    )
 }
 
 enum AudioThreadCmd {
@@ -440,6 +923,10 @@ pub async fn run_voice_loop(
                         speech_queue.interrupt();
                         println!("\n{} Barge-in detected — interrupting...", "🎤".bold().yellow());
                     }
+                    VoiceEvent::SpeechDetected(_)
+                    | VoiceEvent::SpeechLevel(_)
+                    | VoiceEvent::Transcribing
+                    | VoiceEvent::SpeechIdle => {}
                     VoiceEvent::Transcript(query) => {
                         speech_queue.interrupt();
                         println!("\n{} {}", "🎤 You:".bold().yellow(), query);
@@ -794,6 +1281,7 @@ pub async fn run_background_voice_listener(
     let mut barge_in_hits: u8 = 0;
     let mut tts_cooldown_until: Option<std::time::Instant> = None;
     let mut last_stt_error_at: Option<std::time::Instant> = None;
+    let mut last_level_sent_at: Option<std::time::Instant> = None;
 
     while !cancel.is_cancelled() {
         tokio::select! {
@@ -842,6 +1330,7 @@ pub async fn run_background_voice_listener(
                 } else {
                     base_threshold
                 };
+                let norm_level = ((rms - base_threshold * 0.5) / 2200.0).clamp(0.05, 1.0);
 
                 if rms > threshold {
                     if !is_speaking {
@@ -864,19 +1353,36 @@ pub async fn run_background_voice_listener(
                         }
                         barge_in_hits = 0;
                         is_speaking = true;
+                        last_level_sent_at = Some(std::time::Instant::now());
+                        let _ = voice_tx.send(VoiceEvent::SpeechDetected(norm_level));
                         for chunk in pre_roll.drain(..) {
                             speech_buffer.extend_from_slice(&chunk);
                         }
                         pre_roll_len = 0;
+                    } else if last_level_sent_at
+                        .map(|t| t.elapsed() >= std::time::Duration::from_millis(80))
+                        .unwrap_or(true)
+                    {
+                        last_level_sent_at = Some(std::time::Instant::now());
+                        let _ = voice_tx.send(VoiceEvent::SpeechLevel(norm_level));
                     }
                     last_speech_time = std::time::Instant::now();
                     speech_buffer.extend_from_slice(&samples);
                 } else if is_speaking {
                     speech_buffer.extend_from_slice(&samples);
+                    if last_level_sent_at
+                        .map(|t| t.elapsed() >= std::time::Duration::from_millis(80))
+                        .unwrap_or(true)
+                    {
+                        last_level_sent_at = Some(std::time::Instant::now());
+                        let _ = voice_tx.send(VoiceEvent::SpeechLevel(norm_level * 0.6));
+                    }
                     let timed_out = speech_buffer.len() >= max_samples;
                     if last_speech_time.elapsed() > silence_duration || timed_out {
                         is_speaking = false;
+                        last_level_sent_at = None;
                         if speech_buffer.len() >= min_samples {
+                            let _ = voice_tx.send(VoiceEvent::Transcribing);
                             let trimmed_pcm = trim_trailing_silence(&speech_buffer, sample_rate, base_threshold * 0.8);
                             let resampled = downsample_to_16khz(trimmed_pcm, sample_rate);
                             let wav_res = harness_voice::AudioProcessor::samples_to_wav(&resampled, 16_000);
@@ -901,8 +1407,10 @@ pub async fn run_background_voice_listener(
                                     }
                                 }
                             }
+                            let _ = voice_tx.send(VoiceEvent::SpeechIdle);
                         } else {
                             speech_buffer.clear();
+                            let _ = voice_tx.send(VoiceEvent::SpeechIdle);
                         }
                     }
                 } else {
@@ -1426,66 +1934,98 @@ async fn stream_tts_sentence_to_audio(
     let mut errors: Vec<String> = Vec::new();
     let mut streamed = false;
 
-    match provider.as_str() {
-        "openai" => {
-            if let Some(key) = resolve_openai_api_key(cred_manager).await {
-                match stream_openai_tts_pcm(&cleaned, &key, voice_name, tts_model, audio).await {
-                    Ok(()) => streamed = true,
-                    Err(e) => {
-                        tracing::warn!("OpenAI TTS failed, trying Edge TTS fallback: {e}");
-                        errors.push(e.to_string());
-                    }
-                }
-            }
-            if !streamed && !audio.cancel.is_cancelled() {
-                match generate_edge_tts(&cleaned, voice_name).await {
-                    Ok(bytes) => {
-                        audio.send_encoded(bytes);
-                        streamed = true;
-                    }
-                    Err(e) => errors.push(e.to_string()),
-                }
-            }
-        }
-        "antigravity" | "agy" | "google" | "gemini" => {
-            let g_keys = resolve_gemini_api_keys(cred_manager).await;
-            if !g_keys.is_empty() {
-                match stream_gemini_tts_sse(&cleaned, &g_keys, voice_name, tts_model, audio).await {
-                    Ok(()) => streamed = true,
-                    Err(e) => {
-                        tracing::warn!("Gemini SSE TTS failed, trying Edge TTS fallback: {e}");
-                        errors.push(e.to_string());
-                    }
-                }
-            } else {
-                errors.push("No Gemini API key configured for Gemini TTS".to_string());
-            }
-            if !streamed && !audio.cancel.is_cancelled() {
-                match generate_edge_tts(&cleaned, voice_name).await {
-                    Ok(bytes) => {
-                        audio.send_encoded(bytes);
-                        streamed = true;
-                    }
-                    Err(e) => errors.push(e.to_string()),
-                }
-            }
-        }
-        _ => {
-            let g_keys = resolve_gemini_api_keys(cred_manager).await;
-            if !g_keys.is_empty()
-                && stream_gemini_tts_sse(&cleaned, &g_keys, voice_name, tts_model, audio)
-                    .await
-                    .is_ok()
-            {
+    if voice_name.contains("Neural") {
+        match generate_edge_tts(&cleaned, voice_name).await {
+            Ok(bytes) => {
+                audio.send_encoded(bytes);
                 streamed = true;
             }
-            if !streamed && !audio.cancel.is_cancelled() {
-                match generate_edge_tts(&cleaned, voice_name).await {
-                    Ok(bytes) => {
-                        audio.send_encoded(bytes);
-                        streamed = true;
+            Err(e) => errors.push(e.to_string()),
+        }
+    } else if is_openai_voice(voice_name) && provider != "openai" {
+        if let Some(key) = resolve_openai_api_key(cred_manager).await {
+            match stream_openai_tts_pcm(&cleaned, &key, voice_name, tts_model, audio).await {
+                Ok(()) => streamed = true,
+                Err(e) => {
+                    tracing::warn!("OpenAI TTS failed, trying Edge TTS fallback: {e}");
+                    errors.push(e.to_string());
+                }
+            }
+        }
+        if !streamed && !audio.cancel.is_cancelled() {
+            match generate_edge_tts(&cleaned, voice_name).await {
+                Ok(bytes) => {
+                    audio.send_encoded(bytes);
+                    streamed = true;
+                }
+                Err(e) => errors.push(e.to_string()),
+            }
+        }
+    } else {
+        match provider.as_str() {
+            "openai" => {
+                if let Some(key) = resolve_openai_api_key(cred_manager).await {
+                    match stream_openai_tts_pcm(&cleaned, &key, voice_name, tts_model, audio).await
+                    {
+                        Ok(()) => streamed = true,
+                        Err(e) => {
+                            tracing::warn!("OpenAI TTS failed, trying Edge TTS fallback: {e}");
+                            errors.push(e.to_string());
+                        }
                     }
-                    Err(e) => errors.push(e.to_string()),
+                }
+                if !streamed && !audio.cancel.is_cancelled() {
+                    match generate_edge_tts(&cleaned, voice_name).await {
+                        Ok(bytes) => {
+                            audio.send_encoded(bytes);
+                            streamed = true;
+                        }
+                        Err(e) => errors.push(e.to_string()),
+                    }
+                }
+            }
+            "antigravity" | "agy" | "google" | "gemini" => {
+                let g_keys = resolve_gemini_api_keys(cred_manager).await;
+                if !g_keys.is_empty() {
+                    match stream_gemini_tts_sse(&cleaned, &g_keys, voice_name, tts_model, audio)
+                        .await
+                    {
+                        Ok(()) => streamed = true,
+                        Err(e) => {
+                            tracing::warn!("Gemini SSE TTS failed, trying Edge TTS fallback: {e}");
+                            errors.push(e.to_string());
+                        }
+                    }
+                } else {
+                    errors.push("No Gemini API key configured for Gemini TTS".to_string());
+                }
+                if !streamed && !audio.cancel.is_cancelled() {
+                    match generate_edge_tts(&cleaned, voice_name).await {
+                        Ok(bytes) => {
+                            audio.send_encoded(bytes);
+                            streamed = true;
+                        }
+                        Err(e) => errors.push(e.to_string()),
+                    }
+                }
+            }
+            _ => {
+                let g_keys = resolve_gemini_api_keys(cred_manager).await;
+                if !g_keys.is_empty()
+                    && stream_gemini_tts_sse(&cleaned, &g_keys, voice_name, tts_model, audio)
+                        .await
+                        .is_ok()
+                {
+                    streamed = true;
+                }
+                if !streamed && !audio.cancel.is_cancelled() {
+                    match generate_edge_tts(&cleaned, voice_name).await {
+                        Ok(bytes) => {
+                            audio.send_encoded(bytes);
+                            streamed = true;
+                        }
+                        Err(e) => errors.push(e.to_string()),
+                    }
                 }
             }
         }
@@ -1510,7 +2050,7 @@ async fn stream_openai_tts_pcm(
     let client = voice_http_client();
     let openai_voice = match voice {
         "alloy" | "ash" | "ballad" | "coral" | "echo" | "fable" | "nova" | "onyx" | "sage"
-        | "shimmer" | "verse" => voice,
+        | "shimmer" | "verse" | "marin" | "cedar" => voice,
         _ => "alloy",
     };
     let res = client
@@ -2045,6 +2585,30 @@ mod tests {
         assert!(!queue.is_playing().load(Ordering::SeqCst));
         queue.set_turn_muted(false);
         assert!(!queue.is_turn_muted());
+    }
+
+    #[test]
+    fn test_available_voices_includes_gemini_openai_and_edge() {
+        let voices = available_voices();
+        assert!(voices
+            .iter()
+            .any(|v| v.id == "Aoede" && v.provider == "antigravity"));
+        assert!(voices
+            .iter()
+            .any(|v| v.id == "Sulafat" && v.provider == "antigravity"));
+        assert!(voices
+            .iter()
+            .any(|v| v.id == "alloy" && v.provider == "openai"));
+        assert!(voices
+            .iter()
+            .any(|v| v.id == "marin" && v.provider == "openai"));
+        assert!(voices
+            .iter()
+            .any(|v| v.id == "en-US-EmmaMultilingualNeural" && v.provider == "groq"));
+        assert!(voices
+            .iter()
+            .all(|v| !v.id.is_empty() && !v.description.is_empty()));
+        assert!(Config::default().voice.auto_send);
     }
 
     #[tokio::test]

@@ -865,6 +865,7 @@ async fn handle_key(
 
     // Ctrl+V pastes clipboard image (if present) or clipboard text.
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('v') {
+        st.voice_pending_autosend_at = None;
         handle_ctrl_v(env, st);
         return Ok(Flow::Continue);
     }
@@ -938,6 +939,7 @@ async fn handle_key(
 
     // Escape clears a text selection first, then interrupts or clears the transient error.
     if key.code == KeyCode::Esc {
+        st.voice_pending_autosend_at = None;
         if st.selection.is_some() {
             clear_selection(st);
             return Ok(Flow::Continue);
@@ -970,6 +972,7 @@ async fn handle_key(
     // Composer editing & submission
     match key.code {
         KeyCode::Enter => {
+            st.voice_pending_autosend_at = None;
             if key.modifiers.contains(KeyModifiers::SHIFT)
                 || key.modifiers.contains(KeyModifiers::ALT)
             {
@@ -980,6 +983,7 @@ async fn handle_key(
             }
         }
         KeyCode::Backspace => {
+            st.voice_pending_autosend_at = None;
             if key.modifiers.contains(KeyModifiers::CONTROL)
                 || key.modifiers.contains(KeyModifiers::ALT)
             {
@@ -990,6 +994,7 @@ async fn handle_key(
             sync_slash_popup(env, st);
         }
         KeyCode::Delete => {
+            st.voice_pending_autosend_at = None;
             st.composer.delete();
             sync_slash_popup(env, st);
         }
@@ -1014,6 +1019,7 @@ async fn handle_key(
             }
         }
         KeyCode::Char(c) => {
+            st.voice_pending_autosend_at = None;
             if key.modifiers.contains(KeyModifiers::CONTROL) {
                 match c {
                     'a' => st.composer.move_home(),
@@ -1426,6 +1432,22 @@ async fn handle_modal_key(
                     let choice = selected.min(items.len().saturating_sub(1));
                     super::actions::run_select_action(env, st, action, choice).await;
                 }
+                KeyCode::Backspace => match action {
+                    super::state::SelectAction::SettingsVoiceList => {
+                        super::actions::open_settings_voice_menu(env, st, 1);
+                    }
+                    super::state::SelectAction::SettingsVoice => {
+                        super::actions::open_settings_menu(env, st, 10);
+                    }
+                    _ => {
+                        st.modal = ActiveModal::SelectModal {
+                            title,
+                            items,
+                            selected,
+                            action,
+                        };
+                    }
+                },
                 _ => {
                     st.modal = ActiveModal::SelectModal {
                         title,

@@ -57,6 +57,7 @@ pub enum SelectAction {
     SettingsBlockLimit,
     SettingsTheme,
     SettingsVoice,
+    SettingsVoiceList,
     DirScope {
         path: String,
     },
@@ -145,6 +146,7 @@ pub enum InputAction {
         name: String,
     },
     MemoryCustomProject,
+    VoiceCustomName,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1442,6 +1444,16 @@ pub struct TuiState {
     pub voice_speech_queue: crate::commands::voice::VoiceSpeechQueue,
     /// Shared flag indicating TTS audio is actively playing (used for echo/barge-in gating).
     pub voice_is_playing: Arc<AtomicBool>,
+    /// Whether live microphone speech is currently detected (drives animated voice UI).
+    pub voice_speaking_detected: bool,
+    /// Whether captured voice audio is currently being transcribed.
+    pub voice_transcribing: bool,
+    /// Normalized microphone RMS level `[0.0, 1.0]` while speaking.
+    pub voice_audio_level: f32,
+    /// Whether transcribed voice auto-sends (`true`) or stays in composer to verify (`false`).
+    pub voice_auto_send: bool,
+    /// Deadline to auto-submit the voice-typed composer text (gives a brief visual beat).
+    pub voice_pending_autosend_at: Option<tokio::time::Instant>,
     /// Byte offset into `env.ui.live_content_snapshot()` already dispatched to TTS during the current turn.
     pub voice_stream_offset: usize,
     /// Whether the streaming voice splitter is currently inside a fenced code block.

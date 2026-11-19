@@ -289,12 +289,22 @@ async fn run_voice_wizard(
     config: &mut Config,
 ) -> Result<(), HarnessError> {
     let current_status = if config.voice.enabled {
-        format!("Enabled ({})", config.voice.provider)
+        format!(
+            "Enabled ({} · {})",
+            config.voice.provider, config.voice.voice_name
+        )
     } else {
         "Disabled".to_string()
     };
+    let send_mode = if config.voice.auto_send {
+        "Auto-send (default)"
+    } else {
+        "Verify before send"
+    };
     let voice_items = vec![
         format!("Toggle Voice Mode · [{current_status}]"),
+        format!("Voice · [{}]", config.voice.voice_name),
+        format!("Voice Send Mode · [{send_mode}]"),
         "Provider: Antigravity (Google Live Voice)".to_string(),
         "Provider: OpenAI (Whisper STT + TTS)".to_string(),
         "Provider: Groq (Whisper STT + Edge TTS)".to_string(),
@@ -313,10 +323,49 @@ async fn run_voice_wizard(
             let next = if config.voice.enabled { "off" } else { "on" };
             apply_voice_setting(next, ui, config)?;
         }
-        Some(1) => apply_voice_setting("antigravity", ui, config)?,
-        Some(2) => apply_voice_setting("openai", ui, config)?,
-        Some(3) => apply_voice_setting("groq", ui, config)?,
-        Some(4) => {
+        Some(1) => {
+            let catalog = crate::commands::voice::available_voices();
+            let items: Vec<String> = catalog
+                .iter()
+                .map(|v| format!("[{}] {} — {}", v.provider_label, v.id, v.description))
+                .collect();
+            let default_idx = catalog
+                .iter()
+                .position(|v| v.id.eq_ignore_ascii_case(&config.voice.voice_name))
+                .unwrap_or(0);
+            if let Some(idx) =
+                select_from_rx(rx, ui, "Select Voice", &items, default_idx, true, false).await
+            {
+                if let Some(entry) = catalog.get(idx) {
+                    apply_voice_sub_setting("name", entry.id, ui, config)?;
+                }
+            }
+        }
+        Some(2) => {
+            let send_items = vec![
+                "Auto-send (default) — type into box & send automatically".to_string(),
+                "Verify before send — type into box & wait for Enter".to_string(),
+            ];
+            let default_idx = if config.voice.auto_send { 0 } else { 1 };
+            if let Some(idx) = select_from_rx(
+                rx,
+                ui,
+                "Voice Send Mode",
+                &send_items,
+                default_idx,
+                true,
+                false,
+            )
+            .await
+            {
+                let next = if idx == 0 { "on" } else { "off" };
+                apply_voice_sub_setting("auto-send", next, ui, config)?;
+            }
+        }
+        Some(3) => apply_voice_setting("antigravity", ui, config)?,
+        Some(4) => apply_voice_setting("openai", ui, config)?,
+        Some(5) => apply_voice_setting("groq", ui, config)?,
+        Some(6) => {
             let next = if config.voice.enable_barge_in {
                 "off"
             } else {
@@ -414,6 +463,43 @@ pub(crate) fn apply_voice_sub_setting(
         "provider" => {
             apply_voice_setting(val, ui, config)?;
         }
+        "name" | "voice" | "voice-name" | "voice_name" => {
+            let trimmed = val.trim();
+            if trimmed.is_empty() {
+                return Err(HarnessError::ConfigurationError(
+                    "voice name cannot be empty".to_string(),
+                ));
+            }
+            config.voice.voice_name = trimmed.to_string();
+            let _ = harness_core::config::set_in_file(&layers, "voice.voice_name", trimmed);
+            ui.emit_above(&format!(
+                "{} Voice set to: '{}' (saved to config)",
+                "✔".green().bold(),
+                trimmed.bold()
+            ));
+        }
+        "auto-send" | "autosend" | "auto_send" | "send-mode" => {
+            let enabled = match val.to_ascii_lowercase().as_str() {
+                "auto" | "auto-send" | "autosend" => true,
+                "verify" | "manual" | "confirm" => false,
+                _ => parse_bool(val)?,
+            };
+            config.voice.auto_send = enabled;
+            let _ = harness_core::config::set_in_file(
+                &layers,
+                "voice.auto_send",
+                if enabled { "true" } else { "false" },
+            );
+            ui.emit_above(&format!(
+                "{} Voice send mode set to: {} (saved to config)",
+                "✔".green().bold(),
+                if enabled {
+                    "Auto-send".bold()
+                } else {
+                    "Verify before send".bold()
+                }
+            ));
+        }
         "threshold" | "silence" => {
             let threshold: u64 = val.parse().map_err(|_| {
                 HarnessError::ConfigurationError(format!("invalid threshold ms: '{val}'"))
@@ -428,7 +514,7 @@ pub(crate) fn apply_voice_sub_setting(
         }
         other => {
             return Err(HarnessError::ConfigurationError(format!(
-                "unknown voice setting '{other}'. Supported: provider, wake, barge, threshold"
+                "unknown voice setting '{other}'. Supported: provider, name, auto-send, wake, barge, threshold"
             )));
         }
     }
@@ -610,8 +696,14 @@ pub(crate) fn format_settings_summary(
     };
     let voice_str = if config.voice.enabled {
         format!(
-            "Enabled (provider: {}, wake word: '{}', barge-in: {})",
+            "Enabled (provider: {}, voice: {}, send: {}, wake word: '{}', barge-in: {})",
             config.voice.provider,
+            config.voice.voice_name,
+            if config.voice.auto_send {
+                "auto-send"
+            } else {
+                "verify before send"
+            },
             config.voice.wake_word,
             if config.voice.enable_barge_in {
                 "on"
@@ -620,7 +712,15 @@ pub(crate) fn format_settings_summary(
             }
         )
     } else {
-        "Disabled".to_string()
+        format!(
+            "Disabled (voice: {}, send: {})",
+            config.voice.voice_name,
+            if config.voice.auto_send {
+                "auto-send"
+            } else {
+                "verify before send"
+            }
+        )
     };
     let approval_model_str = match (
         config

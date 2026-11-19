@@ -1323,6 +1323,19 @@ fn build_antigravity_footer_line(
     Line::from(spans)
 }
 
+fn voice_waveform_bars(tick: usize, level: f32) -> String {
+    const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    let amp = level.clamp(0.15, 1.0);
+    let mut out = String::with_capacity(15);
+    for i in 0..5usize {
+        let phase = ((tick + i * 2) % 8) as f32 / 7.0;
+        let wave = 0.45 + 0.55 * (1.0 - (phase - 0.5).abs() * 2.0);
+        let idx = ((amp * wave) * 7.0).round().clamp(0.0, 7.0) as usize;
+        out.push(BARS[idx]);
+    }
+    out
+}
+
 fn render_composer_card(
     frame: &mut Frame,
     rect: Rect,
@@ -1335,7 +1348,17 @@ fn render_composer_card(
     if rect.height == 0 || rect.width < 6 {
         return;
     }
-    let accent = mode_accent(st.mode.label());
+    let accent = if st.voice_speaking_detected {
+        if st.spinner_tick % 4 < 2 {
+            green_ok()
+        } else {
+            cyan_link()
+        }
+    } else if st.voice_transcribing {
+        cyan_link()
+    } else {
+        mode_accent(st.mode.label())
+    };
     let inner_w = rect.width.saturating_sub(1) as usize;
 
     // Fill all card rows with `▎` accent bar + `bg_surface()` background.
@@ -1403,23 +1426,40 @@ fn render_composer_card(
     st.composer_scroll_off = scroll_off;
 
     if st.composer.text.is_empty() && rect.height >= 2 {
-        let placeholder = if st.active_turn.is_some() {
-            "Type to queue or steer next message..."
+        let (placeholder, placeholder_color) = if st.active_turn.is_some() {
+            (
+                "Type to queue or steer next message...".to_string(),
+                text_muted(),
+            )
+        } else if st.voice_speaking_detected {
+            let bars = voice_waveform_bars(st.spinner_tick, st.voice_audio_level);
+            (format!("{bars}  Listening to your voice..."), green_ok())
+        } else if st.voice_transcribing {
+            let spinner = SPINNER_FRAMES[st.spinner_tick % SPINNER_FRAMES.len()];
+            (format!("{spinner}  Transcribing voice..."), cyan_link())
         } else if st.voice_active {
-            "Type or talk anytime... (say \"Luna\" or type /voice off)"
+            let hint = if st.voice_auto_send {
+                "Type or talk anytime... (say \"Luna\" or type /voice off)"
+            } else {
+                "Type or talk anytime... (verify before send · /voice off)"
+            };
+            (hint.to_string(), text_muted())
         } else if is_landing {
-            "Ask anything... \"Fix broken tests\""
+            (
+                "Ask anything... \"Fix broken tests\"".to_string(),
+                text_muted(),
+            )
         } else {
-            ""
+            (String::new(), text_muted())
         };
         let text_area_w = inner_w.saturating_sub(2);
-        let clipped = truncate_str(placeholder, text_area_w);
+        let clipped = truncate_str(&placeholder, text_area_w);
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled("▎", Style::default().fg(accent).bg(bg_surface())),
                 Span::styled(
                     format!("  {clipped}"),
-                    Style::default().fg(text_muted()).bg(bg_surface()),
+                    Style::default().fg(placeholder_color).bg(bg_surface()),
                 ),
             ])),
             Rect {
@@ -1510,10 +1550,27 @@ fn render_composer_card(
                 " · ",
                 Style::default().fg(text_muted()).bg(bg_surface()),
             ));
+            let (voice_badge, voice_color) = if st.voice_speaking_detected {
+                let bars = voice_waveform_bars(st.spinner_tick, st.voice_audio_level);
+                (format!("🎙 {bars} Listening"), green_ok())
+            } else if st.voice_transcribing {
+                let spinner = SPINNER_FRAMES[st.spinner_tick % SPINNER_FRAMES.len()];
+                (format!("🎙 {spinner} Transcribing"), cyan_link())
+            } else if st
+                .voice_is_playing
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                let bars = voice_waveform_bars(st.spinner_tick, 0.55);
+                (format!("🎙 {bars} Speaking"), cyan_link())
+            } else if !st.voice_auto_send {
+                ("🎙 Voice ON · verify".to_string(), green_ok())
+            } else {
+                ("🎙 Voice ON".to_string(), green_ok())
+            };
             footer_spans.push(Span::styled(
-                "🎙 Voice ON",
+                voice_badge,
                 Style::default()
-                    .fg(green_ok())
+                    .fg(voice_color)
                     .bg(bg_surface())
                     .add_modifier(Modifier::BOLD),
             ));
@@ -3491,6 +3548,12 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
             st.modal_rect = Some(rect);
             let hint = if matches!(action, super::state::SelectAction::SettingsMain) {
                 "↑/↓ · space toggle · enter · esc"
+            } else if matches!(
+                action,
+                super::state::SelectAction::SettingsVoice
+                    | super::state::SelectAction::SettingsVoiceList
+            ) {
+                "↑/↓ · enter · backspace back · esc"
             } else {
                 "↑/↓ · enter · esc"
             };
@@ -6138,6 +6201,11 @@ mod tests {
             voice_cancel: None,
             voice_speech_queue: crate::commands::voice::VoiceSpeechQueue::new(),
             voice_is_playing: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            voice_speaking_detected: false,
+            voice_transcribing: false,
+            voice_audio_level: 0.0,
+            voice_auto_send: true,
+            voice_pending_autosend_at: None,
             voice_stream_offset: 0,
             voice_stream_in_code: false,
             voice_spoken_any: false,
@@ -6847,6 +6915,11 @@ mod tests {
             voice_cancel: None,
             voice_speech_queue: crate::commands::voice::VoiceSpeechQueue::new(),
             voice_is_playing: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            voice_speaking_detected: false,
+            voice_transcribing: false,
+            voice_audio_level: 0.0,
+            voice_auto_send: true,
+            voice_pending_autosend_at: None,
             voice_stream_offset: 0,
             voice_stream_in_code: false,
             voice_spoken_any: false,
@@ -6997,6 +7070,49 @@ mod tests {
         assert!(saw_auto_yellow, "Auto mode must be yellow");
         assert!(saw_deny_red, "Deny must be red");
         assert!(saw_ask_white, "Ask question must be white");
+    }
+
+    #[test]
+    fn voice_detection_animates_composer_and_verify_badge() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let mut st = test_dummy_tui_state();
+        st.voice_active = true;
+        st.voice_speaking_detected = true;
+        st.voice_audio_level = 0.75;
+        st.spinner_tick = 3;
+        let in_flight = Vec::new();
+        let info = FooterInfo {
+            provider: "antigravity",
+            model: "gemini-3-flash",
+            reasoning_effort: None,
+            session_id: "s1",
+            in_flight_tools: &in_flight,
+            features: Default::default(),
+        };
+        let snap = TuiLiveSnapshot::default();
+        let backend = TestBackend::new(100, 32);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &mut st, &snap, &info)).unwrap();
+        let buf = terminal.backend().buffer();
+        let text: String = (0..32)
+            .map(|y| (0..100).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Listening to your voice"), "{text}");
+        assert!(text.contains("Listening"), "{text}");
+
+        // Verify-before-send mode badge when idle
+        st.voice_speaking_detected = false;
+        st.voice_auto_send = false;
+        terminal.draw(|f| draw(f, &mut st, &snap, &info)).unwrap();
+        let buf2 = terminal.backend().buffer();
+        let text2: String = (0..32)
+            .map(|y| (0..100).map(|x| buf2[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text2.contains("Voice ON · verify"), "{text2}");
+        assert!(text2.contains("verify before send"), "{text2}");
     }
 
     #[test]
