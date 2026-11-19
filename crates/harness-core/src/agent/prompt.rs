@@ -76,7 +76,7 @@ where
         )?;
         let env_info = self.runtime_environment();
         let voice_instruction = if self.config.voice_mode {
-            "\n\nVOICE MODE ACTIVE (CONVERSATIONAL SPOKEN OUTPUT):\n- You are in a live, two-way spoken conversation. Speak naturally like a helpful teammate, using contractions and warm, direct phrasing.\n- Keep replies concise and easy to follow by ear (usually 1 to 4 short sentences unless the user asks for more detail), and offer a brief natural follow-up when helpful.\n- Never include Markdown tables, bulleted syntax, ASCII boxes, ANSI color escapes, raw URLs, or code blocks in your spoken reply."
+            "\n\nVOICE MODE ACTIVE (DUAL WRITTEN + SPOKEN EXPERIENCE):\n- Your written reply in the chat is rendered visually and read on screen; a separate spoken voice layer reads a concise conversational summary aloud.\n- Keep your full written reply thorough and well-formatted (Markdown tables, code blocks, lists, and complete details are great in the chat).\n- IMPORTANT FOR RESPONSIVENESS: Whenever you are about to run tools to perform a task (e.g. cleaning files, running commands, searching, or editing), write a brief, friendly 1-sentence acknowledgment FIRST (such as \"Alright, on it — cleaning up the build artifacts now.\") before invoking your first tool call."
         } else {
             ""
         };

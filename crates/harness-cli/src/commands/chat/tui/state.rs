@@ -1460,6 +1460,10 @@ pub struct TuiState {
     pub voice_stream_in_code: bool,
     /// Whether at least one speech segment has been enqueued during the active turn.
     pub voice_spoken_any: bool,
+    /// Whether an immediate pre-task spoken acknowledgment was already triggered for this turn.
+    pub voice_ack_sent: bool,
+    /// Cancellation token for async pre-task ack / separate voice summary tasks on the active turn.
+    pub voice_reply_cancel: Option<CancellationToken>,
     /// Sender for voice events (transcripts, status notices, errors).
     pub voice_tx: tokio::sync::mpsc::UnboundedSender<crate::commands::voice::VoiceEvent>,
     /// Receiver polled by the event loop for voice events.

@@ -819,6 +819,8 @@ async fn init_tui_state(env: &mut Env<'_>) -> Result<TuiState, HarnessError> {
         voice_stream_offset: 0,
         voice_stream_in_code: false,
         voice_spoken_any: false,
+        voice_ack_sent: false,
+        voice_reply_cancel: None,
         voice_tx,
         voice_rx,
         settled_cache: state::SettledTranscriptCache::default(),

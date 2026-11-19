@@ -875,12 +875,42 @@ pub async fn run_voice_loop(
     )?)
     .with_approval(build_approver(&config), approval_settings(&config));
     agent_inst.set_voice_mode(true);
-    let agent = Arc::new(agent_inst);
 
     let cancel = CancellationToken::new();
     let speech_queue = VoiceSpeechQueue::new();
     let is_playing = speech_queue.is_playing();
     let (voice_tx, mut voice_rx) = tokio::sync::mpsc::unbounded_channel::<VoiceEvent>();
+
+    let ack_sent_flag = Arc::new(AtomicBool::new(false));
+    let current_query_shared: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+    let turn_voice_cancel: Arc<Mutex<CancellationToken>> =
+        Arc::new(Mutex::new(CancellationToken::new()));
+    let obs_cfg = config.clone();
+    let obs_creds = cred_manager.clone();
+    let obs_queue = speech_queue.clone();
+    let obs_tx = voice_tx.clone();
+    let obs_ack = ack_sent_flag.clone();
+    let obs_query = current_query_shared.clone();
+    let obs_cancel = turn_voice_cancel.clone();
+    agent_inst = agent_inst.with_observer(Arc::new(move |ev| {
+        if let harness_core::AgentEvent::ToolExecuting { name, arguments } = ev {
+            if !obs_ack.swap(true, Ordering::SeqCst) {
+                let q = obs_query.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                let c = obs_cancel.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                let hint = format!("{name} {arguments}");
+                spawn_pre_task_voice_ack(
+                    q,
+                    Some(hint),
+                    obs_cfg.clone(),
+                    obs_creds.clone(),
+                    obs_queue.clone(),
+                    Some(obs_tx.clone()),
+                    c,
+                );
+            }
+        }
+    }));
+    let agent = Arc::new(agent_inst);
 
     let listener_cfg = config.clone();
     let listener_creds = cred_manager.clone();
@@ -929,22 +959,34 @@ pub async fn run_voice_loop(
                     | VoiceEvent::SpeechIdle => {}
                     VoiceEvent::Transcript(query) => {
                         speech_queue.interrupt();
+                        speech_queue.set_turn_muted(false);
+                        ack_sent_flag.store(false, Ordering::SeqCst);
+                        let per_turn_cancel = cancel.child_token();
+                        {
+                            let mut guard = turn_voice_cancel
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner());
+                            guard.cancel();
+                            *guard = per_turn_cancel.clone();
+                        }
+                        *current_query_shared
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner()) = query.clone();
                         println!("\n{} {}", "🎤 You:".bold().yellow(), query);
-                        let turn_cancel = cancel.child_token();
+                        let turn_cancel = per_turn_cancel.clone();
                         match agent.run_task(&query, turn_cancel).await {
                             Ok(reply) => {
                                 println!("\n{} {}\n", "Luna:".bold().green(), reply);
-                                let cleaned = clean_text_for_speech(&reply);
-                                if !cleaned.is_empty() {
-                                    for sentence in split_sentences_for_tts(&cleaned) {
-                                        speech_queue.enqueue(
-                                            &sentence,
-                                            &config,
-                                            &cred_manager,
-                                            Some(voice_tx.clone()),
-                                        );
-                                    }
-                                }
+                                spawn_separate_voice_reply(
+                                    query,
+                                    reply,
+                                    0,
+                                    config.clone(),
+                                    cred_manager.clone(),
+                                    speech_queue.clone(),
+                                    Some(voice_tx.clone()),
+                                    per_turn_cancel,
+                                );
                             }
                             Err(e) => {
                                 eprintln!("{} Agent error: {e}", "✖".red().bold());
@@ -2316,6 +2358,7 @@ async fn generate_edge_tts(text: &str, voice: &str) -> Result<Vec<u8>, HarnessEr
 ///
 /// Updates `in_code_block` across fenced blocks so code is skipped while conversational prose
 /// starts speaking as soon as the first sentence or clause completes.
+#[cfg(test)]
 pub fn extract_ready_speech_chunks(
     pending: &str,
     in_code_block: &mut bool,
@@ -2486,6 +2529,452 @@ fn strip_markdown_links(input: &str) -> String {
     out
 }
 
+/// Returns `true` when the full written reply contains structured formatting (Markdown tables,
+/// code blocks, headings, lists, raw URLs) or exceeds short conversational length, so a
+/// separate spoken response should be generated rather than reading the raw reply verbatim.
+pub fn needs_separate_voice_summary(reply: &str) -> bool {
+    let trimmed = reply.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if trimmed.contains("```") || trimmed.contains("http://") || trimmed.contains("https://") {
+        return true;
+    }
+    let mut table_rows = 0usize;
+    let mut list_rows = 0usize;
+    for line in trimmed.lines() {
+        let lt = line.trim_start();
+        if lt.starts_with('|') && lt.matches('|').count() >= 2 {
+            table_rows += 1;
+            if table_rows >= 2 {
+                return true;
+            }
+        }
+        if lt.starts_with("# ") || lt.starts_with("## ") || lt.starts_with("### ") {
+            return true;
+        }
+        if lt.starts_with("- ") || lt.starts_with("* ") || lt.starts_with("• ") {
+            list_rows += 1;
+            if list_rows >= 2 {
+                return true;
+            }
+        } else if let Some(dot_pos) = lt.find(". ") {
+            if dot_pos > 0 && dot_pos <= 3 && lt[..dot_pos].chars().all(|c| c.is_ascii_digit()) {
+                list_rows += 1;
+                if list_rows >= 2 {
+                    return true;
+                }
+            }
+        }
+    }
+    let cleaned = clean_text_for_speech(trimmed);
+    if cleaned.chars().count() > 280 {
+        return true;
+    }
+    split_sentences_for_tts(&cleaned).len() > 3
+}
+
+/// Deterministic fallback spoken summary when an LLM summary call is unavailable.
+pub fn fallback_voice_summary(reply: &str) -> String {
+    let cleaned = clean_text_for_speech(reply);
+    if cleaned.is_empty() {
+        return "Done! I've posted the full details in the chat.".to_string();
+    }
+    let sentences = split_sentences_for_tts(&cleaned);
+    let mut out = String::new();
+    for s in sentences.iter().take(2) {
+        if out.len() + s.len() > 240 && !out.is_empty() {
+            break;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(s);
+    }
+    if out.is_empty() {
+        out = cleaned.chars().take(220).collect();
+    }
+    if reply.contains('|') || reply.contains("```") {
+        if !out.ends_with(['.', '!', '?']) {
+            out.push('.');
+        }
+        out.push_str(" I've put the full details in the chat.");
+    }
+    out
+}
+
+/// Fast lightweight text completion helper for pre-task voice acknowledgments and separate
+/// spoken summaries. Uses a tight 4-second timeout so live voice never stalls.
+async fn generate_fast_voice_text(
+    system: &str,
+    user_prompt: &str,
+    max_tokens: u32,
+    config: &Config,
+    cred_manager: &Arc<CredentialManager>,
+) -> Result<String, HarnessError> {
+    let client = reqwest::Client::builder()
+        .user_agent(concat!("luna/", env!("CARGO_PKG_VERSION")))
+        .timeout(std::time::Duration::from_secs(4))
+        .connect_timeout(std::time::Duration::from_secs(3))
+        .build()
+        .unwrap_or_else(|_| voice_http_client().clone());
+
+    let preferred = config.voice.provider.to_ascii_lowercase();
+    let order: Vec<&str> = match preferred.as_str() {
+        "openai" => vec!["openai", "antigravity", "gemini", "groq"],
+        "groq" => vec!["groq", "antigravity", "gemini", "openai"],
+        _ => vec!["antigravity", "gemini", "openai", "groq"],
+    };
+
+    let mut last_err = String::new();
+    for backend in order {
+        match backend {
+            "antigravity" => {
+                let secret = match lookup_raw_credential("antigravity", cred_manager).await {
+                    Some(s) => Some(s),
+                    None => lookup_raw_credential("agy", cred_manager).await,
+                };
+                if let Some(raw_secret) = secret {
+                    let (bearer, project_opt) =
+                        harness_providers::antigravity::extract_bearer_token(&raw_secret);
+                    let project = project_opt.unwrap_or_else(|| {
+                        harness_providers::antigravity::DEFAULT_PROJECT.to_string()
+                    });
+                    let payload = serde_json::json!({
+                        "project": project,
+                        "model": "gemini-3.5-flash-lite",
+                        "request": {
+                            "systemInstruction": {
+                                "role": "user",
+                                "parts": [{"text": system}]
+                            },
+                            "contents": [{
+                                "role": "user",
+                                "parts": [{"text": user_prompt}]
+                            }],
+                            "generationConfig": {
+                                "temperature": 0.4,
+                                "maxOutputTokens": max_tokens
+                            }
+                        }
+                    });
+                    match client
+                        .post(harness_providers::antigravity::CODE_ASSIST_ENDPOINT)
+                        .bearer_auth(&bearer)
+                        .header(
+                            reqwest::header::USER_AGENT,
+                            harness_providers::antigravity::user_agent(),
+                        )
+                        .json(&payload)
+                        .send()
+                        .await
+                    {
+                        Ok(res) if res.status().is_success() => {
+                            let body = res.text().await.unwrap_or_default();
+                            let mut text = String::new();
+                            for line in body.lines() {
+                                if let Some(json_str) = line.strip_prefix("data: ") {
+                                    if let Ok(val) =
+                                        serde_json::from_str::<serde_json::Value>(json_str)
+                                    {
+                                        if let Some(parts) = val["response"]["candidates"][0]
+                                            ["content"]["parts"]
+                                            .as_array()
+                                        {
+                                            for p in parts {
+                                                if let Some(t) = p["text"].as_str() {
+                                                    text.push_str(t);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            let trimmed = text.trim();
+                            if !trimmed.is_empty() {
+                                return Ok(trimmed.to_string());
+                            }
+                        }
+                        Ok(res) => last_err = format!("antigravity HTTP {}", res.status()),
+                        Err(e) => last_err = format!("antigravity: {e}"),
+                    }
+                }
+            }
+            "gemini" => {
+                let keys = resolve_gemini_api_keys(cred_manager).await;
+                for api_key in keys {
+                    for model in ["gemini-3.1-flash-lite", "gemini-3-flash-preview"] {
+                        let url = format!(
+                            "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+                        );
+                        let payload = serde_json::json!({
+                            "systemInstruction": {
+                                "parts": [{"text": system}]
+                            },
+                            "contents": [{
+                                "parts": [{"text": user_prompt}]
+                            }],
+                            "generationConfig": {
+                                "temperature": 0.4,
+                                "maxOutputTokens": max_tokens
+                            }
+                        });
+                        match client.post(&url).json(&payload).send().await {
+                            Ok(res) if res.status().is_success() => {
+                                let val: serde_json::Value = res.json().await.unwrap_or_default();
+                                let txt = val["candidates"][0]["content"]["parts"][0]["text"]
+                                    .as_str()
+                                    .unwrap_or("")
+                                    .trim();
+                                if !txt.is_empty() {
+                                    return Ok(txt.to_string());
+                                }
+                            }
+                            Ok(res) => {
+                                last_err = format!("gemini {model} HTTP {}", res.status());
+                                if res.status().as_u16() == 429 || res.status().as_u16() == 403 {
+                                    continue;
+                                }
+                                break;
+                            }
+                            Err(e) => {
+                                last_err = format!("gemini: {e}");
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            "openai" => {
+                if let Some(key) = resolve_openai_api_key(cred_manager).await {
+                    let payload = serde_json::json!({
+                        "model": "gpt-4o-mini",
+                        "max_tokens": max_tokens,
+                        "temperature": 0.4,
+                        "messages": [
+                            {"role": "system", "content": system},
+                            {"role": "user", "content": user_prompt}
+                        ]
+                    });
+                    match client
+                        .post("https://api.openai.com/v1/chat/completions")
+                        .bearer_auth(&key)
+                        .json(&payload)
+                        .send()
+                        .await
+                    {
+                        Ok(res) if res.status().is_success() => {
+                            let val: serde_json::Value = res.json().await.unwrap_or_default();
+                            let txt = val["choices"][0]["message"]["content"]
+                                .as_str()
+                                .unwrap_or("")
+                                .trim();
+                            if !txt.is_empty() {
+                                return Ok(txt.to_string());
+                            }
+                        }
+                        Ok(res) => last_err = format!("openai HTTP {}", res.status()),
+                        Err(e) => last_err = format!("openai: {e}"),
+                    }
+                }
+            }
+            "groq" => {
+                if let Some(key) = resolve_groq_api_key(cred_manager).await {
+                    let payload = serde_json::json!({
+                        "model": "llama-3.1-8b-instant",
+                        "max_tokens": max_tokens,
+                        "temperature": 0.4,
+                        "messages": [
+                            {"role": "system", "content": system},
+                            {"role": "user", "content": user_prompt}
+                        ]
+                    });
+                    match client
+                        .post("https://api.groq.com/openai/v1/chat/completions")
+                        .bearer_auth(&key)
+                        .json(&payload)
+                        .send()
+                        .await
+                    {
+                        Ok(res) if res.status().is_success() => {
+                            let val: serde_json::Value = res.json().await.unwrap_or_default();
+                            let txt = val["choices"][0]["message"]["content"]
+                                .as_str()
+                                .unwrap_or("")
+                                .trim();
+                            if !txt.is_empty() {
+                                return Ok(txt.to_string());
+                            }
+                        }
+                        Ok(res) => last_err = format!("groq HTTP {}", res.status()),
+                        Err(e) => last_err = format!("groq: {e}"),
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Err(HarnessError::VoiceError(if last_err.is_empty() {
+        "No fast voice model credentials available".to_string()
+    } else {
+        last_err
+    }))
+}
+
+/// Generate a brief, natural spoken acknowledgment before or as Luna begins executing tools.
+pub async fn generate_pre_task_voice_ack(
+    user_query: &str,
+    tool_hint: Option<&str>,
+    config: &Config,
+    cred_manager: &Arc<CredentialManager>,
+) -> Option<String> {
+    let trimmed_query = user_query.trim();
+    if trimmed_query.is_empty() {
+        return None;
+    }
+
+    let (system, prompt) = if let Some(hint) = tool_hint {
+        (
+            "You are Luna, a helpful AI voice assistant. Generate ONE ultra-brief, natural spoken acknowledgment (4 to 10 words) saying you're starting the user's task, like \"Alright, on it — cleaning up the build artifacts now.\" or \"Sure thing, let me check those files.\" Output ONLY the spoken line with no quotes, no markdown, no preamble.",
+            format!("User request: {trimmed_query}\nFirst tool starting: {hint}"),
+        )
+    } else {
+        (
+            "You are Luna, a helpful AI voice assistant. If the user's message is an action, command, coding, file, or multi-step task request that takes a moment to execute, output ONE ultra-brief spoken acknowledgment (4 to 10 words, e.g. \"Alright, on it — checking that now.\"). If it is a simple greeting, chat, or direct factual question that doesn't run a task, output exactly SKIP. Output nothing else.",
+            format!("User message: {trimmed_query}"),
+        )
+    };
+
+    match generate_fast_voice_text(system, &prompt, 48, config, cred_manager).await {
+        Ok(raw) => {
+            let cleaned = clean_text_for_speech(raw.trim().trim_matches('"'));
+            if cleaned.is_empty() || cleaned.eq_ignore_ascii_case("skip") {
+                if tool_hint.is_some() {
+                    Some("Alright, on it — working on that now.".to_string())
+                } else {
+                    None
+                }
+            } else {
+                Some(cleaned)
+            }
+        }
+        Err(_) => tool_hint.map(|_| "Alright, on it — working on that now.".to_string()),
+    }
+}
+
+/// Generate a separate conversational spoken response for rich/long/tabular written answers.
+pub async fn generate_separate_voice_summary(
+    user_query: &str,
+    full_reply: &str,
+    tool_count: usize,
+    config: &Config,
+    cred_manager: &Arc<CredentialManager>,
+) -> String {
+    let truncated_reply: String = full_reply.chars().take(5000).collect();
+    let system = "You are Luna's spoken voice output. Luna's full written response (which may include Markdown tables, code blocks, lists, or long technical details) is already displayed in the chat UI. Write a SEPARATE, natural 1 to 3 sentence spoken response to say out loud to the user. Summarize the outcome, key answer, or main numbers conversationally using contractions. Never read raw tables, code syntax, file trees, or URLs aloud. If the written reply has a table, code, or detailed breakdown, mention briefly that the full details are in the chat. Output ONLY the spoken text.";
+    let prompt = format!(
+        "User asked: {}\nTools run: {}\n\nFull written reply shown in chat:\n{}",
+        user_query.trim(),
+        tool_count,
+        truncated_reply
+    );
+
+    match generate_fast_voice_text(system, &prompt, 160, config, cred_manager).await {
+        Ok(raw) => {
+            let cleaned = clean_text_for_speech(&raw);
+            if cleaned.is_empty() {
+                fallback_voice_summary(full_reply)
+            } else {
+                cleaned
+            }
+        }
+        Err(_) => fallback_voice_summary(full_reply),
+    }
+}
+
+/// Spawn an immediate pre-task spoken acknowledgment without blocking the turn or UI loop.
+pub fn spawn_pre_task_voice_ack(
+    user_query: String,
+    tool_hint: Option<String>,
+    config: Config,
+    cred_manager: Arc<CredentialManager>,
+    speech_queue: VoiceSpeechQueue,
+    voice_tx: Option<tokio::sync::mpsc::UnboundedSender<VoiceEvent>>,
+    cancel: CancellationToken,
+) {
+    tokio::spawn(async move {
+        if cancel.is_cancelled() || speech_queue.is_turn_muted() {
+            return;
+        }
+        let Some(ack) =
+            generate_pre_task_voice_ack(&user_query, tool_hint.as_deref(), &config, &cred_manager)
+                .await
+        else {
+            return;
+        };
+        if cancel.is_cancelled() || speech_queue.is_turn_muted() {
+            return;
+        }
+        if let Some(ref tx) = voice_tx {
+            let _ = tx.send(VoiceEvent::Notice(format!("🔊 {ack}")));
+        }
+        speech_queue.enqueue(&ack, &config, &cred_manager, voice_tx);
+    });
+}
+
+/// Speak Luna's final turn response: direct TTS for short conversational prose, or a separate
+/// spoken summary when the written response is long or contains tables/code/lists.
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_separate_voice_reply(
+    user_query: String,
+    full_reply: String,
+    tool_count: usize,
+    config: Config,
+    cred_manager: Arc<CredentialManager>,
+    speech_queue: VoiceSpeechQueue,
+    voice_tx: Option<tokio::sync::mpsc::UnboundedSender<VoiceEvent>>,
+    cancel: CancellationToken,
+) {
+    if full_reply.trim().is_empty() || cancel.is_cancelled() || speech_queue.is_turn_muted() {
+        return;
+    }
+
+    if !needs_separate_voice_summary(&full_reply) {
+        let cleaned = clean_text_for_speech(&full_reply);
+        for sentence in split_sentences_for_tts(&cleaned) {
+            speech_queue.enqueue(&sentence, &config, &cred_manager, voice_tx.clone());
+        }
+        return;
+    }
+
+    tokio::spawn(async move {
+        if cancel.is_cancelled() || speech_queue.is_turn_muted() {
+            return;
+        }
+        let spoken = generate_separate_voice_summary(
+            &user_query,
+            &full_reply,
+            tool_count,
+            &config,
+            &cred_manager,
+        )
+        .await;
+        if cancel.is_cancelled() || speech_queue.is_turn_muted() || spoken.trim().is_empty() {
+            return;
+        }
+        if let Some(ref tx) = voice_tx {
+            let _ = tx.send(VoiceEvent::Notice(format!("🔊 {spoken}")));
+        }
+        for sentence in split_sentences_for_tts(&spoken) {
+            if cancel.is_cancelled() || speech_queue.is_turn_muted() {
+                break;
+            }
+            speech_queue.enqueue(&sentence, &config, &cred_manager, voice_tx.clone());
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2609,6 +3098,32 @@ mod tests {
             .iter()
             .all(|v| !v.id.is_empty() && !v.description.is_empty()));
         assert!(Config::default().voice.auto_send);
+    }
+
+    #[test]
+    fn test_needs_separate_voice_summary_detects_tables_code_and_long_replies() {
+        assert!(!needs_separate_voice_summary(
+            "Twelve times three is thirty-six."
+        ));
+        assert!(!needs_separate_voice_summary(
+            "Hey! I'm doing great, how can I help today?"
+        ));
+        assert!(needs_separate_voice_summary(
+            "Done:\n| Path | Size |\n|---|---|\n| target | 1.2 GB |"
+        ));
+        assert!(needs_separate_voice_summary(
+            "Here is the code:\n```rust\nfn main() {}\n```"
+        ));
+        assert!(needs_separate_voice_summary(
+            "Results:\n- Item one\n- Item two"
+        ));
+        let long = "Sentence one is moderately detailed here. ".repeat(10);
+        assert!(needs_separate_voice_summary(&long));
+        let fallback = fallback_voice_summary(
+            "Cleaned up everything.\n| Path | Freed |\n|---|---|\n| target | 2 GB |",
+        );
+        assert!(fallback.contains("Cleaned up everything."));
+        assert!(fallback.contains("full details in the chat"));
     }
 
     #[tokio::test]

@@ -3699,11 +3699,16 @@ pub async fn submit_composer(
 
     // Chatting while voice TTS is actively speaking immediately stops playback (barge-in).
     if st.voice_active {
+        if let Some(c) = st.voice_reply_cancel.take() {
+            c.cancel();
+        }
+        st.voice_reply_cancel = Some(CancellationToken::new());
         st.voice_speech_queue.interrupt();
         st.voice_speech_queue.set_turn_muted(false);
         st.voice_stream_offset = 0;
         st.voice_stream_in_code = false;
         st.voice_spoken_any = false;
+        st.voice_ack_sent = false;
     }
 
     // Normal user prompt: queue/steer if a turn is active, else launch turn immediately.
@@ -3970,6 +3975,10 @@ pub async fn deactivate_voice(env: &Env<'_>, st: &mut TuiState) {
     st.voice_stream_offset = 0;
     st.voice_stream_in_code = false;
     st.voice_spoken_any = false;
+    st.voice_ack_sent = false;
+    if let Some(c) = st.voice_reply_cancel.take() {
+        c.cancel();
+    }
     st.voice_speaking_detected = false;
     st.voice_transcribing = false;
     st.voice_audio_level = 0.0;
@@ -3979,37 +3988,90 @@ pub async fn deactivate_voice(env: &Env<'_>, st: &mut TuiState) {
         .push(SystemNotice::new("• Voice mode deactivated."));
 }
 
-/// Stream newly completed sentences from the live assistant response into `VoiceSpeechQueue`
-/// while the LLM turn is still generating tokens.
+/// Emit an immediate spoken pre-task acknowledgment when tools start or thinking runs long,
+/// while holding final reply narration until `handle_turn_end` so tables/code/long responses
+/// get a clean separate spoken summary instead of chopped fragments.
 pub fn pump_voice_streaming_tts(env: &Env<'_>, st: &mut TuiState) {
     if !st.voice_active || st.active_turn.is_none() || st.voice_speech_queue.is_turn_muted() {
         return;
     }
-    let live_text = env.ui.live_content_snapshot();
-    if live_text.len() < st.voice_stream_offset
-        || !live_text.is_char_boundary(st.voice_stream_offset)
-    {
-        st.voice_stream_offset = 0;
-        st.voice_stream_in_code = false;
-    }
-    if live_text.len() <= st.voice_stream_offset {
+    if st.voice_ack_sent || st.voice_spoken_any {
         return;
     }
 
-    let (chunks, consumed) = crate::commands::voice::extract_ready_speech_chunks(
-        &live_text[st.voice_stream_offset..],
-        &mut st.voice_stream_in_code,
-        !st.voice_spoken_any,
-    );
-    st.voice_stream_offset += consumed;
-    for chunk in chunks {
-        st.voice_speech_queue.enqueue(
-            &chunk,
-            env.config,
-            &env.cred_manager,
+    let live_text = env.ui.live_content_snapshot();
+    if !live_text.trim().is_empty() {
+        return;
+    }
+
+    let (assistant_pre_prose, first_tool_hint): (Option<String>, Option<String>) = {
+        let tools = env
+            .in_flight_tools
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let prose = tools
+            .iter()
+            .find(|it| it.is_assistant_text() && !it.output.trim().is_empty())
+            .map(|it| it.output.clone());
+        let first_tool = tools
+            .iter()
+            .find(|it| !it.is_thinking() && !it.is_assistant_text() && !it.is_user_message())
+            .map(|it| it.call_formatted.clone());
+        (prose, first_tool)
+    };
+
+    if let Some(prose) = assistant_pre_prose {
+        let cleaned = crate::commands::voice::clean_text_for_speech(&prose);
+        if !cleaned.is_empty() {
+            st.voice_ack_sent = true;
+            st.voice_spoken_any = true;
+            st.system_notices
+                .push(SystemNotice::new(format!("🔊 {cleaned}")));
+            for sentence in crate::commands::voice::split_sentences_for_tts(&cleaned) {
+                st.voice_speech_queue.enqueue(
+                    &sentence,
+                    env.config,
+                    &env.cred_manager,
+                    Some(st.voice_tx.clone()),
+                );
+            }
+            return;
+        }
+    }
+
+    if let Some(tool_hint) = first_tool_hint {
+        st.voice_ack_sent = true;
+        let cancel = st
+            .voice_reply_cancel
+            .get_or_insert_with(CancellationToken::new)
+            .clone();
+        crate::commands::voice::spawn_pre_task_voice_ack(
+            st.current_query.clone(),
+            Some(tool_hint),
+            env.config.clone(),
+            env.cred_manager.clone(),
+            st.voice_speech_queue.clone(),
             Some(st.voice_tx.clone()),
+            cancel,
         );
-        st.voice_spoken_any = true;
+        return;
+    }
+
+    if st.turn_start.elapsed() >= std::time::Duration::from_millis(1200) {
+        st.voice_ack_sent = true;
+        let cancel = st
+            .voice_reply_cancel
+            .get_or_insert_with(CancellationToken::new)
+            .clone();
+        crate::commands::voice::spawn_pre_task_voice_ack(
+            st.current_query.clone(),
+            None,
+            env.config.clone(),
+            env.cred_manager.clone(),
+            st.voice_speech_queue.clone(),
+            Some(st.voice_tx.clone()),
+            cancel,
+        );
     }
 }
 
@@ -4047,6 +4109,9 @@ pub async fn handle_voice_event(
         }
         crate::commands::voice::VoiceEvent::BargeIn => {
             // Immediate barge-in: stop TTS instantly, mute rest of interrupted turn until new input
+            if let Some(c) = st.voice_reply_cancel.take() {
+                c.cancel();
+            }
             st.voice_speech_queue.interrupt();
             if st.active_turn.is_some() {
                 st.voice_speech_queue.set_turn_muted(true);
@@ -4054,6 +4119,7 @@ pub async fn handle_voice_event(
             st.voice_stream_offset = 0;
             st.voice_stream_in_code = false;
             st.voice_spoken_any = false;
+            st.voice_ack_sent = false;
             st.voice_speaking_detected = true;
             st.voice_transcribing = false;
             st.voice_audio_level = 0.6;
@@ -4079,11 +4145,16 @@ pub async fn handle_incoming_voice_input(env: &Env<'_>, st: &mut TuiState, voice
         return;
     }
     // Barge-in: interrupt ongoing speech playback immediately and unmute for the new turn
+    if let Some(c) = st.voice_reply_cancel.take() {
+        c.cancel();
+    }
+    st.voice_reply_cancel = Some(CancellationToken::new());
     st.voice_speech_queue.interrupt();
     st.voice_speech_queue.set_turn_muted(false);
     st.voice_stream_offset = 0;
     st.voice_stream_in_code = false;
     st.voice_spoken_any = false;
+    st.voice_ack_sent = false;
 
     if !env.config.voice.auto_send {
         // Verify before send: type detected transcript into the composer text box for review/editing.
@@ -4832,11 +4903,6 @@ pub async fn handle_turn_end(
     }
     env.ui.set_turn_active(false);
     env.ui.stop_activity();
-    let remaining_live_for_voice = if st.voice_active {
-        env.ui.live_content_snapshot()
-    } else {
-        String::new()
-    };
     let trailing_reasoning = env.ui.take_live_reasoning_with_duration();
     let trailing_prose = env.ui.take_live_content();
     env.ui.clear_live_state();
@@ -4921,56 +4987,42 @@ pub async fn handle_turn_end(
                 set_all_process_expanded(st, false);
             }
             st.live_thinking_view = LiveThinkingView::Tail;
-            if st.voice_active && !st.voice_speech_queue.is_turn_muted() {
-                if st.voice_spoken_any {
-                    if remaining_live_for_voice.len() > st.voice_stream_offset
-                        && remaining_live_for_voice.is_char_boundary(st.voice_stream_offset)
-                    {
-                        let tail = &remaining_live_for_voice[st.voice_stream_offset..];
-                        let cleaned_tail = crate::commands::voice::clean_text_for_speech(tail);
-                        if !cleaned_tail.is_empty() {
-                            st.voice_speech_queue.enqueue(
-                                &cleaned_tail,
-                                env.config,
-                                &env.cred_manager,
-                                Some(st.voice_tx.clone()),
-                            );
-                        }
-                    } else if st.voice_stream_offset == 0 && !outcome.reply.trim().is_empty() {
-                        let cleaned = crate::commands::voice::clean_text_for_speech(&outcome.reply);
-                        for sentence in crate::commands::voice::split_sentences_for_tts(&cleaned) {
-                            st.voice_speech_queue.enqueue(
-                                &sentence,
-                                env.config,
-                                &env.cred_manager,
-                                Some(st.voice_tx.clone()),
-                            );
-                        }
-                    }
-                } else if !outcome.reply.trim().is_empty() {
-                    let cleaned = crate::commands::voice::clean_text_for_speech(&outcome.reply);
-                    for sentence in crate::commands::voice::split_sentences_for_tts(&cleaned) {
-                        st.voice_speech_queue.enqueue(
-                            &sentence,
-                            env.config,
-                            &env.cred_manager,
-                            Some(st.voice_tx.clone()),
-                        );
-                    }
-                }
+            if st.voice_active
+                && !st.voice_speech_queue.is_turn_muted()
+                && !outcome.reply.trim().is_empty()
+            {
+                let reply_cancel = st
+                    .voice_reply_cancel
+                    .get_or_insert_with(CancellationToken::new)
+                    .clone();
+                crate::commands::voice::spawn_separate_voice_reply(
+                    st.current_query.clone(),
+                    outcome.reply.clone(),
+                    outcome.tool_calls.len(),
+                    env.config.clone(),
+                    env.cred_manager.clone(),
+                    st.voice_speech_queue.clone(),
+                    Some(st.voice_tx.clone()),
+                    reply_cancel,
+                );
             }
             st.voice_stream_offset = 0;
             st.voice_stream_in_code = false;
             st.voice_spoken_any = false;
+            st.voice_ack_sent = false;
             st.voice_speech_queue.set_turn_muted(false);
             if st.active_goal.is_some() {
                 goal_reply = Some(outcome.reply);
             }
         }
         Ok(Err(HarnessError::Cancelled)) => {
+            if let Some(c) = st.voice_reply_cancel.take() {
+                c.cancel();
+            }
             st.voice_stream_offset = 0;
             st.voice_stream_in_code = false;
             st.voice_spoken_any = false;
+            st.voice_ack_sent = false;
             st.voice_speech_queue.set_turn_muted(false);
             if let Some((r, secs)) = trailing_reasoning
                 .as_ref()
@@ -5440,11 +5492,15 @@ pub async fn apply_compaction_completed(env: &Env<'_>, st: &mut TuiState) {
 
 /// Interrupt an active turn cleanly on `Esc` or `Ctrl+C`.
 pub async fn interrupt_turn(env: &Env<'_>, st: &mut TuiState) {
+    if let Some(c) = st.voice_reply_cancel.take() {
+        c.cancel();
+    }
     st.voice_speech_queue.interrupt();
     st.voice_speech_queue.set_turn_muted(false);
     st.voice_stream_offset = 0;
     st.voice_stream_in_code = false;
     st.voice_spoken_any = false;
+    st.voice_ack_sent = false;
     st.active_goal = None;
     env.ui.set_goal_status(None);
     let ctx_max = context_window(
