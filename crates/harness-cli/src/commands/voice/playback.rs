@@ -16,7 +16,6 @@ pub enum AudioThreadCmd {
         samples: Vec<i16>,
     },
     #[allow(dead_code)]
-    #[allow(dead_code)]
     AppendEncoded {
         generation: u64,
         bytes: Vec<u8>,
@@ -42,7 +41,6 @@ impl<'a> GenAudioSender<'a> {
         }
     }
 
-    #[allow(dead_code)]
     #[allow(dead_code)]
     pub fn send_encoded(&self, bytes: Vec<u8>) {
         if !self.cancel.is_cancelled() && !bytes.is_empty() {
