@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use colored::Colorize;
 use harness_core::config::Config;
-use harness_core::HarnessError;
+use harness_core::{HarnessError, SessionStore};
 
 use crate::auth::{is_loopback_host, is_wildcard_host};
 use crate::routes::create_router;

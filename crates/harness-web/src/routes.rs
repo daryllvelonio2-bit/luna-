@@ -468,7 +468,7 @@ async fn list_sessions(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let agent_map = state.session_agents.read().await;
-    let active_sessions = state.sessions.read().await;
+    let active_sessions = state.sessions.lock().await;
     let limit = query.limit.unwrap_or(150);
 
     let iter = records
