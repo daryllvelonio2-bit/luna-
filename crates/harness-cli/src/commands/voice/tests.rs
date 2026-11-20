@@ -73,7 +73,20 @@ fn test_is_blank_transcript() {
     assert!(is_blank_transcript("   "));
     assert!(is_blank_transcript("[BLANK_AUDIO]"));
     assert!(is_blank_transcript("(silence)"));
+    assert!(is_blank_transcript("0"));
+    assert!(is_blank_transcript("00"));
+    assert!(is_blank_transcript("tone"));
     assert!(!is_blank_transcript("Hello Luna"));
+}
+
+#[test]
+fn test_parse_antigravity_stt_sse_filters_thoughts_and_signatures() {
+    let sse_body = r#"data: {"response": {"candidates": [{"content": {"role": "model","parts": [{"thought": true,"text": "I am thinking about the audio"}]}}]}}
+data: {"response": {"candidates": [{"content": {"role": "model","parts": [{"text": "Hello world"}]}}]}}
+data: {"response": {"candidates": [{"content": {"role": "model","parts": [{"thoughtSignature": "abc123sig"}]}}]}}
+"#;
+    let transcript = super::stt::parse_antigravity_stt_sse(sse_body);
+    assert_eq!(transcript, "Hello world");
 }
 
 #[tokio::test]

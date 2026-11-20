@@ -179,54 +179,80 @@ pub async fn transcribe_antigravity_audio(
                         }
                     }
                 ]
-            }]
+            }],
+            "generationConfig": {
+                "temperature": 0.0,
+                "maxOutputTokens": 256
+            }
         }
     });
 
-    let mut res = client
-        .post(harness_providers::antigravity::CODE_ASSIST_ENDPOINT)
-        .header(
-            reqwest::header::AUTHORIZATION,
-            format!("Bearer {bearer_token}"),
-        )
-        .header(
-            reqwest::header::USER_AGENT,
-            harness_providers::antigravity::user_agent(),
-        )
-        .json(&payload)
-        .send()
-        .await
-        .map_err(|e| HarnessError::VoiceError(format!("Antigravity STT request failed: {e}")))?;
+    let endpoints = [
+        harness_providers::antigravity::CODE_ASSIST_ENDPOINT,
+        harness_providers::antigravity::FALLBACK_CODE_ASSIST_ENDPOINT,
+    ];
 
-    // Handle ordinary token expiry (401) by refreshing token in place and retrying once
-    if res.status().as_u16() == 401 {
-        if let Ok(new_token) =
-            harness_providers::antigravity::refresh_and_store_antigravity_credential(
-                client,
-                &raw_secret,
-                Some(cred_manager),
+    let mut res = None;
+    for ep in endpoints {
+        let req = client
+            .post(ep)
+            .header(
+                reqwest::header::AUTHORIZATION,
+                format!("Bearer {bearer_token}"),
             )
-            .await
-        {
-            bearer_token = new_token;
-            res = client
-                .post(harness_providers::antigravity::CODE_ASSIST_ENDPOINT)
-                .header(
-                    reqwest::header::AUTHORIZATION,
-                    format!("Bearer {bearer_token}"),
-                )
-                .header(
-                    reqwest::header::USER_AGENT,
-                    harness_providers::antigravity::user_agent(),
-                )
-                .json(&payload)
-                .send()
-                .await
-                .map_err(|e| {
-                    HarnessError::VoiceError(format!("Antigravity STT retry request failed: {e}"))
-                })?;
+            .header(
+                reqwest::header::USER_AGENT,
+                harness_providers::antigravity::user_agent(),
+            )
+            .json(&payload);
+
+        match req.send().await {
+            Ok(r) => {
+                if r.status().as_u16() == 401 {
+                    if let Ok(new_token) =
+                        harness_providers::antigravity::refresh_and_store_antigravity_credential(
+                            client,
+                            &raw_secret,
+                            Some(cred_manager),
+                        )
+                        .await
+                    {
+                        bearer_token = new_token;
+                        if let Ok(retry_r) = client
+                            .post(ep)
+                            .header(
+                                reqwest::header::AUTHORIZATION,
+                                format!("Bearer {bearer_token}"),
+                            )
+                            .header(
+                                reqwest::header::USER_AGENT,
+                                harness_providers::antigravity::user_agent(),
+                            )
+                            .json(&payload)
+                            .send()
+                            .await
+                        {
+                            res = Some(retry_r);
+                            break;
+                        }
+                    }
+                } else if r.status().is_success() {
+                    res = Some(r);
+                    break;
+                } else if r.status().is_server_error() {
+                    continue;
+                } else {
+                    res = Some(r);
+                    break;
+                }
+            }
+            Err(_) => continue,
         }
     }
+
+    let res = res.ok_or_else(|| {
+        HarnessError::VoiceError("Antigravity STT request failed across all endpoints".into())
+    })?;
 
     if !res.status().is_success() {
         let status = res.status();
@@ -241,22 +267,46 @@ pub async fn transcribe_antigravity_audio(
         .text()
         .await
         .map_err(|e| HarnessError::VoiceError(format!("Antigravity STT read failed: {e}")))?;
+    Ok(parse_antigravity_stt_sse(&body))
+}
+
+/// Parse Antigravity Code Assist SSE streaming responses into a clean transcript,
+/// filtering out reasoning thought parts (`thought: true`) and thought signatures.
+pub fn parse_antigravity_stt_sse(body: &str) -> String {
     let mut transcript = String::new();
     for line in body.lines() {
         if let Some(json_str) = line.strip_prefix("data: ") {
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_str) {
-                if let Some(parts) = val["response"]["candidates"][0]["content"]["parts"].as_array()
-                {
-                    for p in parts {
-                        if let Some(t) = p["text"].as_str() {
-                            transcript.push_str(t);
+                let candidates = val
+                    .get("response")
+                    .and_then(|r| r.get("candidates"))
+                    .or_else(|| val.get("candidates"))
+                    .and_then(|c| c.as_array());
+                if let Some(candidates) = candidates {
+                    if let Some(first) = candidates.first() {
+                        if let Some(parts) = first
+                            .get("content")
+                            .and_then(|c| c.get("parts"))
+                            .and_then(|p| p.as_array())
+                        {
+                            for p in parts {
+                                let is_thought = p
+                                    .get("thought")
+                                    .and_then(|t| t.as_bool())
+                                    .unwrap_or(false);
+                                if !is_thought {
+                                    if let Some(t) = p.get("text").and_then(|t| t.as_str()) {
+                                        transcript.push_str(t);
+                                    }
+                                }
+                            }
                         }
                     }
                 }
             }
         }
     }
-    Ok(transcript.trim().to_string())
+    transcript.trim().to_string()
 }
 
 pub async fn transcribe_gemini_audio_with_keys(

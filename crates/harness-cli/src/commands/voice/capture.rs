@@ -124,12 +124,21 @@ pub async fn run_background_voice_listener(
             )));
 
             let mut raw_buf = [0u8; 1024];
+            let mut carry: Option<u8> = None;
             while !cancel_thread.is_cancelled() {
                 match stdout.read(&mut raw_buf) {
                     Ok(0) => break,
                     Ok(n) => {
+                        let mut buf = Vec::with_capacity(n + 1);
+                        if let Some(b) = carry.take() {
+                            buf.push(b);
+                        }
+                        buf.extend_from_slice(&raw_buf[..n]);
+                        if buf.len() % 2 == 1 {
+                            carry = buf.pop();
+                        }
                         #[allow(clippy::chunks_exact_to_as_chunks)]
-                        let samples: Vec<i16> = raw_buf[..n]
+                        let samples: Vec<i16> = buf
                             .chunks_exact(2)
                             .map(|c| i16::from_le_bytes([c[0], c[1]]))
                             .collect();
@@ -292,16 +301,16 @@ pub async fn run_background_voice_listener(
         }
     };
 
-    // Ultra-responsive end-of-utterance pause (cap default 800ms down to 320ms for instant feel)
+    // Natural responsive end-of-utterance pause matching agy voiceTurn (default 650ms)
     let silence_ms = if config.voice.silence_threshold_ms == 800 {
-        320
+        650
     } else {
-        config.voice.silence_threshold_ms.max(200)
+        config.voice.silence_threshold_ms.max(300)
     };
     let silence_duration = std::time::Duration::from_millis(silence_ms);
-    let min_samples = (sample_rate as usize) / 4; // 250ms minimum utterance
+    let min_samples = (sample_rate as usize) / 3; // ~330ms minimum utterance
     let max_samples = (sample_rate as usize) * 30; // 30s safety cap
-    let pre_roll_max_samples = (sample_rate as usize) / 4; // 250ms pre-roll
+    let pre_roll_max_samples = (sample_rate as usize) / 3; // ~330ms pre-roll
 
     let mut pre_roll: VecDeque<Vec<i16>> = VecDeque::new();
     let mut pre_roll_len: usize = 0;
@@ -413,7 +422,7 @@ pub async fn run_background_voice_listener(
                         last_level_sent_at = None;
                         if speech_buffer.len() >= min_samples {
                             let _ = voice_tx.send(VoiceEvent::Transcribing);
-                            let trimmed_pcm = trim_trailing_silence(&speech_buffer, sample_rate, base_threshold * 0.8);
+                            let trimmed_pcm = trim_trailing_silence(&speech_buffer, sample_rate, base_threshold * 0.4);
                             let resampled = downsample_to_16khz(trimmed_pcm, sample_rate);
                             let wav_res = harness_voice::AudioProcessor::samples_to_wav(&resampled, 16_000);
                             speech_buffer.clear();
@@ -510,4 +519,8 @@ pub fn is_blank_transcript(text: &str) -> bool {
         || lower == "(silence)"
         || lower == "[silence]"
         || lower == "."
+        || lower == "0"
+        || lower == "00"
+        || lower == "tone"
+        || lower == "[tone]"
 }
