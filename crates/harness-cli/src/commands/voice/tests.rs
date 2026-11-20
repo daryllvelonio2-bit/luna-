@@ -91,7 +91,8 @@ data: {"response": {"candidates": [{"content": {"role": "model","parts": [{"thou
 
 #[tokio::test]
 async fn test_lookup_plain_api_key_skips_oauth_json() {
-    let mgr = CredentialManager::new(None).unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let mgr = CredentialManager::new(Some(tmp.path().join("credentials.json"))).unwrap();
     mgr.add_credential(
         "test-voice-provider",
         "oauth-blob",

@@ -246,7 +246,9 @@ pub async fn handle_turn_end(
                         );
                         st.voice_spoken_any = true;
                     }
-                } else if !st.voice_spoken_any && !full_reply.trim().is_empty() {
+                } else if (st.voice_stream_offset == 0 || !st.voice_spoken_any)
+                    && !full_reply.trim().is_empty()
+                {
                     let summary = crate::commands::voice::fallback_voice_summary(full_reply);
                     for sentence in crate::commands::voice::split_sentences_for_tts(&summary) {
                         st.voice_speech_queue.enqueue(

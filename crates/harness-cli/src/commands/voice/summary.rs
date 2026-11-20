@@ -57,7 +57,7 @@ pub fn extract_ready_speech_chunks(
 
             for (i, ch) in slice.char_indices() {
                 let next_idx = i + ch.len_utf8();
-                if is_first && ch == ' ' && i >= 60 {
+                if ch == ' ' && ((is_first && i >= 60) || i >= 90) {
                     split_at = Some(next_idx);
                     break;
                 }
@@ -70,7 +70,7 @@ pub fn extract_ready_speech_chunks(
                 if !is_break {
                     continue;
                 }
-                if ch == '.' || ch == '!' || ch == '?' {
+                if ch == '.' || ch == '!' || ch == '?' || ch == ':' {
                     let prev_char = slice[..i].chars().next_back();
                     let is_short_number_dot =
                         ch == '.' && prev_char.is_some_and(|c| c.is_ascii_digit()) && i < 6;

@@ -301,16 +301,16 @@ pub async fn run_background_voice_listener(
         }
     };
 
-    // Natural responsive end-of-utterance pause matching agy voiceTurn (default 650ms)
+    // Natural responsive end-of-utterance pause (default 380ms for instant feel)
     let silence_ms = if config.voice.silence_threshold_ms == 800 {
-        650
+        380
     } else {
-        config.voice.silence_threshold_ms.max(300)
+        config.voice.silence_threshold_ms.max(250)
     };
     let silence_duration = std::time::Duration::from_millis(silence_ms);
-    let min_samples = (sample_rate as usize) / 3; // ~330ms minimum utterance
+    let min_samples = (sample_rate as usize) / 4; // ~250ms minimum utterance
     let max_samples = (sample_rate as usize) * 30; // 30s safety cap
-    let pre_roll_max_samples = (sample_rate as usize) / 3; // ~330ms pre-roll
+    let pre_roll_max_samples = (sample_rate as usize) / 4; // ~250ms pre-roll
 
     let mut pre_roll: VecDeque<Vec<i16>> = VecDeque::new();
     let mut pre_roll_len: usize = 0;

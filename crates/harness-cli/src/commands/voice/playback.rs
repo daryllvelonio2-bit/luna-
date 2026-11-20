@@ -620,14 +620,17 @@ impl VoiceSpeechQueue {
     }
 
     pub fn interrupt(&self) {
+        if !self.is_playing.load(Ordering::SeqCst) {
+            return;
+        }
         self.active_gen.fetch_add(1, Ordering::SeqCst);
         {
             let mut guard = self.active_cancel.lock().unwrap_or_else(|e| e.into_inner());
             guard.cancel();
             *guard = CancellationToken::new();
         }
-        super::live_tts::drop_live_tts_session();
         let _ = self.audio_tx.send(AudioThreadCmd::ClearAndReset);
+        let _ = self.audio_tx.send(AudioThreadCmd::WarmUp { rate: 24_000 });
         self.is_playing.store(false, Ordering::SeqCst);
     }
 }
