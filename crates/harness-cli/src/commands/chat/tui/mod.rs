@@ -341,6 +341,7 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
                 || st.voice_speaking_detected
                 || st.voice_transcribing
                 || st.voice_is_playing.load(Ordering::SeqCst)
+                || st.is_diff_animating()
                 || !st.queue.is_empty() => {
                 needs_redraw = true;
                 st.spinner_tick = st.spinner_tick.wrapping_add(1);
@@ -829,6 +830,11 @@ async fn init_tui_state(env: &mut Env<'_>) -> Result<TuiState, HarnessError> {
         template_agent,
         background_sessions: HashMap::new(),
         memory_project_filter: None,
+        diff_anim_from_added: 0,
+        diff_anim_from_deleted: 0,
+        diff_anim_target_added: 0,
+        diff_anim_target_deleted: 0,
+        diff_anim_start: None,
     };
     if voice_active {
         actions::activate_voice(env, &mut st).await;

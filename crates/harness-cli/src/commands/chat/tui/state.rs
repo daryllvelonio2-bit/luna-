@@ -1478,9 +1478,82 @@ pub struct TuiState {
     pub background_sessions: HashMap<String, BackgroundSession>,
     /// Active project filter for memories in this session (`None` = all memories passed).
     pub memory_project_filter: Option<String>,
+    /// Animation state for additions/deletions counter in composer hint row
+    pub diff_anim_from_added: usize,
+    pub diff_anim_from_deleted: usize,
+    pub diff_anim_target_added: usize,
+    pub diff_anim_target_deleted: usize,
+    pub diff_anim_start: Option<std::time::Instant>,
 }
 
 impl TuiState {
+    /// Update the target code changes and animate the transition if counts changed.
+    pub fn update_diff_counter(
+        &mut self,
+        in_flight: Option<&[crate::commands::chat::render::TurnProcessItem]>,
+    ) {
+        let (actual_added, actual_deleted) = self.total_code_changes(in_flight);
+        if actual_added != self.diff_anim_target_added
+            || actual_deleted != self.diff_anim_target_deleted
+        {
+            let (curr_a, curr_d, _) = self.current_animated_diff();
+            self.diff_anim_from_added = curr_a;
+            self.diff_anim_from_deleted = curr_d;
+            self.diff_anim_target_added = actual_added;
+            self.diff_anim_target_deleted = actual_deleted;
+            self.diff_anim_start = Some(std::time::Instant::now());
+        }
+    }
+
+    /// Return the currently interpolated (added, deleted, is_animating) values.
+    pub fn current_animated_diff(&self) -> (usize, usize, bool) {
+        let Some(start) = self.diff_anim_start else {
+            return (
+                self.diff_anim_target_added,
+                self.diff_anim_target_deleted,
+                false,
+            );
+        };
+        const DURATION_MS: f64 = 420.0;
+        let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+        if elapsed >= DURATION_MS {
+            return (
+                self.diff_anim_target_added,
+                self.diff_anim_target_deleted,
+                false,
+            );
+        }
+
+        let t = (elapsed / DURATION_MS).clamp(0.0, 1.0);
+        // Ease-out cubic: fast launch, smooth deceleration into final count
+        let eased = 1.0 - (1.0 - t).powi(3);
+
+        let added = if self.diff_anim_target_added >= self.diff_anim_from_added {
+            (self.diff_anim_from_added as f64
+                + (self.diff_anim_target_added - self.diff_anim_from_added) as f64 * eased)
+                .round() as usize
+        } else {
+            self.diff_anim_target_added
+        };
+
+        let deleted = if self.diff_anim_target_deleted >= self.diff_anim_from_deleted {
+            (self.diff_anim_from_deleted as f64
+                + (self.diff_anim_target_deleted - self.diff_anim_from_deleted) as f64 * eased)
+                .round() as usize
+        } else {
+            self.diff_anim_target_deleted
+        };
+
+        (added, deleted, true)
+    }
+
+    /// Returns `true` if the diff counter is currently in motion.
+    pub fn is_diff_animating(&self) -> bool {
+        self.diff_anim_start
+            .map(|s| s.elapsed().as_millis() < 420)
+            .unwrap_or(false)
+    }
+
     /// Calculate total added lines (+) and deleted lines (-) across all turns in all sessions
     /// (including current active session, active in-flight tools, and parked background sessions).
     pub fn total_code_changes(

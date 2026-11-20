@@ -121,6 +121,11 @@ pub(crate) fn test_dummy_tui_state() -> TuiState {
         template_agent: agent,
         background_sessions: std::collections::HashMap::new(),
         memory_project_filter: None,
+        diff_anim_from_added: 0,
+        diff_anim_from_deleted: 0,
+        diff_anim_target_added: 0,
+        diff_anim_target_deleted: 0,
+        diff_anim_start: None,
     }
 }
 

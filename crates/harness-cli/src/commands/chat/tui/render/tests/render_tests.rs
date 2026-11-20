@@ -763,6 +763,11 @@ fn ensure_settled_transcript_caches_and_appends_incrementally() {
         },
         background_sessions: std::collections::HashMap::new(),
         memory_project_filter: None,
+        diff_anim_from_added: 0,
+        diff_anim_from_deleted: 0,
+        diff_anim_target_added: 0,
+        diff_anim_target_deleted: 0,
+        diff_anim_start: None,
     };
 
     let in_flight = Vec::new();
@@ -1435,4 +1440,15 @@ fn test_total_code_changes_across_sessions() {
     let (added, deleted) = st.total_code_changes(Some(&in_flight));
     assert_eq!(added, 3);
     assert_eq!(deleted, 1);
+
+    // Test animation lifecycle
+    st.update_diff_counter(Some(&in_flight));
+    assert!(st.is_diff_animating());
+    assert_eq!(st.diff_anim_target_added, 3);
+    assert_eq!(st.diff_anim_target_deleted, 1);
+
+    let (disp_a, disp_d, anim) = st.current_animated_diff();
+    assert!(anim);
+    assert!(disp_a <= 3);
+    assert!(disp_d <= 1);
 }

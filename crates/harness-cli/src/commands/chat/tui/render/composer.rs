@@ -667,16 +667,54 @@ pub(crate) fn render_composer_hint_row(
         }
     }
 
-    let (total_added, total_deleted) = st.total_code_changes(Some(in_flight_tools));
+    let (total_added, total_deleted, is_animating) = st.current_animated_diff();
     if total_added > 0 || total_deleted > 0 {
+        let (arrow_added, style_added) = if is_animating
+            && st.diff_anim_target_added > st.diff_anim_from_added
+        {
+            let arrow = if (st.spinner_tick / 2) % 2 == 0 {
+                "↑ "
+            } else {
+                "⇡ "
+            };
+            (
+                arrow,
+                Style::default()
+                    .fg(green_ok())
+                    .add_modifier(Modifier::BOLD)
+                    .bg(bg_canvas()),
+            )
+        } else {
+            ("", Style::default().fg(green_ok()).bg(bg_canvas()))
+        };
+
+        let (arrow_deleted, style_deleted) = if is_animating
+            && st.diff_anim_target_deleted > st.diff_anim_from_deleted
+        {
+            let arrow = if (st.spinner_tick / 2) % 2 == 0 {
+                "↑ "
+            } else {
+                "⇡ "
+            };
+            (
+                arrow,
+                Style::default()
+                    .fg(red_err())
+                    .add_modifier(Modifier::BOLD)
+                    .bg(bg_canvas()),
+            )
+        } else {
+            ("", Style::default().fg(red_err()).bg(bg_canvas()))
+        };
+
         right_spans.push(Span::styled(
-            format!("+{total_added}"),
-            Style::default().fg(green_ok()).bg(bg_canvas()),
+            format!("{arrow_added}+{total_added}"),
+            style_added,
         ));
         right_spans.push(Span::styled(" ", Style::default().bg(bg_canvas())));
         right_spans.push(Span::styled(
-            format!("-{total_deleted}"),
-            Style::default().fg(red_err()).bg(bg_canvas()),
+            format!("{arrow_deleted}-{total_deleted}"),
+            style_deleted,
         ));
         right_spans.push(Span::styled(
             " · ",

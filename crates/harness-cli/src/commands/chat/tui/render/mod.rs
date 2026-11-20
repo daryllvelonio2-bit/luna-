@@ -105,6 +105,7 @@ pub(crate) fn pty_pane_rect(transcript: Rect) -> Option<Rect> {
 
 /// Draw one complete TUI frame.
 pub fn draw(frame: &mut Frame, st: &mut TuiState, snap: &TuiLiveSnapshot, info: &FooterInfo<'_>) {
+    st.update_diff_counter(Some(info.in_flight_tools));
     let area = frame.area();
     st.last_rendered_rect = (area.width, area.height);
 
