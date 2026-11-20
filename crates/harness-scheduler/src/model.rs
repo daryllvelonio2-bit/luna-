@@ -269,7 +269,6 @@ fn parse_cron_field(expr: &str, min: u32, max: u32) -> Result<Vec<u32>, String> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{Duration, Local, NaiveTime, TimeZone, Timelike};
 
     #[test]
     fn test_daily_local_schedules_at_device_local_time() {
