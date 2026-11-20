@@ -605,7 +605,7 @@ pub(crate) fn render_composer_hint_row(
     rect: Rect,
     st: &TuiState,
     snap: Option<&TuiLiveSnapshot>,
-    in_flight_tools: &[crate::commands::chat::render::TurnProcessItem],
+    _in_flight_tools: &[crate::commands::chat::render::TurnProcessItem],
     context_label: Option<&str>,
     is_landing: bool,
 ) {
@@ -667,55 +667,29 @@ pub(crate) fn render_composer_hint_row(
         }
     }
 
-    let (total_added, total_deleted, is_animating) = st.current_animated_diff();
-    if total_added > 0 || total_deleted > 0 {
-        let (arrow_added, style_added) = if is_animating
-            && st.diff_anim_target_added > st.diff_anim_from_added
-        {
-            let arrow = if (st.spinner_tick / 2) % 2 == 0 {
-                "↑ "
-            } else {
-                "⇡ "
-            };
-            (
-                arrow,
-                Style::default()
-                    .fg(green_ok())
-                    .add_modifier(Modifier::BOLD)
-                    .bg(bg_canvas()),
-            )
-        } else {
-            ("", Style::default().fg(green_ok()).bg(bg_canvas()))
-        };
-
-        let (arrow_deleted, style_deleted) = if is_animating
-            && st.diff_anim_target_deleted > st.diff_anim_from_deleted
-        {
-            let arrow = if (st.spinner_tick / 2) % 2 == 0 {
-                "↑ "
-            } else {
-                "⇡ "
-            };
-            (
-                arrow,
-                Style::default()
-                    .fg(red_err())
-                    .add_modifier(Modifier::BOLD)
-                    .bg(bg_canvas()),
-            )
-        } else {
-            ("", Style::default().fg(red_err()).bg(bg_canvas()))
-        };
-
+    // A counter side that is zero is hidden outright, and a side that just grew rolls its
+    // changed digits instead of printing an arrow: an extra glyph before the number used to
+    // shove `+` and `-` sideways every time the animation started or stopped.
+    let (added_label, deleted_label) = st.animated_diff_labels();
+    let mut wrote_changes = false;
+    if let Some(added) = added_label {
         right_spans.push(Span::styled(
-            format!("{arrow_added}+{total_added}"),
-            style_added,
+            format!("+{added}"),
+            Style::default().fg(green_ok()).bg(bg_canvas()),
         ));
-        right_spans.push(Span::styled(" ", Style::default().bg(bg_canvas())));
+        wrote_changes = true;
+    }
+    if let Some(deleted) = deleted_label {
+        if wrote_changes {
+            right_spans.push(Span::styled(" ", Style::default().bg(bg_canvas())));
+        }
         right_spans.push(Span::styled(
-            format!("{arrow_deleted}-{total_deleted}"),
-            style_deleted,
+            format!("-{deleted}"),
+            Style::default().fg(red_err()).bg(bg_canvas()),
         ));
+        wrote_changes = true;
+    }
+    if wrote_changes {
         right_spans.push(Span::styled(
             " · ",
             Style::default().fg(text_muted()).bg(bg_canvas()),

@@ -87,7 +87,8 @@ fn active_turn_renders_new_thinking_after_completed_tools() {
     let mut hits = Vec::new();
     let mut collapsed_steps = HashSet::new();
     collapsed_steps.insert(0);
-    let expanded_tools = HashSet::new();
+    let mut expanded_tools = HashSet::new();
+    expanded_tools.insert(3);
 
     let mut content_cache = crate::commands::chat::tui::state::LiveContentCache::default();
     let mut reasoning_cache = crate::commands::chat::tui::state::LiveReasoningCache::default();
@@ -549,11 +550,23 @@ fn block_limit_caps_thinking_blocks_while_tool_cards_stay_capped_at_ten() {
     assert!(!capped.contains("thought line 15"), "{capped}");
     assert!(capped.contains("more lines)"), "{capped}");
 
-    // Even with block_limit = None (uncapped), a collapsed tool card is still capped at 10 lines.
+    // When process_expanded = false (auto-collapse on), the tool card is cleanly collapsed.
     out.clear();
     hits.clear();
     render_completed_turn_process(
         &mut out, &mut hits, 0, &turn, false, None, &empty, &empty, 84, 80,
+    );
+    let tool_collapsed = out.iter().map(line_text).collect::<Vec<_>>().join("\n");
+    assert!(tool_collapsed.contains("Read src/lib.rs"));
+    assert!(tool_collapsed.contains("(20 lines)"));
+    assert!(!tool_collapsed.contains("file line 1"));
+    assert!(!tool_collapsed.contains("file line 10"));
+
+    // When process_expanded = true and block_limit = Some(10), tool output is capped at 10 lines.
+    out.clear();
+    hits.clear();
+    render_completed_turn_process(
+        &mut out, &mut hits, 0, &turn, true, Some(10), &empty, &empty, 84, 80,
     );
     let tool_capped = out.iter().map(line_text).collect::<Vec<_>>().join("\n");
     assert!(tool_capped.contains("file line 10"), "{tool_capped}");
@@ -990,6 +1003,7 @@ fn tool_cards_in_box_truncate_to_ten_lines_and_expand_on_click() {
         &mut hits_closed,
         &item,
         false,
+        None,
         TranscriptClickTarget::ToggleTurnTools(0, 0),
         80,
         76,
@@ -999,13 +1013,10 @@ fn tool_cards_in_box_truncate_to_ten_lines_and_expand_on_click() {
         .map(line_text)
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(joined_closed.contains("line 1"), "starts from head");
-    assert!(joined_closed.contains("line 10"), "shows 10th line");
-    assert!(!joined_closed.contains("line 11"), "line 11 is truncated");
-    assert!(
-        joined_closed.contains("(10 more lines)"),
-        "shows bottom more lines indicator"
-    );
+    assert!(joined_closed.contains("$ cargo check"));
+    assert!(joined_closed.contains("(20 lines)"), "shows collapsed line count badge");
+    assert!(!joined_closed.contains("line 1"), "does not dump output lines when collapsed");
+    assert!(!joined_closed.contains("line 10"), "does not dump output lines when collapsed");
 
     // When opened (open = true)
     let mut out_opened = Vec::new();
@@ -1015,6 +1026,7 @@ fn tool_cards_in_box_truncate_to_ten_lines_and_expand_on_click() {
         &mut hits_opened,
         &item,
         true,
+        None,
         TranscriptClickTarget::ToggleTurnTools(0, 0),
         80,
         76,
@@ -1033,6 +1045,29 @@ fn tool_cards_in_box_truncate_to_ten_lines_and_expand_on_click() {
         !joined_opened.contains("more lines"),
         "no remaining lines indicator"
     );
+
+    // When opened with block_limit (open = true, block_limit = Some(5))
+    let mut out_capped = Vec::new();
+    let mut hits_capped = Vec::new();
+    push_completed_tool_card(
+        &mut out_capped,
+        &mut hits_capped,
+        &item,
+        true,
+        Some(5),
+        TranscriptClickTarget::ToggleTurnTools(0, 0),
+        80,
+        76,
+    );
+    let joined_capped = out_capped
+        .iter()
+        .map(line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(joined_capped.contains("line 1"));
+    assert!(joined_capped.contains("line 5"));
+    assert!(!joined_capped.contains("line 6"));
+    assert!(joined_capped.contains("(15 more lines)"));
 }
 
 #[test]
@@ -1097,6 +1132,7 @@ fn tool_output_with_tabs_and_diffs_never_exceeds_width() {
         &mut hits,
         &item,
         true,
+        None,
         TranscriptClickTarget::ToggleTurnTools(0, 0),
         60,
         56,
@@ -1451,4 +1487,57 @@ fn test_total_code_changes_across_sessions() {
     assert!(anim);
     assert!(disp_a <= 3);
     assert!(disp_d <= 1);
+
+    // The roll starts on the previous count and climbs to the new one.
+    let (added_label, deleted_label) = st.animated_diff_labels();
+    assert_eq!(added_label.as_deref(), Some("0"));
+    assert_eq!(deleted_label.as_deref(), Some("0"));
+
+    // Once the roll window has passed the labels settle on the real totals.
+    st.diff_anim_start =
+        Some(std::time::Instant::now() - std::time::Duration::from_millis(800));
+    assert!(!st.is_diff_animating());
+    let (added_label, deleted_label) = st.animated_diff_labels();
+    assert_eq!(added_label.as_deref(), Some("3"));
+    assert_eq!(deleted_label.as_deref(), Some("1"));
+}
+
+#[test]
+fn read_only_turns_never_animate_the_diff_counter() {
+    let mut st = test_dummy_tui_state();
+    st.turns.push(TurnRecord {
+        user_query: "read a file".to_string(),
+        reasoning: None,
+        tools: Vec::new(),
+        tool_items: vec![TurnProcessItem {
+            tool_name: "read_file".to_string(),
+            call_formatted: "read_file(path: \"src/lib.rs\")".to_string(),
+            result_formatted: "✔ read".to_string(),
+            diff_lines: Vec::new(),
+            output: "+ not a diff\n- still not a diff".to_string(),
+            output_dropped: 0,
+            arguments: Some(serde_json::json!({ "path": "src/lib.rs" })),
+            duration_secs: Some(0.3),
+            is_error: false,
+        }],
+        duration: std::time::Duration::ZERO,
+        reply: String::new(),
+    });
+
+    st.update_diff_counter(None);
+    assert!(!st.is_diff_animating(), "a read-only turn must not roll");
+    assert_eq!(st.animated_diff_labels(), (None, None));
+}
+
+#[test]
+fn a_removed_counter_side_stays_hidden() {
+    let mut st = test_dummy_tui_state();
+    st.diff_anim_target_added = 5;
+    st.diff_anim_target_deleted = 0;
+    st.diff_anim_from_added = 5;
+    st.diff_anim_from_deleted = 0;
+
+    let (added, deleted) = st.animated_diff_labels();
+    assert_eq!(added.as_deref(), Some("5"));
+    assert_eq!(deleted, None, "zero deletions must not render -0");
 }

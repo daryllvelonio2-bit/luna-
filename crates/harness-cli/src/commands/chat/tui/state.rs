@@ -1486,71 +1486,97 @@ pub struct TuiState {
     pub diff_anim_start: Option<std::time::Instant>,
 }
 
+/// How long a changed digit takes to roll to its new value.
+const DIFF_ROLL_MS: f64 = 640.0;
+
 impl TuiState {
-    /// Update the target code changes and animate the transition if counts changed.
+    /// Update the target code changes, rolling the counter forward when a count grows.
+    ///
+    /// Only an increase starts a roll. A decrease (session switch, reset, compaction) snaps
+    /// straight to the new value: walking backwards through numbers the session never produced
+    /// reads as the counter inventing changes.
     pub fn update_diff_counter(
         &mut self,
         in_flight: Option<&[crate::commands::chat::render::TurnProcessItem]>,
     ) {
-        let (actual_added, actual_deleted) = self.total_code_changes(in_flight);
-        if actual_added != self.diff_anim_target_added
-            || actual_deleted != self.diff_anim_target_deleted
-        {
-            let (curr_a, curr_d, _) = self.current_animated_diff();
-            self.diff_anim_from_added = curr_a;
-            self.diff_anim_from_deleted = curr_d;
-            self.diff_anim_target_added = actual_added;
-            self.diff_anim_target_deleted = actual_deleted;
-            self.diff_anim_start = Some(std::time::Instant::now());
+        let (added, deleted) = self.total_code_changes(in_flight);
+        let grew = added > self.diff_anim_target_added || deleted > self.diff_anim_target_deleted;
+        if !grew {
+            if added != self.diff_anim_target_added || deleted != self.diff_anim_target_deleted {
+                self.diff_anim_from_added = added;
+                self.diff_anim_from_deleted = deleted;
+                self.diff_anim_target_added = added;
+                self.diff_anim_target_deleted = deleted;
+                self.diff_anim_start = None;
+            }
+            return;
         }
+
+        let (shown_added, shown_deleted, _) = self.current_animated_diff();
+        self.diff_anim_from_added = shown_added.min(added);
+        self.diff_anim_from_deleted = shown_deleted.min(deleted);
+        self.diff_anim_target_added = added;
+        self.diff_anim_target_deleted = deleted;
+        self.diff_anim_start = Some(std::time::Instant::now());
+    }
+
+    /// Roll progress in `0.0..1.0`, or `None` once the counter has settled.
+    fn diff_roll_progress(&self) -> Option<f32> {
+        let start = self.diff_anim_start?;
+        let t = (start.elapsed().as_secs_f64() * 1000.0 / DIFF_ROLL_MS).clamp(0.0, 1.0) as f32;
+        (t < 1.0).then_some(t)
+    }
+
+    /// The composer's `+N` / `-M` labels, mid-roll right after a count grew.
+    ///
+    /// A side that is zero returns `None`: no changes there means nothing to show, and a stale
+    /// `+0` left over from a read-only turn is exactly the noise this counter must not add.
+    pub fn animated_diff_labels(&self) -> (Option<String>, Option<String>) {
+        let progress = self.diff_roll_progress();
+        let side = |from: usize, to: usize, direction: i8| -> Option<String> {
+            if to == 0 {
+                return None;
+            }
+            Some(match progress {
+                Some(t) => roll_number(from, to, t, direction),
+                None => to.to_string(),
+            })
+        };
+        (
+            side(self.diff_anim_from_added, self.diff_anim_target_added, 1),
+            side(self.diff_anim_from_deleted, self.diff_anim_target_deleted, -1),
+        )
     }
 
     /// Return the currently interpolated (added, deleted, is_animating) values.
     pub fn current_animated_diff(&self) -> (usize, usize, bool) {
-        let Some(start) = self.diff_anim_start else {
+        let Some(t) = self.diff_roll_progress() else {
             return (
                 self.diff_anim_target_added,
                 self.diff_anim_target_deleted,
                 false,
             );
         };
-        const DURATION_MS: f64 = 420.0;
-        let elapsed = start.elapsed().as_secs_f64() * 1000.0;
-        if elapsed >= DURATION_MS {
-            return (
-                self.diff_anim_target_added,
-                self.diff_anim_target_deleted,
-                false,
-            );
-        }
-
-        let t = (elapsed / DURATION_MS).clamp(0.0, 1.0);
-        // Ease-out cubic: fast launch, smooth deceleration into final count
+        // Ease-out cubic: fast launch, smooth deceleration into the final count.
         let eased = 1.0 - (1.0 - t).powi(3);
-
-        let added = if self.diff_anim_target_added >= self.diff_anim_from_added {
-            (self.diff_anim_from_added as f64
-                + (self.diff_anim_target_added - self.diff_anim_from_added) as f64 * eased)
-                .round() as usize
-        } else {
-            self.diff_anim_target_added
+        let lerp = |from: usize, to: usize| {
+            (from as f64 + to.saturating_sub(from) as f64 * eased as f64).round() as usize
         };
-
-        let deleted = if self.diff_anim_target_deleted >= self.diff_anim_from_deleted {
-            (self.diff_anim_from_deleted as f64
-                + (self.diff_anim_target_deleted - self.diff_anim_from_deleted) as f64 * eased)
-                .round() as usize
-        } else {
-            self.diff_anim_target_deleted
-        };
-
-        (added, deleted, true)
+        (
+            lerp(self.diff_anim_from_added, self.diff_anim_target_added),
+            lerp(self.diff_anim_from_deleted, self.diff_anim_target_deleted),
+            true,
+        )
     }
 
-    /// Returns `true` if the diff counter is currently in motion.
+    /// Returns `true` while the counter still needs animation frames.
+    ///
+    /// The window outlives the roll by one tick so the frame that lands on the settled digits
+    /// is actually drawn; stopping exactly on the last roll frame leaves the counter frozen
+    /// mid-digit because nothing schedules another redraw.
     pub fn is_diff_animating(&self) -> bool {
         self.diff_anim_start
-            .map(|s| s.elapsed().as_millis() < 420)
+            .map(|s| s.elapsed().as_secs_f64() * 1000.0 < DIFF_ROLL_MS + 120.0)
             .unwrap_or(false)
     }
 
@@ -1646,5 +1672,77 @@ impl TuiState {
             let excess = self.system_notices.len() - 20;
             self.system_notices.drain(..excess);
         }
+    }
+}
+
+/// Render an odometer roll from `from` to `to` at `progress`.
+///
+/// Digits that change cycle through the values between them: `300 → 305` steps the trailing
+/// `0` up through `1, 2, 3, 4` before landing on `5`, and `direction = -1` rolls a deletion
+/// counter downward. The result is right-aligned to the target's width, so the row keeps its
+/// footprint while the number grows instead of shifting sideways.
+fn roll_number(from: usize, to: usize, progress: f32, direction: i8) -> String {
+    let start = from.to_string();
+    let target = to.to_string();
+    let width = start.len().max(target.len());
+    let t = progress.clamp(0.0, 1.0);
+    let left = format!("{start:>width$}");
+    let right = format!("{target:>width$}");
+    let mut out = String::with_capacity(width);
+    for (a, b) in left.chars().zip(right.chars()) {
+        if a == b {
+            out.push(b);
+            continue;
+        }
+        let (Some(a_digit), Some(b_digit)) = (a.to_digit(10), b.to_digit(10)) else {
+            // The number got longer: the new leading digit rides in with the carry.
+            out.push(if t > 0.0 { b } else { a });
+            continue;
+        };
+        let (distance, step_dir) = if direction < 0 {
+            ((a_digit + 10 - b_digit) % 10, -1i32)
+        } else {
+            ((b_digit + 10 - a_digit) % 10, 1i32)
+        };
+        if distance == 0 {
+            out.push(b);
+            continue;
+        }
+        let step = ((t * distance as f32).floor() as i32).min(distance as i32);
+        let digit = (a_digit as i32 + step_dir * step).rem_euclid(10) as u32;
+        out.push(char::from_digit(digit, 10).unwrap_or(b));
+    }
+    out
+}
+
+#[cfg(test)]
+mod roll_tests {
+    use super::roll_number;
+
+    #[test]
+    fn rolls_the_changed_digit_upward() {
+        assert_eq!(roll_number(300, 305, 0.0, 1), "300");
+        assert_eq!(roll_number(300, 305, 0.5, 1), "302");
+        assert_eq!(roll_number(300, 305, 1.0, 1), "305");
+    }
+
+    #[test]
+    fn rolls_a_deletion_counter_downward() {
+        assert_eq!(roll_number(2, 7, 0.0, -1), "2");
+        assert_eq!(roll_number(2, 7, 0.5, -1), "0");
+        assert_eq!(roll_number(2, 7, 1.0, -1), "7");
+    }
+
+    #[test]
+    fn keeps_a_constant_width_while_the_number_grows() {
+        for step in 0..=10 {
+            let t = step as f32 / 10.0;
+            assert_eq!(roll_number(9, 15, t, 1).len(), 2, "t={t}");
+        }
+    }
+
+    #[test]
+    fn an_unchanged_number_never_moves() {
+        assert_eq!(roll_number(42, 42, 0.3, 1), "42");
     }
 }

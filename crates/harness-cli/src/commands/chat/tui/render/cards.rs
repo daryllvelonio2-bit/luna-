@@ -530,6 +530,7 @@ pub(crate) fn render_completed_turn_process(
                 hit_targets,
                 item,
                 open,
+                block_limit,
                 click_target,
                 width,
                 card_inner_w,
@@ -635,6 +636,7 @@ pub(crate) fn render_active_turn_process(
             hit_targets,
             item,
             open,
+            block_limit,
             TranscriptClickTarget::ToggleLiveToolStep(step_idx),
             width,
             card_inner_w,
@@ -1075,6 +1077,7 @@ pub(crate) fn push_completed_tool_card(
     hit_targets: &mut Vec<(usize, TranscriptClickTarget)>,
     item: &crate::commands::chat::render::TurnProcessItem,
     open: bool,
+    block_limit: Option<usize>,
     click_target: TranscriptClickTarget,
     width: usize,
     card_inner_w: usize,
@@ -1123,100 +1126,66 @@ pub(crate) fn push_completed_tool_card(
         width,
     );
 
+    let has_diff = !item.diff_lines.is_empty() && !item.is_error;
+
     for (i, hline) in header_lines.into_iter().enumerate() {
         let lead = if i == 0 {
             prefix.to_string()
         } else {
             " ".repeat(prefix_w)
         };
+        let mut spans = vec![
+            Span::styled(
+                lead,
+                Style::default()
+                    .fg(if item.is_error {
+                        red_err()
+                    } else {
+                        text_primary()
+                    })
+                    .bg(bg_surface())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                hline,
+                Style::default()
+                    .fg(text_primary())
+                    .bg(bg_surface())
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ];
+        if !open && i == 0 && !item.is_error {
+            if has_diff {
+                let (a, d) = crate::commands::chat::render::count_diff_lines(&item.diff_lines);
+                if a > 0 || d > 0 {
+                    spans.push(Span::styled(
+                        format!("  +{a} -{d}"),
+                        Style::default().fg(text_dim()).bg(bg_surface()),
+                    ));
+                }
+            } else if !item.output.trim().is_empty() {
+                let count = item.output.trim().lines().count();
+                if count > 0 {
+                    let unit = if count == 1 { "line" } else { "lines" };
+                    spans.push(Span::styled(
+                        format!("  ({count} {unit})"),
+                        Style::default().fg(text_dim()).bg(bg_surface()),
+                    ));
+                }
+            }
+        }
         push_card_row(
             out,
             Some(hit_targets),
             Some(&click_target),
             border_color,
             width,
-            vec![
-                Span::styled(
-                    lead,
-                    Style::default()
-                        .fg(if item.is_error {
-                            red_err()
-                        } else {
-                            text_primary()
-                        })
-                        .bg(bg_surface())
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    hline,
-                    Style::default()
-                        .fg(text_primary())
-                        .bg(bg_surface())
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ],
+            spans,
         );
     }
 
-    let has_diff = !item.diff_lines.is_empty() && !item.is_error;
-
-    if has_diff {
-        push_card_blank_row(
-            out,
-            Some(hit_targets),
-            Some(&click_target),
-            border_color,
-            width,
-        );
-        let max_diff = if open { item.diff_lines.len() } else { 10 };
-        for diff in item.diff_lines.iter().take(max_diff) {
-            let clean = clean_terminal_text(diff);
-            let color = if clean.trim_start().starts_with('+') {
-                green_ok()
-            } else if clean.trim_start().starts_with('-') {
-                red_err()
-            } else {
-                text_muted()
-            };
-            push_card_row(
-                out,
-                Some(hit_targets),
-                Some(&click_target),
-                border_color,
-                width,
-                vec![Span::styled(
-                    truncate_str(&clean, card_inner_w),
-                    Style::default().fg(color).bg(bg_surface()),
-                )],
-            );
-        }
-        let diff_more = (item.diff_lines.len().saturating_sub(max_diff)) + item.output_dropped;
-        if diff_more > 0 {
-            push_card_row(
-                out,
-                Some(hit_targets),
-                Some(&click_target),
-                border_color,
-                width,
-                vec![Span::styled(
-                    format!("({diff_more} more diff lines)"),
-                    Style::default().fg(text_dim()).bg(bg_surface()),
-                )],
-            );
-        }
-    } else if !item.output.trim().is_empty() {
-        let mut raw_lines: Vec<String> = Vec::new();
-        let mut prev_empty = false;
-        for line in item.output.trim().lines() {
-            let trimmed = line.trim_end();
-            let is_empty = trimmed.trim().is_empty();
-            if is_empty && prev_empty {
-                continue;
-            }
-            raw_lines.push(trimmed.to_string());
-            prev_empty = is_empty;
-        }
-        if !raw_lines.is_empty() {
+    if open {
+        if has_diff {
             push_card_blank_row(
                 out,
                 Some(hit_targets),
@@ -1224,30 +1193,19 @@ pub(crate) fn push_completed_tool_card(
                 border_color,
                 width,
             );
-            let max_lines = if open { raw_lines.len() } else { 10 };
-            let body_color = if item.is_error && raw_lines.len() <= 6 {
-                red_err()
-            } else {
-                text_muted()
+            let max_diff = match block_limit {
+                Some(lim) => item.diff_lines.len().min(lim),
+                None => item.diff_lines.len(),
             };
-            for line in raw_lines.iter().take(max_lines) {
-                let clean = clean_terminal_text(line);
-                for wrapped in wrap_plain_text(&clean, card_inner_w) {
-                    push_card_row(
-                        out,
-                        Some(hit_targets),
-                        Some(&click_target),
-                        border_color,
-                        width,
-                        vec![Span::styled(
-                            wrapped,
-                            Style::default().fg(body_color).bg(bg_surface()),
-                        )],
-                    );
-                }
-            }
-            let more = (raw_lines.len().saturating_sub(max_lines)) + item.output_dropped;
-            if more > 0 {
+            for diff in item.diff_lines.iter().take(max_diff) {
+                let clean = clean_terminal_text(diff);
+                let color = if clean.trim_start().starts_with('+') {
+                    green_ok()
+                } else if clean.trim_start().starts_with('-') {
+                    red_err()
+                } else {
+                    text_muted()
+                };
                 push_card_row(
                     out,
                     Some(hit_targets),
@@ -1255,11 +1213,105 @@ pub(crate) fn push_completed_tool_card(
                     border_color,
                     width,
                     vec![Span::styled(
-                        format!("({more} more lines)"),
+                        truncate_str(&clean, card_inner_w),
+                        Style::default().fg(color).bg(bg_surface()),
+                    )],
+                );
+            }
+            let diff_more = (item.diff_lines.len().saturating_sub(max_diff)) + item.output_dropped;
+            if diff_more > 0 {
+                push_card_row(
+                    out,
+                    Some(hit_targets),
+                    Some(&click_target),
+                    border_color,
+                    width,
+                    vec![Span::styled(
+                        format!("({diff_more} more diff lines)"),
                         Style::default().fg(text_dim()).bg(bg_surface()),
                     )],
                 );
             }
+        } else if !item.output.trim().is_empty() {
+            let mut raw_lines: Vec<String> = Vec::new();
+            let mut prev_empty = false;
+            for line in item.output.trim().lines() {
+                let trimmed = line.trim_end();
+                let is_empty = trimmed.trim().is_empty();
+                if is_empty && prev_empty {
+                    continue;
+                }
+                raw_lines.push(trimmed.to_string());
+                prev_empty = is_empty;
+            }
+            if !raw_lines.is_empty() {
+                push_card_blank_row(
+                    out,
+                    Some(hit_targets),
+                    Some(&click_target),
+                    border_color,
+                    width,
+                );
+                let max_lines = match block_limit {
+                    Some(lim) => raw_lines.len().min(lim),
+                    None => raw_lines.len(),
+                };
+                let body_color = if item.is_error && raw_lines.len() <= 6 {
+                    red_err()
+                } else {
+                    text_muted()
+                };
+                for line in raw_lines.iter().take(max_lines) {
+                    let clean = clean_terminal_text(line);
+                    for wrapped in wrap_plain_text(&clean, card_inner_w) {
+                        push_card_row(
+                            out,
+                            Some(hit_targets),
+                            Some(&click_target),
+                            border_color,
+                            width,
+                            vec![Span::styled(
+                                wrapped,
+                                Style::default().fg(body_color).bg(bg_surface()),
+                            )],
+                        );
+                    }
+                }
+                let more = (raw_lines.len().saturating_sub(max_lines)) + item.output_dropped;
+                if more > 0 {
+                    push_card_row(
+                        out,
+                        Some(hit_targets),
+                        Some(&click_target),
+                        border_color,
+                        width,
+                        vec![Span::styled(
+                            format!("({more} more lines)"),
+                            Style::default().fg(text_dim()).bg(bg_surface()),
+                        )],
+                    );
+                }
+            }
+        } else if item.is_error && !item.result_formatted.is_empty() {
+            push_card_blank_row(
+                out,
+                Some(hit_targets),
+                Some(&click_target),
+                border_color,
+                width,
+            );
+            let res_clean = clean_terminal_text(&item.result_formatted);
+            push_card_row(
+                out,
+                Some(hit_targets),
+                Some(&click_target),
+                border_color,
+                width,
+                vec![Span::styled(
+                    truncate_str(res_clean.trim(), card_inner_w),
+                    Style::default().fg(red_err()).bg(bg_surface()),
+                )],
+            );
         }
     } else if item.is_error && !item.result_formatted.is_empty() {
         push_card_blank_row(
