@@ -57,26 +57,31 @@ pub fn extract_ready_speech_chunks(
 
             for (i, ch) in slice.char_indices() {
                 let next_idx = i + ch.len_utf8();
-                if is_first && ch == ' ' && i >= 42 {
+                if is_first && ch == ' ' && i >= 60 {
                     split_at = Some(next_idx);
                     break;
                 }
-                let next_is_space = next_idx < slice.len() && bytes[local_pos + next_idx] == b' ';
-                if !next_is_space {
+                let is_break = if next_idx < slice.len() {
+                    let b = bytes[local_pos + next_idx];
+                    b == b' ' || b == b'\n' || b == b'\r' || b == b'\t'
+                } else {
+                    true
+                };
+                if !is_break {
                     continue;
                 }
                 if ch == '.' || ch == '!' || ch == '?' {
                     let prev_char = slice[..i].chars().next_back();
                     let is_short_number_dot =
                         ch == '.' && prev_char.is_some_and(|c| c.is_ascii_digit()) && i < 6;
-                    if !is_short_number_dot && i >= 4 {
-                        split_at = Some(next_idx + 1);
+                    if !is_short_number_dot && i >= 3 {
+                        let mut end = next_idx;
+                        if end < slice.len() && bytes[local_pos + end] == b' ' {
+                            end += 1;
+                        }
+                        split_at = Some(end);
                         break;
                     }
-                } else if is_first && (ch == ',' || ch == ';' || ch == ':' || ch == '—') && i >= 14
-                {
-                    split_at = Some(next_idx + 1);
-                    break;
                 }
             }
 
@@ -103,11 +108,31 @@ pub fn split_sentences_for_tts(cleaned: &str) -> Vec<String> {
     let bytes = cleaned.as_bytes();
     for (i, ch) in cleaned.char_indices() {
         let next = i + ch.len_utf8();
-        if (ch == '.' || ch == '!' || ch == '?') && next < cleaned.len() && bytes[next] == b' ' {
-            let chunk = cleaned[start..next].trim();
-            if chunk.len() >= 12 {
-                sentences.push(chunk.to_string());
-                start = next + 1;
+        let is_terminal = ch == '.' || ch == '!' || ch == '?';
+        let is_break = if next < cleaned.len() {
+            let b = bytes[next];
+            b == b' ' || b == b'\n' || b == b'\r' || b == b'\t'
+        } else {
+            true
+        };
+        if is_terminal && is_break {
+            let prev_char = cleaned[..i].chars().next_back();
+            let is_short_number =
+                ch == '.' && prev_char.is_some_and(|c| c.is_ascii_digit()) && (i - start) < 6;
+            if !is_short_number {
+                let chunk = cleaned[start..next].trim();
+                if !chunk.is_empty() {
+                    sentences.push(chunk.to_string());
+                    start = next;
+                    while start < cleaned.len()
+                        && (bytes[start] == b' '
+                            || bytes[start] == b'\n'
+                            || bytes[start] == b'\r'
+                            || bytes[start] == b'\t')
+                    {
+                        start += 1;
+                    }
+                }
             }
         }
     }
@@ -152,11 +177,11 @@ pub fn clean_text_for_speech(text: &str) -> String {
         }
     }
 
-    if cleaned.len() > 800 {
-        if let Some(pos) = cleaned[..800].rfind(['.', '!', '?']) {
+    if cleaned.len() > 1800 {
+        if let Some(pos) = cleaned[..1800].rfind(['.', '!', '?']) {
             cleaned.truncate(pos + 1);
         } else {
-            cleaned.truncate(800);
+            cleaned.truncate(1800);
         }
     }
 
@@ -210,23 +235,23 @@ pub fn needs_separate_voice_summary(reply: &str) -> bool {
         }
         if lt.starts_with("- ") || lt.starts_with("* ") || lt.starts_with("• ") {
             list_rows += 1;
-            if list_rows >= 2 {
+            if list_rows >= 3 {
                 return true;
             }
         } else if let Some(dot_pos) = lt.find(". ") {
             if dot_pos > 0 && dot_pos <= 3 && lt[..dot_pos].chars().all(|c| c.is_ascii_digit()) {
                 list_rows += 1;
-                if list_rows >= 2 {
+                if list_rows >= 3 {
                     return true;
                 }
             }
         }
     }
     let cleaned = clean_text_for_speech(trimmed);
-    if cleaned.chars().count() > 280 {
+    if cleaned.chars().count() > 800 {
         return true;
     }
-    split_sentences_for_tts(&cleaned).len() > 3
+    split_sentences_for_tts(&cleaned).len() > 6
 }
 
 /// Check if a sentence is trivial conversational filler / acknowledgment chatter
@@ -234,6 +259,9 @@ pub fn needs_separate_voice_summary(reply: &str) -> bool {
 pub fn is_filler_speech(sentence: &str) -> bool {
     let s = sentence.trim().to_ascii_lowercase();
     let s = s.trim_start_matches(|c: char| !c.is_alphabetic());
+    if s.len() > 45 {
+        return false;
+    }
     s.starts_with("alright, i'll")
         || s.starts_with("alright i'll")
         || s.starts_with("alright, let me")
@@ -266,8 +294,8 @@ pub fn fallback_voice_summary(reply: &str) -> String {
     }
     let sentences = split_sentences_for_tts(&cleaned);
     let mut out = String::new();
-    for s in sentences.iter().filter(|s| !is_filler_speech(s)).take(2) {
-        if out.len() + s.len() > 240 && !out.is_empty() {
+    for s in sentences.iter().filter(|s| !is_filler_speech(s)) {
+        if out.len() + s.len() > 1200 && !out.is_empty() {
             break;
         }
         if !out.is_empty() {
@@ -276,13 +304,7 @@ pub fn fallback_voice_summary(reply: &str) -> String {
         out.push_str(s);
     }
     if out.is_empty() {
-        // If all initial sentences were filler, take the first non-filler clause or the substantive tail
-        let non_filler: Vec<&String> = sentences.iter().filter(|s| !is_filler_speech(s)).collect();
-        if let Some(first_real) = non_filler.first() {
-            out.push_str(first_real);
-        } else {
-            out = cleaned.chars().take(220).collect();
-        }
+        out = cleaned;
     }
     if reply.contains('|') || reply.contains("```") {
         if !out.ends_with(['.', '!', '?']) {

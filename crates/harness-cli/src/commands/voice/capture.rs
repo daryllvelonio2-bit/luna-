@@ -347,7 +347,7 @@ pub async fn run_background_voice_listener(
                     }
                 } else if was_playing_tts {
                     was_playing_tts = false;
-                    tts_cooldown_until = Some(std::time::Instant::now() + std::time::Duration::from_millis(60));
+                    tts_cooldown_until = Some(std::time::Instant::now() + std::time::Duration::from_millis(300));
                     is_speaking = false;
                     speech_buffer.clear();
                     pre_roll.clear();
@@ -365,7 +365,7 @@ pub async fn run_background_voice_listener(
                 let rms = harness_voice::AudioProcessor::calculate_rms_energy(&samples);
                 let base_threshold = (noise_floor * 2.6).clamp(130.0, 520.0);
                 let threshold = if playing {
-                    (base_threshold * 1.5).max(600.0)
+                    (base_threshold * 3.5).max(1200.0)
                 } else {
                     base_threshold
                 };
@@ -375,7 +375,7 @@ pub async fn run_background_voice_listener(
                     if !is_speaking {
                         if playing {
                             barge_in_hits = barge_in_hits.saturating_add(1);
-                            if barge_in_hits < 2 {
+                            if barge_in_hits < 6 {
                                 pre_roll_len += samples.len();
                                 pre_roll.push_back(samples);
                                 while pre_roll_len > pre_roll_max_samples {

@@ -44,11 +44,11 @@ fn test_extract_ready_speech_chunks_incremental_streaming() {
     assert_eq!(c1, 7);
     assert!(!in_code);
 
-    let full2 = "Hello! How are you today?\n```rust\nlet x = 1;\n```\nAll done.";
+    let full2 = "Hello! How are you today?\n```rust\nlet x = 1;\n```\nAll done";
     let (chunks2, c2) = extract_ready_speech_chunks(&full2[c1..], &mut in_code, false);
     assert_eq!(chunks2, vec!["How are you today?"]);
     assert!(!in_code);
-    assert_eq!(&full2[c1 + c2..], "All done.");
+    assert_eq!(&full2[c1 + c2..], "All done");
 }
 
 #[test]
@@ -322,22 +322,37 @@ fn test_live_ws_tts_payloads_and_idle_timeout() {
 }
 
 #[test]
-fn test_extract_ready_speech_chunks_early_clause_and_word_boundary() {
+fn test_extract_ready_speech_chunks_sentence_and_word_boundary() {
     let mut in_code = false;
-    let (chunks_comma, consumed_comma) = extract_ready_speech_chunks(
-        "The server is ready, and all services are online",
+    let (chunks_dot, consumed_dot) = extract_ready_speech_chunks(
+        "The server is ready, and all services are online. Next sentence here",
         &mut in_code,
         true,
     );
-    assert_eq!(chunks_comma, vec!["The server is ready,"]);
-    assert_eq!(consumed_comma, 21);
+    assert_eq!(chunks_dot, vec!["The server is ready, and all services are online."]);
+    assert_eq!(consumed_dot, 50);
 
     let (chunks_words, consumed_words) = extract_ready_speech_chunks(
-        "The background worker finished compiling all workspace crates cleanly",
+        "The background worker finished compiling all workspace crates cleanly without stopping",
         &mut in_code,
         true,
     );
     assert_eq!(chunks_words.len(), 1);
-    assert!(consumed_words >= 42);
+    assert!(consumed_words >= 60);
     assert!(chunks_words[0].starts_with("The background worker"));
+}
+
+#[test]
+fn test_split_sentences_multi_line_commas_and_dots() {
+    let text = "Installed package X, version 1.2.3.\nConfigured settings in config.yaml.\nAll 1,494 workspace tests passed.";
+    let sentences = super::summary::split_sentences_for_tts(text);
+    assert_eq!(sentences.len(), 3);
+    assert_eq!(sentences[0], "Installed package X, version 1.2.3.");
+    assert_eq!(sentences[1], "Configured settings in config.yaml.");
+    assert_eq!(sentences[2], "All 1,494 workspace tests passed.");
+
+    let summary = super::summary::fallback_voice_summary(text);
+    assert!(summary.contains("Installed package X, version 1.2.3."));
+    assert!(summary.contains("Configured settings in config.yaml."));
+    assert!(summary.contains("All 1,494 workspace tests passed."));
 }

@@ -229,42 +229,33 @@ pub async fn handle_turn_end(
             }
             st.live_thinking_view = LiveThinkingView::Tail;
             if st.voice_active && !st.voice_speech_queue.is_turn_muted() {
-                if let Some(c) = st.voice_reply_cancel.take() {
-                    c.cancel();
-                }
-
-                let reply_trim = outcome.reply.trim();
-                if reply_trim.len() > st.voice_stream_offset
-                    && reply_trim.is_char_boundary(st.voice_stream_offset)
-                {
-                    let tail = &reply_trim[st.voice_stream_offset..];
-                    let cleaned = crate::commands::voice::clean_text_for_speech(tail);
-                    if !cleaned.is_empty() {
-                        for sentence in crate::commands::voice::split_sentences_for_tts(&cleaned) {
-                            if crate::commands::voice::is_filler_speech(&sentence) {
-                                continue;
-                            }
-                            st.voice_speech_queue.enqueue(
-                                &sentence,
-                                env.config,
-                                &env.cred_manager,
-                                Some(st.voice_tx.clone()),
-                            );
-                            st.voice_spoken_any = true;
-                        }
-                    }
-                } else if !st.voice_spoken_any && !reply_trim.is_empty() {
-                    let summary = crate::commands::voice::fallback_voice_summary(reply_trim);
-                    for sentence in crate::commands::voice::split_sentences_for_tts(&summary) {
-                        if crate::commands::voice::is_filler_speech(&sentence) {
-                            continue;
-                        }
+                let full_reply = &outcome.reply;
+                let offset = st.voice_stream_offset.min(full_reply.len());
+                let safe_offset = (offset..=full_reply.len())
+                    .find(|&i| full_reply.is_char_boundary(i))
+                    .unwrap_or(full_reply.len());
+                let tail = full_reply[safe_offset..].trim();
+                let cleaned = crate::commands::voice::clean_text_for_speech(tail);
+                if !cleaned.is_empty() {
+                    for sentence in crate::commands::voice::split_sentences_for_tts(&cleaned) {
                         st.voice_speech_queue.enqueue(
                             &sentence,
                             env.config,
                             &env.cred_manager,
                             Some(st.voice_tx.clone()),
                         );
+                        st.voice_spoken_any = true;
+                    }
+                } else if !st.voice_spoken_any && !full_reply.trim().is_empty() {
+                    let summary = crate::commands::voice::fallback_voice_summary(full_reply);
+                    for sentence in crate::commands::voice::split_sentences_for_tts(&summary) {
+                        st.voice_speech_queue.enqueue(
+                            &sentence,
+                            env.config,
+                            &env.cred_manager,
+                            Some(st.voice_tx.clone()),
+                        );
+                        st.voice_spoken_any = true;
                     }
                 }
             }

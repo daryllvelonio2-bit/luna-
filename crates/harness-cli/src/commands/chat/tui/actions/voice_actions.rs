@@ -141,10 +141,6 @@ pub fn pump_voice_streaming_tts(env: &Env<'_>, st: &mut TuiState) {
     }
 
     if live_text.len() > st.voice_stream_offset {
-        if let Some(c) = st.voice_reply_cancel.take() {
-            c.cancel();
-        }
-
         let (chunks, consumed) = crate::commands::voice::extract_ready_speech_chunks(
             &live_text[st.voice_stream_offset..],
             &mut st.voice_stream_in_code,
@@ -152,7 +148,6 @@ pub fn pump_voice_streaming_tts(env: &Env<'_>, st: &mut TuiState) {
         );
         st.voice_stream_offset += consumed;
         for chunk in chunks {
-            // Suppress trivial conversational filler / acknowledgment chatter
             if crate::commands::voice::is_filler_speech(&chunk) {
                 continue;
             }
@@ -200,14 +195,8 @@ pub async fn handle_voice_event(
             st.voice_audio_level = 0.0;
         }
         crate::commands::voice::VoiceEvent::BargeIn => {
-            // Immediate barge-in: stop TTS instantly, mute rest of interrupted turn until new input
-            if let Some(c) = st.voice_reply_cancel.take() {
-                c.cancel();
-            }
+            // Immediate barge-in: stop active playback
             st.voice_speech_queue.interrupt();
-            if st.active_turn.is_some() {
-                st.voice_speech_queue.set_turn_muted(true);
-            }
             st.voice_stream_offset = 0;
             st.voice_stream_in_code = false;
             st.voice_spoken_any = false;

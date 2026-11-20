@@ -66,6 +66,7 @@ pub struct NativePlayerProcess {
     child: std::process::Child,
     stdin: std::process::ChildStdin,
     last_write: std::time::Instant,
+    play_until: std::time::Instant,
 }
 
 /// Idle timeout after which the warm audio player process is terminated to release audio hardware.
@@ -131,12 +132,14 @@ impl NativePlayerProcess {
             .take()
             .ok_or_else(|| "Failed to capture stdin for audio player".to_string())?;
 
+        let now = std::time::Instant::now();
         Ok(Self {
             tool: tool.to_string(),
             rate,
             child,
             stdin,
-            last_write: std::time::Instant::now(),
+            last_write: now,
+            play_until: now,
         })
     }
 
@@ -146,6 +149,10 @@ impl NativePlayerProcess {
 
     pub fn idle_elapsed(&self) -> std::time::Duration {
         self.last_write.elapsed()
+    }
+
+    pub fn is_playing(&self) -> bool {
+        std::time::Instant::now() < self.play_until + std::time::Duration::from_millis(250)
     }
 
     pub fn write_samples(&mut self, samples: &[i16]) -> std::io::Result<()> {
@@ -159,11 +166,15 @@ impl NativePlayerProcess {
         }
         self.stdin.write_all(&bytes)?;
         self.stdin.flush()?;
-        self.last_write = std::time::Instant::now();
+        let now = std::time::Instant::now();
+        let dur = std::time::Duration::from_secs_f64(samples.len() as f64 / self.rate as f64);
+        self.play_until = self.play_until.max(now) + dur;
+        self.last_write = now;
         Ok(())
     }
 
     pub fn kill(&mut self) {
+        self.play_until = std::time::Instant::now();
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
@@ -414,17 +425,8 @@ impl VoiceSpeechQueue {
 
                 // Check whether playback has settled
                 let streaming = stream_busy_thread.load(Ordering::SeqCst);
-                let audio_busy = if player_tool.is_some() {
-                    if let Some(last) = last_sample_time {
-                        if last.elapsed() > std::time::Duration::from_millis(300) {
-                            last_sample_time = None;
-                            false
-                        } else {
-                            true
-                        }
-                    } else {
-                        false
-                    }
+                let audio_busy = if let Some(ref mut p) = native_player {
+                    p.is_playing()
                 } else if let Some(ref s) = rodio_sink {
                     !s.empty()
                 } else {
