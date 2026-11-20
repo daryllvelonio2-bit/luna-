@@ -270,7 +270,6 @@ impl VoiceSpeechQueue {
         std::thread::spawn(move || {
             let player_tool = select_player_tool();
             let mut native_player: Option<NativePlayerProcess> = None;
-            let mut last_sample_time: Option<std::time::Instant> = None;
 
             // Rodio fallback only if no host CLI audio tool is available
             let mut rodio_output: Option<(rodio::OutputStream, rodio::OutputStreamHandle)> = None;
@@ -329,7 +328,6 @@ impl VoiceSpeechQueue {
                                         s.stop();
                                     }
                                     rodio_sink = None;
-                                    last_sample_time = None;
                                     is_playing_audio.store(false, Ordering::SeqCst);
                                 }
                                 AudioThreadCmd::AppendPcm {
@@ -370,7 +368,6 @@ impl VoiceSpeechQueue {
                                                     native_player = Some(new_p);
                                                 }
                                             }
-                                            last_sample_time = Some(std::time::Instant::now());
                                             is_playing_audio.store(true, Ordering::SeqCst);
                                         }
                                     } else {
@@ -387,7 +384,6 @@ impl VoiceSpeechQueue {
                                             if s.is_paused() {
                                                 s.play();
                                             }
-                                            last_sample_time = Some(std::time::Instant::now());
                                             is_playing_audio.store(true, Ordering::SeqCst);
                                         }
                                     }
@@ -411,7 +407,6 @@ impl VoiceSpeechQueue {
                                             if s.is_paused() {
                                                 s.play();
                                             }
-                                            last_sample_time = Some(std::time::Instant::now());
                                             is_playing_audio.store(true, Ordering::SeqCst);
                                         }
                                     }

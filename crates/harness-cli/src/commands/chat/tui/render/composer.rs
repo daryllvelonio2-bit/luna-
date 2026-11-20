@@ -605,6 +605,7 @@ pub(crate) fn render_composer_hint_row(
     rect: Rect,
     st: &TuiState,
     snap: Option<&TuiLiveSnapshot>,
+    in_flight_tools: &[crate::commands::chat::render::TurnProcessItem],
     context_label: Option<&str>,
     is_landing: bool,
 ) {
@@ -664,6 +665,24 @@ pub(crate) fn render_composer_hint_row(
                 Style::default().fg(cyan_link()).bg(bg_canvas()),
             ));
         }
+    }
+
+    let (total_added, total_deleted) = st.total_code_changes(Some(in_flight_tools));
+    right_spans.push(Span::styled(
+        format!("+{total_added}"),
+        Style::default().fg(green_ok()).bg(bg_canvas()),
+    ));
+    right_spans.push(Span::styled(" ", Style::default().bg(bg_canvas())));
+    right_spans.push(Span::styled(
+        format!("-{total_deleted}"),
+        Style::default().fg(red_err()).bg(bg_canvas()),
+    ));
+    right_spans.push(Span::styled(
+        " · ",
+        Style::default().fg(text_muted()).bg(bg_canvas()),
+    ));
+
+    if let Some(s) = snap {
         if st.active_turn.is_some() {
             if let Some(ref tool_name) = s.activity_tool_name {
                 let kind_label = if matches!(tool_name.as_str(), "terminal" | "shell" | "bash") {

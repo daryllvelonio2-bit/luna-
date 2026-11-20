@@ -33,8 +33,8 @@ pub use blocks::{
 };
 #[allow(unused_imports)]
 pub use diff::{
-    extract_patch_diff, extract_tool_diff, extract_write_diff, format_patch_diff,
-    format_unified_diff, is_diff_or_write_tool,
+    count_diff_lines, extract_patch_diff, extract_tool_diff, extract_write_diff, format_patch_diff,
+    format_unified_diff, is_diff_or_write_tool, item_diff_counts, turn_diff_counts,
 };
 #[allow(unused_imports)]
 pub use landing::{

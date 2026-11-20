@@ -608,6 +608,7 @@ pub(crate) fn render_landing(
             },
             st,
             Some(snap),
+            info.in_flight_tools,
             None,
             true,
         );
@@ -1019,6 +1020,7 @@ pub(crate) fn render_conversation(
             },
             st,
             Some(snap),
+            info.in_flight_tools,
             Some(&ctx_label),
             false,
         );

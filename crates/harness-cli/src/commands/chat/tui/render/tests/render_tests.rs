@@ -1325,3 +1325,84 @@ fn antigravity_footer_renders_account_and_circular_quota_windows() {
     assert!(text.contains("◕ 5h 78% (4h 30m)"), "{text}");
     assert!(text.contains("◔ w 25% (6d 23h)"), "{text}");
 }
+
+#[test]
+fn test_turn_footer_renders_additions_and_deletions() {
+    let turn = TurnRecord {
+        user_query: "apply patch".to_string(),
+        reasoning: None,
+        tools: Vec::new(),
+        tool_items: vec![TurnProcessItem {
+            tool_name: "patch".to_string(),
+            call_formatted: "patch(path: \"src/main.rs\")".to_string(),
+            result_formatted: "✔ applied".to_string(),
+            diff_lines: vec![
+                "\x1b[48;2;200;0;0m\x1b[38;2;255;255;255;1m  - old_code();\x1b[0m".to_string(),
+                "\x1b[48;2;0;160;0m\x1b[38;2;255;255;255;1m  + new_code_1();\x1b[0m".to_string(),
+                "\x1b[48;2;0;160;0m\x1b[38;2;255;255;255;1m  + new_code_2();\x1b[0m".to_string(),
+            ],
+            output: String::new(),
+            output_dropped: 0,
+            arguments: None,
+            duration_secs: Some(1.2),
+            is_error: false,
+        }],
+        duration: std::time::Duration::from_millis(2200),
+        reply: "Patch applied successfully.".to_string(),
+    };
+    let mut out = Vec::new();
+    let mut hits = Vec::new();
+    let empty_set = std::collections::HashSet::new();
+    render_single_settled_turn(
+        &mut out, &mut hits, 0, &turn, None, false, None, &empty_set, &empty_set, "Build",
+        "gemini-3.8-flash", 80, 76,
+    );
+    let text: Vec<String> = out.iter().map(line_text).collect();
+    let all_text = text.join("\n");
+    assert!(all_text.contains("+2 -1"), "expected +2 -1 in {all_text}");
+}
+
+#[test]
+fn test_total_code_changes_across_sessions() {
+    let mut st = test_dummy_tui_state();
+    st.turns.push(TurnRecord {
+        user_query: "turn 1".to_string(),
+        reasoning: None,
+        tools: Vec::new(),
+        tool_items: vec![TurnProcessItem {
+            tool_name: "patch".to_string(),
+            call_formatted: "patch()".to_string(),
+            result_formatted: "".to_string(),
+            diff_lines: vec![
+                "  + line a".to_string(),
+                "  + line b".to_string(),
+                "  - line c".to_string(),
+            ],
+            output: String::new(),
+            output_dropped: 0,
+            arguments: None,
+            duration_secs: None,
+            is_error: false,
+        }],
+        duration: std::time::Duration::ZERO,
+        reply: "".to_string(),
+    });
+
+    let in_flight = vec![TurnProcessItem {
+        tool_name: "write_file".to_string(),
+        call_formatted: "write_file()".to_string(),
+        result_formatted: "".to_string(),
+        diff_lines: vec![
+            "  + line d".to_string(),
+        ],
+        output: String::new(),
+        output_dropped: 0,
+        arguments: None,
+        duration_secs: None,
+        is_error: false,
+    }];
+
+    let (added, deleted) = st.total_code_changes(Some(&in_flight));
+    assert_eq!(added, 3);
+    assert_eq!(deleted, 1);
+}

@@ -1481,6 +1481,52 @@ pub struct TuiState {
 }
 
 impl TuiState {
+    /// Calculate total added lines (+) and deleted lines (-) across all turns in all sessions
+    /// (including current active session, active in-flight tools, and parked background sessions).
+    pub fn total_code_changes(
+        &self,
+        in_flight: Option<&[crate::commands::chat::render::TurnProcessItem]>,
+    ) -> (usize, usize) {
+        use crate::commands::chat::render::{item_diff_counts, turn_diff_counts};
+
+        let mut total_a = 0;
+        let mut total_d = 0;
+
+        // 1. Current active session's completed turns
+        for turn in &self.turns {
+            let (a, d) = turn_diff_counts(turn);
+            total_a += a;
+            total_d += d;
+        }
+
+        // 2. In-flight tools in active session's running turn
+        if let Some(items) = in_flight {
+            for item in items {
+                let (a, d) = item_diff_counts(item);
+                total_a += a;
+                total_d += d;
+            }
+        }
+
+        // 3. Parked background sessions (all other open tabs)
+        for bg in self.background_sessions.values() {
+            for turn in &bg.turns {
+                let (a, d) = turn_diff_counts(turn);
+                total_a += a;
+                total_d += d;
+            }
+            if let Ok(guard) = bg.in_flight_tools.lock() {
+                for item in guard.iter() {
+                    let (a, d) = item_diff_counts(item);
+                    total_a += a;
+                    total_d += d;
+                }
+            }
+        }
+
+        (total_a, total_d)
+    }
+
     /// Return to following the latest (bottom) transcript lines.
     pub fn jump_to_latest(&mut self) {
         self.scroll_from_bottom = 0;
