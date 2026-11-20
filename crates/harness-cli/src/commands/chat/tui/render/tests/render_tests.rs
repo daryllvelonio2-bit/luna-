@@ -1360,6 +1360,36 @@ fn test_turn_footer_renders_additions_and_deletions() {
     let text: Vec<String> = out.iter().map(line_text).collect();
     let all_text = text.join("\n");
     assert!(all_text.contains("+2 -1"), "expected +2 -1 in {all_text}");
+
+    // Turn with no diffs should NOT render +0 -0
+    let no_diff_turn = TurnRecord {
+        user_query: "hello".to_string(),
+        reasoning: None,
+        tools: Vec::new(),
+        tool_items: Vec::new(),
+        duration: std::time::Duration::from_millis(1500),
+        reply: "Hello.".to_string(),
+    };
+    let mut out_empty = Vec::new();
+    let mut hits_empty = Vec::new();
+    render_single_settled_turn(
+        &mut out_empty,
+        &mut hits_empty,
+        0,
+        &no_diff_turn,
+        None,
+        false,
+        None,
+        &empty_set,
+        &empty_set,
+        "Build",
+        "gemini-3.8-flash",
+        80,
+        76,
+    );
+    let empty_text = out_empty.iter().map(line_text).collect::<Vec<_>>().join("\n");
+    assert!(!empty_text.contains("+0"), "expected no +0 in {empty_text}");
+    assert!(!empty_text.contains("-0"), "expected no -0 in {empty_text}");
 }
 
 #[test]

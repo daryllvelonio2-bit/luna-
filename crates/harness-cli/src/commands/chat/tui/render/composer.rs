@@ -668,19 +668,21 @@ pub(crate) fn render_composer_hint_row(
     }
 
     let (total_added, total_deleted) = st.total_code_changes(Some(in_flight_tools));
-    right_spans.push(Span::styled(
-        format!("+{total_added}"),
-        Style::default().fg(green_ok()).bg(bg_canvas()),
-    ));
-    right_spans.push(Span::styled(" ", Style::default().bg(bg_canvas())));
-    right_spans.push(Span::styled(
-        format!("-{total_deleted}"),
-        Style::default().fg(red_err()).bg(bg_canvas()),
-    ));
-    right_spans.push(Span::styled(
-        " · ",
-        Style::default().fg(text_muted()).bg(bg_canvas()),
-    ));
+    if total_added > 0 || total_deleted > 0 {
+        right_spans.push(Span::styled(
+            format!("+{total_added}"),
+            Style::default().fg(green_ok()).bg(bg_canvas()),
+        ));
+        right_spans.push(Span::styled(" ", Style::default().bg(bg_canvas())));
+        right_spans.push(Span::styled(
+            format!("-{total_deleted}"),
+            Style::default().fg(red_err()).bg(bg_canvas()),
+        ));
+        right_spans.push(Span::styled(
+            " · ",
+            Style::default().fg(text_muted()).bg(bg_canvas()),
+        ));
+    }
 
     if let Some(s) = snap {
         if st.active_turn.is_some() {

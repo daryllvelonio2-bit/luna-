@@ -284,19 +284,21 @@ pub(crate) fn render_single_settled_turn(
         }
     }
     let (turn_added, turn_deleted) = crate::commands::chat::render::turn_diff_counts(turn);
-    footer_spans.push(Span::styled(
-        " · ",
-        Style::default().fg(text_muted()).bg(bg_canvas()),
-    ));
-    footer_spans.push(Span::styled(
-        format!("+{turn_added}"),
-        Style::default().fg(green_ok()).bg(bg_canvas()),
-    ));
-    footer_spans.push(Span::styled(" ", Style::default().bg(bg_canvas())));
-    footer_spans.push(Span::styled(
-        format!("-{turn_deleted}"),
-        Style::default().fg(red_err()).bg(bg_canvas()),
-    ));
+    if turn_added > 0 || turn_deleted > 0 {
+        footer_spans.push(Span::styled(
+            " · ",
+            Style::default().fg(text_muted()).bg(bg_canvas()),
+        ));
+        footer_spans.push(Span::styled(
+            format!("+{turn_added}"),
+            Style::default().fg(green_ok()).bg(bg_canvas()),
+        ));
+        footer_spans.push(Span::styled(" ", Style::default().bg(bg_canvas())));
+        footer_spans.push(Span::styled(
+            format!("-{turn_deleted}"),
+            Style::default().fg(red_err()).bg(bg_canvas()),
+        ));
+    }
     out.push(Line::default());
     out.push(Line::from(footer_spans));
     out.push(Line::default());
