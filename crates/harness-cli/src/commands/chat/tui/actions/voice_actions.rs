@@ -270,27 +270,9 @@ pub async fn handle_incoming_voice_input(env: &Env<'_>, st: &mut TuiState, voice
         return;
     }
 
-    // Auto-send (default): type into the text box and auto-submit after a brief visual beat
-    // unless the user already has a manual draft typed in the composer.
-    if st.composer.text.trim().is_empty() || st.voice_pending_autosend_at.is_some() {
-        st.composer.move_end();
-        if !st.composer.text.is_empty()
-            && !st
-                .composer
-                .text
-                .chars()
-                .next_back()
-                .is_some_and(char::is_whitespace)
-        {
-            st.composer.insert_char(' ');
-        }
-        st.composer.insert_str(trimmed);
-        sync_slash_popup(env, st);
-        st.voice_pending_autosend_at =
-            Some(tokio::time::Instant::now() + std::time::Duration::from_millis(160));
-        return;
-    }
-
+    // Auto-send (default): immediately submit the turn so voice answers without artificial delay.
+    st.composer.clear();
+    st.voice_pending_autosend_at = None;
     dispatch_voice_turn_direct(env, st, trimmed);
 }
 
@@ -345,5 +327,20 @@ pub(crate) fn dispatch_voice_turn_direct(env: &Env<'_>, st: &mut TuiState, trimm
             &mut st.turn_start,
             &mut st.active_turn,
         );
+        if st.voice_active && !st.voice_speech_queue.is_turn_muted() {
+            let ack = crate::commands::voice::generate_instant_voice_ack(trimmed);
+            env.in_flight_tools
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(crate::commands::chat::render::TurnProcessItem::assistant_text(&ack));
+            st.voice_speech_queue.enqueue(
+                &ack,
+                env.config,
+                &env.cred_manager,
+                Some(st.voice_tx.clone()),
+            );
+            st.voice_spoken_any = true;
+            st.voice_ack_sent = true;
+        }
     }
 }

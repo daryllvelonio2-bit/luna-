@@ -387,46 +387,123 @@ pub async fn generate_fast_voice_text(
     }))
 }
 
+/// Generate an instant, zero-latency natural spoken acknowledgment matching Antigravity voice behavior.
+pub fn generate_instant_voice_ack(user_query: &str) -> String {
+    let trimmed = user_query.trim();
+    if trimmed.is_empty() {
+        return "I see your message and am looking into it now.".to_string();
+    }
+
+    let lower = trimmed
+        .to_ascii_lowercase()
+        .trim_end_matches(|c: char| c == '.' || c == '?' || c == '!')
+        .to_string();
+
+    // 1. Casual greetings
+    if matches!(
+        lower.as_str(),
+        "hi" | "hello"
+            | "hey"
+            | "hi there"
+            | "hello there"
+            | "good morning"
+            | "good afternoon"
+            | "good evening"
+    ) {
+        return "Hi! How can I help you today?".to_string();
+    }
+
+    // 2. Identity queries ("youre?", "who are you?", etc.)
+    if matches!(
+        lower.as_str(),
+        "youre"
+            | "you're"
+            | "who are you"
+            | "what are you"
+            | "what is your name"
+            | "what's your name"
+    ) {
+        return "I see your message and am looking into it now.".to_string();
+    }
+
+    // 3. Action verbs
+    let action_verbs = [
+        "read",
+        "check",
+        "analyze",
+        "analyse",
+        "explore",
+        "inspect",
+        "examine",
+        "find",
+        "search",
+        "run",
+        "test",
+        "fix",
+        "show",
+        "open",
+        "create",
+        "build",
+        "explain",
+        "look",
+        "summarize",
+        "summarise",
+        "list",
+    ];
+
+    for verb in action_verbs {
+        if lower.starts_with(verb) {
+            let rest = trimmed[verb.len()..]
+                .trim()
+                .trim_end_matches(|c: char| c == '.' || c == '?' || c == '!');
+            let words: Vec<&str> = rest.split_whitespace().collect();
+            if !words.is_empty() && words.len() <= 7 {
+                let rest_lower = rest.to_ascii_lowercase();
+                if rest_lower.starts_with("on ")
+                    || rest_lower.starts_with("in ")
+                    || rest_lower.starts_with("from ")
+                    || rest_lower.starts_with("at ")
+                    || rest_lower.starts_with("about ")
+                    || rest_lower.starts_with("into ")
+                {
+                    return format!("To help with this request, I'll look into {verb}ing {rest}.");
+                }
+                return format!("To help with this request, I'll look into {rest}.");
+            } else if words.len() > 7 {
+                let short_topic = words.iter().take(4).copied().collect::<Vec<_>>().join(" ");
+                return format!(
+                    "I see your request to {verb} {short_topic} and am looking into it now."
+                );
+            }
+            break;
+        }
+    }
+
+    // 4. Short subject inquiries (e.g. "Challenger", "Playamba")
+    let words: Vec<&str> = trimmed.split_whitespace().collect();
+    if words.len() <= 3
+        && !words.iter().any(|w| {
+            let l = w.to_ascii_lowercase();
+            matches!(l.as_str(), "yes" | "no" | "ok" | "okay")
+        })
+    {
+        let clean = trimmed.trim_end_matches(|c: char| c == '.' || c == '?' || c == '!');
+        return format!("To help with this request, I'll look into the details of {clean}.");
+    }
+
+    // 5. Default instant acknowledgment
+    "I see your message and am looking into it now.".to_string()
+}
+
 /// Generate a brief, natural spoken acknowledgment before or as Luna begins executing tools.
 #[allow(dead_code)]
 pub async fn generate_pre_task_voice_ack(
     user_query: &str,
-    tool_hint: Option<&str>,
-    config: &Config,
-    cred_manager: &Arc<CredentialManager>,
+    _tool_hint: Option<&str>,
+    _config: &Config,
+    _cred_manager: &Arc<CredentialManager>,
 ) -> Option<String> {
-    let trimmed_query = user_query.trim();
-    if trimmed_query.is_empty() {
-        return None;
-    }
-
-    let (system, prompt) = if let Some(hint) = tool_hint {
-        (
-            "You are Luna, a helpful AI voice assistant. Generate ONE ultra-brief, natural spoken acknowledgment (4 to 10 words) saying you're starting the user's task, like \"Alright, on it — cleaning up the build artifacts now.\" or \"Sure thing, let me check those files.\" Output ONLY the spoken line with no quotes, no markdown, no preamble.",
-            format!("User request: {trimmed_query}\nFirst tool starting: {hint}"),
-        )
-    } else {
-        (
-            "You are Luna, a helpful AI voice assistant. If the user's message is an action, command, coding, file, or multi-step task request that takes a moment to execute, output ONE ultra-brief spoken acknowledgment (4 to 10 words, e.g. \"Alright, on it — checking that now.\"). If it is a simple greeting, chat, or direct factual question that doesn't run a task, output exactly SKIP. Output nothing else.",
-            format!("User message: {trimmed_query}"),
-        )
-    };
-
-    match generate_fast_voice_text(system, &prompt, 48, config, cred_manager).await {
-        Ok(raw) => {
-            let cleaned = clean_text_for_speech(raw.trim().trim_matches('"'));
-            if cleaned.is_empty() || cleaned.eq_ignore_ascii_case("skip") {
-                if tool_hint.is_some() {
-                    Some("Alright, on it — working on that now.".to_string())
-                } else {
-                    None
-                }
-            } else {
-                Some(cleaned)
-            }
-        }
-        Err(_) => tool_hint.map(|_| "Alright, on it — working on that now.".to_string()),
-    }
+    Some(generate_instant_voice_ack(user_query))
 }
 
 /// Generate a separate conversational spoken response for rich/long/tabular written answers.

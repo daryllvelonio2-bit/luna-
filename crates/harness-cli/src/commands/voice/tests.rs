@@ -256,6 +256,38 @@ fn test_is_filler_speech_detects_chatter() {
 }
 
 #[test]
+fn test_generate_instant_voice_ack_matches_agy_patterns() {
+    assert_eq!(
+        super::summary::generate_instant_voice_ack("youre?"),
+        "I see your message and am looking into it now."
+    );
+    assert_eq!(
+        super::summary::generate_instant_voice_ack("who are you?"),
+        "I see your message and am looking into it now."
+    );
+    assert_eq!(
+        super::summary::generate_instant_voice_ack("hi"),
+        "Hi! How can I help you today?"
+    );
+    assert_eq!(
+        super::summary::generate_instant_voice_ack("hello there!"),
+        "Hi! How can I help you today?"
+    );
+    assert_eq!(
+        super::summary::generate_instant_voice_ack("Challenger"),
+        "To help with this request, I'll look into the details of Challenger."
+    );
+    assert_eq!(
+        super::summary::generate_instant_voice_ack("Read on your iPad."),
+        "To help with this request, I'll look into reading on your iPad."
+    );
+    assert_eq!(
+        super::summary::generate_instant_voice_ack("Check the status of the server."),
+        "To help with this request, I'll look into the status of the server."
+    );
+}
+
+#[test]
 fn test_default_player_idle_timeout_is_three_minutes() {
     assert_eq!(
         DEFAULT_PLAYER_IDLE_TIMEOUT,

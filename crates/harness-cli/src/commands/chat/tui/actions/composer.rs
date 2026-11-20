@@ -111,6 +111,21 @@ pub async fn submit_composer(
         &mut st.turn_start,
         &mut st.active_turn,
     );
+    if st.voice_active && !st.voice_speech_queue.is_turn_muted() {
+        let ack = crate::commands::voice::generate_instant_voice_ack(&submitted.expanded_text);
+        env.in_flight_tools
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(crate::commands::chat::render::TurnProcessItem::assistant_text(&ack));
+        st.voice_speech_queue.enqueue(
+            &ack,
+            env.config,
+            &env.cred_manager,
+            Some(st.voice_tx.clone()),
+        );
+        st.voice_spoken_any = true;
+        st.voice_ack_sent = true;
+    }
     Ok(Flow::Continue)
 }
 

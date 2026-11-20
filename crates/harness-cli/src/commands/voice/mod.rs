@@ -37,9 +37,9 @@ pub use playback::VoiceSpeechQueue;
 #[allow(unused_imports)]
 pub use summary::{
     clean_text_for_speech, extract_ready_speech_chunks, fallback_voice_summary,
-    generate_pre_task_voice_ack, generate_separate_voice_summary, is_filler_speech,
-    needs_separate_voice_summary, spawn_pre_task_voice_ack, spawn_separate_voice_reply,
-    split_sentences_for_tts,
+    generate_instant_voice_ack, generate_pre_task_voice_ack, generate_separate_voice_summary,
+    is_filler_speech, needs_separate_voice_summary, spawn_pre_task_voice_ack,
+    spawn_separate_voice_reply, split_sentences_for_tts,
 };
 #[allow(unused_imports)]
 pub use tts::build_gemini_tts_payload;
