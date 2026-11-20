@@ -409,14 +409,57 @@ pub async fn generate_fast_voice_text(
     }))
 }
 
-/// Generate an instant, zero-latency natural spoken acknowledgment matching Antigravity voice behavior.
-pub fn generate_instant_voice_ack(user_query: &str) -> String {
-    let trimmed = user_query.trim();
-    if trimmed.is_empty() {
-        return "I see your message and am looking into it now.".to_string();
+static ACK_ROTATION: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn pick_phrase(choices: &[&str]) -> String {
+    let idx = ACK_ROTATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % choices.len();
+    choices[idx].to_string()
+}
+
+/// Strip wake words ("luna", "hey luna", "ok luna", "okay luna") and direct address prefix/suffix.
+pub fn strip_wake_word_and_direct_address(input: &str) -> String {
+    let mut text = input.trim();
+    let lower = text.to_ascii_lowercase();
+
+    for prefix in ["hey luna", "ok luna", "okay luna", "luna"] {
+        if lower.starts_with(prefix) {
+            text = text[prefix.len()..]
+                .trim_start_matches(|c: char| c == ',' || c == ':' || c == '-' || c.is_whitespace());
+            break;
+        }
     }
 
-    let lower = trimmed
+    let lower_end = text.to_ascii_lowercase();
+    if lower_end.ends_with(" luna") || lower_end.ends_with(", luna") {
+        if let Some(pos) = lower_end.rfind("luna") {
+            let prefix = text[..pos].trim_end_matches(|c: char| c == ',' || c.is_whitespace());
+            if !prefix.is_empty() {
+                text = prefix;
+            }
+        }
+    }
+
+    text.trim().to_string()
+}
+
+/// Generate an instant, zero-latency natural spoken acknowledgment matching Antigravity voice behavior.
+pub fn generate_instant_voice_ack(user_query: &str) -> String {
+    let stripped = strip_wake_word_and_direct_address(user_query);
+    let cleaned = if stripped.is_empty() {
+        user_query.trim()
+    } else {
+        stripped.as_str()
+    };
+
+    if cleaned.is_empty() {
+        return pick_phrase(&[
+            "Hi! How can I help you today?",
+            "Hello! I'm here and ready to help.",
+            "Hey! What would you like to work on?",
+        ]);
+    }
+
+    let lower = cleaned
         .to_ascii_lowercase()
         .trim_end_matches(|c: char| c == '.' || c == '?' || c == '!')
         .to_string();
@@ -431,8 +474,17 @@ pub fn generate_instant_voice_ack(user_query: &str) -> String {
             | "good morning"
             | "good afternoon"
             | "good evening"
+            | "how are you"
+            | "what's up"
+            | "yo"
+            | "sup"
     ) {
-        return "Hi! How can I help you today?".to_string();
+        return pick_phrase(&[
+            "Hi! How can I help you today?",
+            "Hello! I'm here and ready to help.",
+            "Hey! What would you like to work on?",
+            "Hi there! Let me know what you need.",
+        ]);
     }
 
     // 2. Identity queries ("youre?", "who are you?", etc.)
@@ -444,11 +496,54 @@ pub fn generate_instant_voice_ack(user_query: &str) -> String {
             | "what are you"
             | "what is your name"
             | "what's your name"
+            | "tell me about yourself"
+            | "who am i talking to"
     ) {
-        return "I see your message and am looking into it now.".to_string();
+        return pick_phrase(&[
+            "I'm Luna, your personal AI engineering assistant. What can I do for you?",
+            "I'm Luna! Here to help you write code, run commands, and build projects.",
+            "I'm Luna, your AI coding companion. What would you like to work on?",
+        ]);
     }
 
-    // 3. Action verbs
+    // 3. Affirmation / Casual acknowledgments ("thanks", "ok", "got it")
+    if matches!(
+        lower.as_str(),
+        "ok" | "okay"
+            | "thanks"
+            | "thank you"
+            | "got it"
+            | "cool"
+            | "sounds good"
+            | "great"
+            | "nice"
+            | "awesome"
+    ) {
+        return pick_phrase(&[
+            "You got it! Let me know if you need anything else.",
+            "Sounds good! What's next?",
+            "Glad to help! Ready when you are.",
+            "Understood! Let me know what you'd like to do next.",
+        ]);
+    }
+
+    // 4. Questions starting with question words ("what is...", "can you...", "how do I...")
+    let question_starters = [
+        "what", "where", "how", "why", "when", "who", "which", "can you", "could you",
+        "is there", "are there", "do you",
+    ];
+    for q in question_starters {
+        if lower.starts_with(q) {
+            return pick_phrase(&[
+                "Looking into that for you now.",
+                "Let me check that for you right away.",
+                "On it — searching that for you now.",
+                "I see your question and am looking into it now.",
+            ]);
+        }
+    }
+
+    // 5. Action verbs
     let action_verbs = [
         "read",
         "check",
@@ -471,50 +566,78 @@ pub fn generate_instant_voice_ack(user_query: &str) -> String {
         "summarize",
         "summarise",
         "list",
+        "write",
+        "generate",
+        "update",
+        "implement",
+        "debug",
+        "install",
+        "start",
+        "stop",
     ];
 
     for verb in action_verbs {
         if lower.starts_with(verb) {
-            let rest = trimmed[verb.len()..]
+            let rest = cleaned[verb.len()..]
                 .trim()
                 .trim_end_matches(|c: char| c == '.' || c == '?' || c == '!');
             let words: Vec<&str> = rest.split_whitespace().collect();
-            if !words.is_empty() && words.len() <= 7 {
+            if !words.is_empty() {
                 let rest_lower = rest.to_ascii_lowercase();
-                if rest_lower.starts_with("on ")
+                let topic = if rest_lower.starts_with("on ")
                     || rest_lower.starts_with("in ")
                     || rest_lower.starts_with("from ")
                     || rest_lower.starts_with("at ")
                     || rest_lower.starts_with("about ")
                     || rest_lower.starts_with("into ")
                 {
-                    return format!("To help with this request, I'll look into {verb}ing {rest}.");
-                }
-                return format!("To help with this request, I'll look into {rest}.");
-            } else if words.len() > 7 {
-                let short_topic = words.iter().take(4).copied().collect::<Vec<_>>().join(" ");
-                return format!(
-                    "I see your request to {verb} {short_topic} and am looking into it now."
-                );
+                    format!("{verb}ing {rest}")
+                } else if words.len() > 7 {
+                    words.iter().take(4).copied().collect::<Vec<_>>().join(" ")
+                } else {
+                    rest.to_string()
+                };
+
+                let templates = [
+                    format!("On it — looking into {topic} now."),
+                    format!("Sure thing, checking {topic} for you."),
+                    format!("Alright, let's take a look at {topic}."),
+                    format!("Got it, working on {topic} right away."),
+                ];
+                let idx =
+                    ACK_ROTATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % templates.len();
+                return templates[idx].clone();
             }
             break;
         }
     }
 
-    // 4. Short subject inquiries (e.g. "Challenger", "Playamba")
-    let words: Vec<&str> = trimmed.split_whitespace().collect();
+    // 6. Short subject inquiries (e.g. "Challenger", "Playamba")
+    let words: Vec<&str> = cleaned.split_whitespace().collect();
     if words.len() <= 3
         && !words.iter().any(|w| {
             let l = w.to_ascii_lowercase();
-            matches!(l.as_str(), "yes" | "no" | "ok" | "okay")
+            matches!(l.as_str(), "yes" | "no")
         })
     {
-        let clean = trimmed.trim_end_matches(|c: char| c == '.' || c == '?' || c == '!');
-        return format!("To help with this request, I'll look into the details of {clean}.");
+        let clean = cleaned.trim_end_matches(|c: char| c == '.' || c == '?' || c == '!');
+        let topics = [
+            format!("Looking into {clean} for you now."),
+            format!("On it — checking the details of {clean} right away."),
+            format!("Let's take a look at {clean}."),
+            format!("Got it, digging into {clean} now."),
+        ];
+        let idx = ACK_ROTATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % topics.len();
+        return topics[idx].clone();
     }
 
-    // 5. Default instant acknowledgment
-    "I see your message and am looking into it now.".to_string()
+    // 7. Default instant acknowledgment with natural phrasing rotation
+    pick_phrase(&[
+        "I see your message and am looking into it now.",
+        "On it — working on that right now.",
+        "Got your request, digging into it now.",
+        "Understood, checking that for you right away.",
+    ])
 }
 
 /// Generate a brief, natural spoken acknowledgment before or as Luna begins executing tools.

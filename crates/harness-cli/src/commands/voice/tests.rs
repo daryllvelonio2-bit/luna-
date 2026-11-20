@@ -257,35 +257,40 @@ fn test_is_filler_speech_detects_chatter() {
 }
 
 #[test]
-fn test_generate_instant_voice_ack_matches_agy_patterns() {
-    assert_eq!(
-        super::summary::generate_instant_voice_ack("youre?"),
-        "I see your message and am looking into it now."
+fn test_generate_instant_voice_ack_matches_natural_conversational_patterns() {
+    // 1. Wake word stripping ("hi luna", "luna check tests")
+    let hi_luna = super::summary::generate_instant_voice_ack("hi luna");
+    assert!(
+        hi_luna.contains("Hi!") || hi_luna.contains("Hello!") || hi_luna.contains("Hey!"),
+        "hi luna should yield a friendly greeting: {hi_luna}"
     );
-    assert_eq!(
-        super::summary::generate_instant_voice_ack("who are you?"),
-        "I see your message and am looking into it now."
+
+    let hi = super::summary::generate_instant_voice_ack("hi");
+    assert!(
+        hi.contains("Hi!") || hi.contains("Hello!") || hi.contains("Hey!"),
+        "hi should yield a friendly greeting: {hi}"
     );
-    assert_eq!(
-        super::summary::generate_instant_voice_ack("hi"),
-        "Hi! How can I help you today?"
+
+    // 2. Identity queries
+    let intro = super::summary::generate_instant_voice_ack("who are you?");
+    assert!(intro.contains("Luna"), "intro should name Luna: {intro}");
+
+    // 3. Affirmation / Thanks
+    let thanks = super::summary::generate_instant_voice_ack("thanks luna");
+    assert!(
+        thanks.contains("got it") || thanks.contains("help") || thanks.contains("Sounds good") || thanks.contains("Understood"),
+        "thanks should yield a natural closing/acknowledgment: {thanks}"
     );
-    assert_eq!(
-        super::summary::generate_instant_voice_ack("hello there!"),
-        "Hi! How can I help you today?"
-    );
-    assert_eq!(
-        super::summary::generate_instant_voice_ack("Challenger"),
-        "To help with this request, I'll look into the details of Challenger."
-    );
-    assert_eq!(
-        super::summary::generate_instant_voice_ack("Read on your iPad."),
-        "To help with this request, I'll look into reading on your iPad."
-    );
-    assert_eq!(
-        super::summary::generate_instant_voice_ack("Check the status of the server."),
-        "To help with this request, I'll look into the status of the server."
-    );
+
+    // 4. Action verbs & short topics
+    let ipad = super::summary::generate_instant_voice_ack("Read on your iPad.");
+    assert!(ipad.contains("reading on your iPad") || ipad.contains("iPad"));
+
+    let server = super::summary::generate_instant_voice_ack("Check the status of the server.");
+    assert!(server.contains("status of the server"));
+
+    let challenger = super::summary::generate_instant_voice_ack("Challenger");
+    assert!(challenger.contains("Challenger"));
 }
 
 #[test]
