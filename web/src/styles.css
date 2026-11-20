@@ -2436,7 +2436,20 @@ select {
 /* Responsive                                                                 */
 /* -------------------------------------------------------------------------- */
 
+.sidebar-backdrop {
+  display: none;
+}
+
 @media (max-width: 768px) {
+  .sidebar-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background-color: rgba(0, 0, 0, 0.45);
+    backdrop-filter: blur(2px);
+    z-index: 799;
+  }
+
   .sidebar {
     position: fixed;
     left: 0;
@@ -4717,6 +4730,69 @@ select {
   display: flex;
   align-items: center;
   gap: 10px;
+}
+
+.auto-cadence-block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.auto-tz-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.auto-tz-btn {
+  height: 25px;
+  padding: 0 9px;
+  border-radius: 6px;
+  border: 1px solid var(--border-subtle);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  cursor: pointer;
+  transition: all 120ms ease;
+  white-space: nowrap;
+}
+
+.auto-tz-btn:hover {
+  background-color: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.auto-tz-btn.active {
+  border-color: var(--accent);
+  background-color: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 500;
+}
+
+.auto-badge-local {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background-color: var(--accent-soft);
+  color: var(--accent);
+  border: 1px solid rgba(77, 107, 254, 0.35);
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: 6px;
+  font-weight: 500;
+}
+
+.auto-badge-utc {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background-color: var(--bg-canvas);
+  color: var(--text-muted);
+  border: 1px solid var(--border-subtle);
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: 6px;
 }
 
 .auto-field-hint {

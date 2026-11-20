@@ -21,15 +21,16 @@ Identify the core components of any requested automation:
 - **Stages & Task Boundaries**: Decide whether the workflow is a single recurring task or multiple sequential tasks on separate schedules.
   - When stage B depends on stage A's output (for example, a research or collection step followed later by a build, report, or publishing step), create separate tasks and define a shared handoff location (such as a workspace file path or persistent note via `save_note` / `read_note`).
 - **Cadence & Schedule Rules**: Translate natural language timing into valid `schedule_create` rules:
-  - `daily:HH:MM` — daily at a 24-hour UTC time (e.g. `daily:19:00`).
+  - `daily-local:HH:MM` — daily at a 24-hour time using host device local time (e.g. `daily-local:20:00` for 8pm). Default for all user-stated wall-clock times. Do NOT ask the user to convert to UTC.
+  - `daily:HH:MM` — daily at a 24-hour UTC time (legacy or when the user explicitly requests UTC).
   - `every:<seconds>` — fixed recurring interval, minimum 10 seconds (e.g. `every:3600`).
   - `once:<RFC3339>` — one-shot scheduled timestamp.
+  - `local-cron:<min> <hour> <dom> <mon> <dow>` — 5-field cron in host device local time.
   - 5-field UTC cron (`min hour dom mon dow`, e.g. `0 9 * * 1-5`).
 - **Dependencies, Tools & Feasibility**: Identify what tools, external accounts, credentials, files, or environment setup the unattended agent will need on each run.
 
 ### 2. Clarify Missing Details Before Creating
-Do not guess when critical execution parameters are missing or ambiguous. Use the `clarify` tool first to ask concise, focused questions (2–4 questions with clickable options plus free-text):
-- **Timezone**: Confirm the user's timezone if they gave local clock times so you convert accurately to UTC.
+Do not guess when critical execution parameters are missing or ambiguous. Wall-clock times directly use `daily-local:HH:MM` on device local time without timezone clarification. Use the `clarify` tool first to ask concise, focused questions (2–4 questions with clickable options plus free-text) when other details are missing:
 - **Execution Pipeline & Tools**: Ask which tools, scripts, services, or output formats should be used if multiple approaches exist.
 - **Side Effects & Safety**: When an automation publishes, posts, modifies external state, or deploys, ask whether to execute automatically or save outputs/drafts locally for review first.
 - **Inputs & Outputs**: Confirm target directories, repositories, channels, or data sources if unspecified.
@@ -77,7 +78,7 @@ pub fn build_automation_turn_prompt(user_request: &str) -> String {
         "Automation Workflow Request:\n\
          1. First call `skill_view` with `name: \"automation\"` to load the global automation workflow instructions.\n\
          2. Follow those instructions carefully for the user's request below.\n\
-         3. If critical details (timezone, tools/pipeline, side-effect boundaries, inputs/outputs, etc.) are missing or ambiguous, call `clarify` first before creating any schedules.\n\
+         3. If critical details (tools/pipeline, side-effect boundaries, inputs/outputs, etc.) are missing or ambiguous, call `clarify` first before creating any schedules (wall-clock times map directly to daily-local without timezone clarification).\n\
          4. Once requirements are clear, create or update the scheduled automation task(s) using `schedule_create` / `schedule_edit`.\n\n\
          User request:\n{trimmed}"
     )

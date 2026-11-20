@@ -30,7 +30,13 @@ mod tests {
     fn parses_every_daily_once_and_cron_rules() {
         let now = Utc::now();
         assert!(compute_next_run("every:60", now).unwrap().is_some());
+        assert!(compute_next_run("daily-local:20:00", now)
+            .unwrap()
+            .is_some());
         assert!(compute_next_run("daily:14:30", now).unwrap().is_some());
+        assert!(compute_next_run("local-cron:0 20 * * *", now)
+            .unwrap()
+            .is_some());
         assert!(compute_next_run("0 9 * * *", now).unwrap().is_some());
         let future = (now + chrono::Duration::hours(2)).to_rfc3339();
         assert!(compute_next_run(&format!("once:{future}"), now)

@@ -80,7 +80,7 @@ impl Tool for ScheduleCreateTool {
     }
 
     fn description(&self) -> &str {
-        "Create a scheduled reminder or recurring automation task. Rules accept 'once:<RFC3339>', 'every:<seconds>', 'daily:<HH:MM>', or 5-field UTC cron ('min hour dom mon dow')."
+        "Create a scheduled reminder or recurring automation task. Rules accept 'once:<RFC3339>', 'every:<seconds>', 'daily-local:<HH:MM>' (device local time), 'daily:<HH:MM>' (UTC), 'local-cron:<expr>' (device local), or 5-field UTC cron ('min hour dom mon dow')."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -89,7 +89,7 @@ impl Tool for ScheduleCreateTool {
             "properties": {
                 "name": { "type": "string", "description": "Short task name" },
                 "instruction": { "type": "string", "description": "Prompt/instruction delivered to the agent when due" },
-                "rule": { "type": "string", "description": "Recurrence rule: once:<RFC3339>, every:<secs>, daily:<HH:MM>, or 5-field cron" },
+                "rule": { "type": "string", "description": "Recurrence rule: once:<RFC3339>, every:<secs>, daily-local:<HH:MM> (device local), daily:<HH:MM> (UTC), local-cron:<expr>, or 5-field UTC cron" },
                 "target": {
                     "type": "string",
                     "enum": ["existing_session", "single_new_session", "new_session_each_run"],

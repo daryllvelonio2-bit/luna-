@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import type { GuiSessionItem, PluginAgentEntry } from '../types';
 import {
   MessageSquare,
@@ -80,7 +80,24 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(
       [filteredSessions, visibleLimit]
     );
 
+    useEffect(() => {
+      const handleKeyDown = (e: KeyboardEvent) => {
+        if (e.key === 'Escape' && isOpen) {
+          onClose();
+        }
+      };
+      window.addEventListener('keydown', handleKeyDown);
+      return () => window.removeEventListener('keydown', handleKeyDown);
+    }, [isOpen, onClose]);
+
     if (!isOpen) return null;
+
+    const handleNav = (tab: 'chat' | 'automations' | 'plugins' | 'memories') => {
+      onSelectTab(tab);
+      if (typeof window !== 'undefined' && window.innerWidth <= 768) {
+        onClose();
+      }
+    };
 
     const commitRename = (sid: string) => {
       const trimmed = editingName.trim();
@@ -94,7 +111,13 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(
       workspaceRoot.split('/').filter(Boolean).pop() || workspaceRoot || 'Workspace';
 
     return (
-      <aside className="sidebar">
+      <>
+        <div
+          className="sidebar-backdrop"
+          onClick={onClose}
+          aria-hidden="true"
+        />
+        <aside className="sidebar" aria-label="Sidebar navigation">
         <div className="sidebar-header">
           <div className="brand-title">
             <span className="brand-mark" aria-hidden="true">
@@ -159,7 +182,8 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(
           <button
             type="button"
             className={`nav-item ${currentTab === 'chat' ? 'active' : ''}`}
-            onClick={() => onSelectTab('chat')}
+            aria-current={currentTab === 'chat' ? 'page' : undefined}
+            onClick={() => handleNav('chat')}
           >
             <MessageSquare size={15} />
             <span>Chat</span>
@@ -167,7 +191,8 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(
           <button
             type="button"
             className={`nav-item ${currentTab === 'automations' ? 'active' : ''}`}
-            onClick={() => onSelectTab('automations')}
+            aria-current={currentTab === 'automations' ? 'page' : undefined}
+            onClick={() => handleNav('automations')}
           >
             <Clock size={15} />
             <span>Automations</span>
@@ -175,7 +200,8 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(
           <button
             type="button"
             className={`nav-item ${currentTab === 'plugins' ? 'active' : ''}`}
-            onClick={() => onSelectTab('plugins')}
+            aria-current={currentTab === 'plugins' ? 'page' : undefined}
+            onClick={() => handleNav('plugins')}
           >
             <Layers size={15} />
             <span>Plugins</span>
@@ -183,7 +209,8 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(
           <button
             type="button"
             className={`nav-item ${currentTab === 'memories' ? 'active' : ''}`}
-            onClick={() => onSelectTab('memories')}
+            aria-current={currentTab === 'memories' ? 'page' : undefined}
+            onClick={() => handleNav('memories')}
           >
             <BookOpen size={15} />
             <span>Memory & Notes</span>
@@ -353,6 +380,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(
           </button>
         </div>
       </aside>
-    );
+    </>
+  );
   }
 );
