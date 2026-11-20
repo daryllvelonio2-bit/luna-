@@ -122,6 +122,27 @@ fn voice_step_disabled_records_disabled() {
 }
 
 #[test]
+fn voice_step_blank_defaults_to_disabled() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let file = tmp.path().join("config.yaml");
+    let layers = layers(&file);
+
+    let mut reader = Cursor::new(b"\n".to_vec());
+    let mut out = Vec::new();
+    let mut pacer = InstantPacer;
+
+    let (voice, _) = run_voice(&layers, &mut reader, &mut out, &mut pacer, &columns)
+        .expect("blank voice runs");
+
+    assert!(!voice.enabled);
+    assert_eq!(voice.provider, "none");
+
+    let config = read_config(&file);
+    assert_eq!(config["voice"]["enabled"].as_bool(), Some(false));
+    assert_eq!(config["voice"]["provider"].as_str(), Some("none"));
+}
+
+#[test]
 fn full_onboarding_flow_includes_voice_confirmation() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let file = tmp.path().join("config.yaml");

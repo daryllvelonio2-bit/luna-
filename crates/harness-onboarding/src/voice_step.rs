@@ -33,8 +33,8 @@ pub const PROMPT: &str = "Select 1-5 ▸ ";
 
 /// The footer: what to type and what is recorded.
 pub const HINT: &str =
-    "Enter a number, then press Enter — blank keeps Antigravity (1), which uses your \
-     existing Google session. Change it anytime later with `luna setup voice`.";
+    "Enter a number, then press Enter — blank keeps Voice disabled (5). \
+     Change it anytime later with `luna setup voice` or `/voice on`.";
 
 /// How many rejected answers are tolerated before falling back to default.
 pub const MAX_ATTEMPTS: usize = 10;
@@ -52,7 +52,7 @@ pub struct Choice {
 pub const CHOICES: [Choice; 5] = [
     Choice {
         id: 1,
-        name: "Antigravity / Google Live Voice (recommended)",
+        name: "Antigravity / Google Live Voice",
         detail: "Real-time bidirectional conversational voice using your authenticated Google \
                  Antigravity session. Sub-second latency, natural speech, and native barge-in.",
         provider: "antigravity",
@@ -84,15 +84,15 @@ pub const CHOICES: [Choice; 5] = [
     },
     Choice {
         id: 5,
-        name: "Disabled (no voice mode)",
-        detail: "Keep voice disabled. Luna runs strictly via text and terminal without \
+        name: "Disabled (no voice mode) [Default]",
+        detail: "Keep voice and microphone disabled. Luna runs strictly via text and terminal without \
                  opening audio devices.",
         provider: "none",
         enabled: false,
     },
 ];
 
-pub const DEFAULT_ID: u8 = 1;
+pub const DEFAULT_ID: u8 = 5;
 
 /// The option a user typed, or the reason it is not an option.
 pub fn parse_selection(answer: &str) -> Result<Choice, String> {

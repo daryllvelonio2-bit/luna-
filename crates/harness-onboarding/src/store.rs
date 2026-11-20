@@ -187,7 +187,7 @@ impl VoiceSelection {
 
 impl Default for VoiceSelection {
     fn default() -> Self {
-        Self::antigravity(None)
+        Self::disabled()
     }
 }
 
