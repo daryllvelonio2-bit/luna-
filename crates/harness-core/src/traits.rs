@@ -194,6 +194,31 @@ pub trait NotesEngine: Send + Sync {
     async fn archive_note(&self, _id: &str) -> Result<bool, HarnessError> {
         Ok(false)
     }
+
+    /// Decide which project a note belongs to and tag it.
+    ///
+    /// `workspace_roots` are candidate directories, most authoritative first: the session's
+    /// working directory, then absolute paths observed in the conversation. An engine that keeps
+    /// projects creates the project folder when it does not exist yet, tags `tags` with
+    /// `project:<slug>`, and returns the slug. A flat engine (or one that cannot recognise a
+    /// source tree in the candidates) returns `None` and the note keeps its default project.
+    ///
+    /// The default implementation keeps the previous behaviour: no automatic project.
+    async fn assign_project(
+        &self,
+        _tags: &mut Vec<String>,
+        _workspace_roots: &[std::path::PathBuf],
+    ) -> Option<String> {
+        None
+    }
+
+    /// Refresh the stored artifacts for one project's note graph.
+    ///
+    /// Called after a note write so the graph follows the notes without a manual command. An
+    /// engine that does not keep graph artifacts returns `Ok(())`; the default does nothing.
+    async fn refresh_graph(&self, _project: &str) -> Result<(), HarnessError> {
+        Ok(())
+    }
 }
 
 /// Receives a tool's output while it is still running, so a UI can show progress instead of

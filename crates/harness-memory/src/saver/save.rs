@@ -1,6 +1,7 @@
 //! [`MemorySaver`]: the independent writer, its model calls, and the store reads it makes.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -28,6 +29,9 @@ pub struct MemorySaver {
     pub(super) memory: Arc<dyn MemoryEngine>,
     pub(super) notes: Arc<dyn NotesEngine>,
     pub(super) policy: SaverPolicy,
+    /// Directories a note's project is derived from, most authoritative first. The session's
+    /// workspace root is added by the caller; conversation paths are added per pass.
+    pub(super) workspace_roots: Vec<PathBuf>,
     /// Runtime gate for `/memory off`; memory records are skipped when false.
     pub(super) memory_enabled: AtomicBool,
     /// Runtime gate for `/notes off`; `policy.notes` remains the startup config.
@@ -46,9 +50,23 @@ impl MemorySaver {
             memory,
             notes,
             policy,
+            workspace_roots: Vec::new(),
             memory_enabled: AtomicBool::new(true),
             notes_enabled: AtomicBool::new(true),
         }
+    }
+
+    /// Prefer `root` when deciding which project a written note belongs to.
+    ///
+    /// The background saver does not know where the session was launched; the CLI does. Passing
+    /// it here keeps the notes crate independent of process state and lets a test pin a scratch
+    /// workspace instead of inheriting the test runner's directory.
+    pub fn with_workspace_root(mut self, root: Option<PathBuf>) -> Self {
+        if let Some(root) = root {
+            self.workspace_roots.retain(|existing| existing != &root);
+            self.workspace_roots.insert(0, root);
+        }
+        self
     }
 
     /// The prompt for one pass: the inventory, then the conversation.
@@ -276,6 +294,7 @@ impl MemorySaver {
     pub async fn run(&self, tail: &[Message]) -> Result<SaveReport, HarnessError> {
         let inventory = self.inventory().await;
         let transcript = render_transcript(tail);
+        let workspace = super::workspace::candidates(&self.workspace_roots, tail);
 
         if self.policy.two_pass && inventory.total() > TWO_PASS_THRESHOLD {
             let candidates = self.extract(&inventory, &transcript.text).await?;
@@ -286,13 +305,23 @@ impl MemorySaver {
                 .reconcile(&inventory, &transcript.text, &candidates)
                 .await?;
             return self
-                .apply(distilled.into_operations(), &inventory, &transcript)
+                .apply(
+                    distilled.into_operations(),
+                    &inventory,
+                    &transcript,
+                    &workspace,
+                )
                 .await;
         }
 
         let distilled = self.curate(&inventory, &transcript.text).await?;
-        self.apply(distilled.into_operations(), &inventory, &transcript)
-            .await
+        self.apply(
+            distilled.into_operations(),
+            &inventory,
+            &transcript,
+            &workspace,
+        )
+        .await
     }
 
     /// One model call with explicit messages, returning the text to parse.

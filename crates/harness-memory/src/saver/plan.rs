@@ -7,7 +7,8 @@ use harness_core::{MemoryCategory, MemoryRecord, Note, SaveReport};
 
 use super::evidence::{
     evidence_supported, mark_unverified, normalize, note_body_len, note_has_authoritative_source,
-    note_is_verbatim, operation_is_secret, strip_evidence_decoration, strip_headings,
+    note_is_grounded, note_is_verbatim, operation_is_secret, strip_evidence_decoration,
+    strip_headings,
 };
 use super::model::{Inventory, Item, Operation, Planned, EVIDENCE_MAX_CHARS, MIN_NOTE_CHARS};
 use super::save::MemorySaver;
@@ -338,8 +339,13 @@ impl MemorySaver {
             report.skip(SaveStorage::Note, display, "already known");
             return None;
         }
-        if !note_is_verbatim(&note.content, transcript) {
-            report.skip(SaveStorage::Note, display, "note is not verbatim");
+        if !note_is_verbatim(&note.content, transcript) && !note_is_grounded(&note.content, transcript)
+        {
+            report.skip(
+                SaveStorage::Note,
+                display,
+                "note is not grounded in the conversation",
+            );
             return None;
         }
         Some(Planned::CreateNote { note })
@@ -384,8 +390,14 @@ impl MemorySaver {
                 report.skip(SaveStorage::Note, display, "already known");
                 return None;
             }
-            if !note_is_verbatim(&update.content, transcript) {
-                report.skip(SaveStorage::Note, display, "note is not verbatim");
+            if !note_is_verbatim(&update.content, transcript)
+                && !note_is_grounded(&update.content, transcript)
+            {
+                report.skip(
+                    SaveStorage::Note,
+                    display,
+                    "note is not grounded in the conversation",
+                );
                 return None;
             }
         }

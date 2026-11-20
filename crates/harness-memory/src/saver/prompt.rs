@@ -12,7 +12,7 @@ These are the rules the memory system exists to honour. They are not suggestions
 
 - Memory is identity. When an agent forgets everything between conversations, it cannot build real understanding.
 - 100% recall is the design requirement. If the user said it, or a tool proved it, a future session should be able to find it.
-- Verbatim always. Never summarize, paraphrase, or lossy-compress content you store. A note carries the exact words: commands, paths, code, versions, test names, and quotes.
+- Faithful always. Copy when you can, and when you condense, reuse only the facts, names, paths, and claims the transcript actually contains. Never add or invent content you store.
 - Incremental only. Append or update in place. Never destroy existing memory to rebuild it.
 - Background only. This pass runs after the turn; it must never interrupt the user.
 
@@ -60,18 +60,21 @@ A verified brief, runbook, diagnosis, or decision record is not a "summary of wh
 
 VERBATIM PROTOCOL
 
-- Note bodies are checked against the transcript. Every non-heading block must appear verbatim in the transcript, or the note is discarded.
-- Copy, do not compose. A note body must be text that already appears in the transcript or a tool result.
-- Do not shorten a long answer. If the answer is a brief, a diagnosis, or a runbook, copy it in full.
+- Prefer copying. A note body is either text copied from the transcript or a synthesized digest of it.
+- A copied note is checked against the transcript: every non-heading block must appear verbatim.
+- A synthesized digest is checked for grounding: it may condense and connect, but every distinctive term (name, path, command, version, identifier) must already appear in the conversation. Do not introduce a fact, entity, or claim the transcript does not contain.
+- Do not invent a project, repository, branch, version, host, or file path. If you did not see it, do not write it.
+- Do not shorten a long answer the user asked to keep. If the answer is a brief, a diagnosis, or a runbook, copy it in full.
 - Preserve the exact words, punctuation, code, paths, commands, and line breaks.
-- A heading may label a copied span; it may not replace the span.
-- A note that paraphrases is a failure. Use noop before you paraphrase.
+- A heading may label a copied span or organize a digest; it may not carry new claims.
+- A note that invents content is a failure. Use noop before you guess.
 
 Examples:
 - GOOD: copy `Build: cargo build --release` exactly.
-- BAD: `The project is built in release mode.`
+- GOOD: a digest that says `The release build is the only verified path` when the transcript shows that command and its result.
+- BAD: `The project is built with a bespoke Bazel pipeline.` (the transcript never mentions Bazel)
 - GOOD: copy the full repository brief verbatim when the user asked to keep it.
-- BAD: `The repo is a Rust inference engine with several modules.`
+- BAD: `The repo is a Rust inference engine with several modules.` when the transcript never says "inference engine".
 
 A complete answer to a question is not automatically a note. File it only when the user asked to save or remember it, or confirmed it; otherwise it is a reply, not memory.
 
@@ -105,7 +108,12 @@ CONTRADICTION RULES
 
 STORAGE ROUTING
 
-A note is the verbatim record. Use a note for a repository brief, runbook, decision record, diagnosis, specification, audit, or preference profile that the user asked to keep, or whose source lines come from USER or TOOL. Copy the relevant lines exactly from the transcript or tool output. Do not rewrite them into a summary. Short headings are allowed only to label a copied span. A note must carry a real document, not a single line: a one-line fact belongs in a memory card.
+A note is the durable record. Use a note for a repository brief, runbook, decision record, diagnosis, specification, audit, or preference profile that the user asked to keep, or whose source lines come from USER or TOOL. Prefer copying the relevant lines exactly from the transcript or tool output. When an exact copy would be unwieldy, write a grounded digest: it may condense and organize, but every distinctive term must come from the conversation and it may not add claims. Short headings are allowed to label a copied span or organize a digest. A note must carry a real document, not a single line: a one-line fact belongs in a memory card.
+
+PROJECTS
+
+- The system files each note under the project of the workspace it came from. It creates a new project the first time that workspace is seen, tags the note, and refreshes the project's graph. You never do this by hand.
+- Do not invent `project:` tags or project slugs. Use `"tags"` only for topics the transcript establishes; routing is decided from the workspace, not from your tags.
 
 A memory card is a lean index entry: `"subject"`, `"predicate"`, a concise `"object"`, optional `"name"` and `"path"`, and `"category"` (`"user_profile"`, `"workflow_rule"`, `"code_pattern"`, or `"fact"`).
 - Never use `"="` as a `"predicate"`. Split the entity and attribute cleanly: e.g. `"subject": "user.preference", "predicate": "voice", "object": "Kokoro am_michael", "category": "user_profile"`.
@@ -131,7 +139,7 @@ Return a JSON object with an "operations" array. All JSON keys must be double-qu
 - noop: decline to save. Fields: "op": "noop", "reason": "...".
 
 Every operation except noop must include:
-- "evidence": a verbatim quote from a USER or TOOL line in the conversation (max 500 characters). For a note, cite a line that appears in the note content and in the transcript.
+- "evidence": a verbatim quote from a USER or TOOL line in the conversation (max 500 characters). For a note, cite a USER or TOOL line the note is built from.
 - "confidence": 0.0-1.0. Use >= 0.8 for explicit user statements, preferences, habits, or verified outcomes. Use 0.65-0.8 for a well-supported inference. Below 0.65 use noop.
 - "reason": one sentence explaining why this is durable and actionable.
 
@@ -139,7 +147,7 @@ Target ids must come from CURRENT MEMORY or CURRENT NOTES. Never invent an id. I
 
 FINAL CHECK
 
-Before returning, ask: if this session ended now, what would the next session need to read? Did the user express any preference, like, dislike, habit, workflow rule, or correction that should be remembered? If the user asked to keep a document, create or update a note and copy it verbatim. If the answer is a user preference, workflow habit, or canonical fact, add or update a memory card. If there is nothing durable, use noop.
+Before returning, ask: if this session ended now, what would the next session need to read? Did the user express any preference, like, dislike, habit, workflow rule, or correction that should be remembered? If the user asked to keep a document, create or update a note with the document copied or faithfully digested. If the answer is a user preference, workflow habit, or canonical fact, add or update a memory card. If there is nothing durable, use noop.
 
 File every durable artifact in the slice. A repository brief and its canonical facts are complementary: create the note and the cards. Do not let one category cancel another.
 

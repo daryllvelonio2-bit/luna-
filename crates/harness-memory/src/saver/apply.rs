@@ -1,6 +1,7 @@
 //! Applying validated operations through the same tools the session uses.
 
 use std::collections::HashSet;
+use std::path::PathBuf;
 
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
@@ -23,6 +24,7 @@ impl MemorySaver {
         operations: Vec<Operation>,
         inventory: &Inventory,
         transcript: &RenderedTranscript,
+        workspace: &[PathBuf],
     ) -> Result<SaveReport, HarnessError> {
         let mut report = SaveReport::default();
         let mut planned: Vec<Planned> = Vec::new();
@@ -101,7 +103,7 @@ impl MemorySaver {
         let mut written_keys: HashSet<(String, String)> = HashSet::new();
         for rank in 0..=3 {
             for op in planned.iter().filter(|op| op.rank() == rank) {
-                self.apply_one(op, inventory, &mut report, &mut written_keys)
+                self.apply_one(op, inventory, &mut report, &mut written_keys, workspace)
                     .await;
             }
         }
@@ -137,6 +139,7 @@ impl MemorySaver {
         inventory: &Inventory,
         report: &mut SaveReport,
         written_keys: &mut HashSet<(String, String)>,
+        workspace: &[PathBuf],
     ) {
         match planned {
             Planned::AddMemory { item } => {
@@ -151,13 +154,15 @@ impl MemorySaver {
                     .await;
             }
             Planned::CreateNote { note } => {
-                self.apply_create_note(note, inventory, report).await;
+                self.apply_create_note(note, inventory, report, workspace)
+                    .await;
             }
             Planned::UpdateNote { target, note } => {
-                self.update_note(target, note, report).await;
+                self.update_note(target, note, report, workspace).await;
             }
             Planned::MergeNotes { targets, note } => {
-                self.apply_merge_notes(targets, note, report).await;
+                self.apply_merge_notes(targets, note, report, workspace)
+                    .await;
             }
             Planned::DeleteMemory { target, reason } => {
                 self.apply_delete_memory(target, reason, inventory, report)
@@ -278,6 +283,7 @@ impl MemorySaver {
         note: &NoteItem,
         inventory: &Inventory,
         report: &mut SaveReport,
+        workspace: &[PathBuf],
     ) {
         let title = note.title.trim();
         let content = note.content.trim();
@@ -285,11 +291,19 @@ impl MemorySaver {
             .notes
             .iter()
             .any(|existing| existing.title.eq_ignore_ascii_case(title));
-        match self.notes.save_note(title, content, &note.tags).await {
+        // The project is decided from where the work happened, not guessed by the model: the
+        // note's own tag still wins, and no recognisable workspace leaves it in the default.
+        let mut tags = note.tags.clone();
+        let project = self.notes.assign_project(&mut tags, workspace).await;
+        match self.notes.save_note(title, content, &tags).await {
             Ok(saved) => {
                 self.refresh_note_pointer(&saved).await;
+                self.refresh_graph(project.as_deref()).await;
                 let line_count = content.lines().count();
-                let detail = Some(format!("{} lines", line_count));
+                let detail = match project {
+                    Some(project) => Some(format!("{} lines, project {project}", line_count)),
+                    None => Some(format!("{} lines", line_count)),
+                };
                 report.note_written_with_detail(
                     saved.title.clone(),
                     detail,
@@ -312,11 +326,12 @@ impl MemorySaver {
         targets: &[String],
         note: &NoteItem,
         report: &mut SaveReport,
+        workspace: &[PathBuf],
     ) {
         let Some(first) = targets.first() else {
             return;
         };
-        let merged = self.update_note(first, note, report).await;
+        let merged = self.update_note(first, note, report, workspace).await;
         if merged.is_some() {
             for target in targets.iter().skip(1) {
                 self.remove_note(target).await;
@@ -475,6 +490,7 @@ impl MemorySaver {
         target: &str,
         update: &NoteItem,
         report: &mut SaveReport,
+        workspace: &[PathBuf],
     ) -> Option<String> {
         let existing = match self.notes.read_note(target).await {
             Ok(note) => note,
@@ -484,6 +500,11 @@ impl MemorySaver {
                 return None;
             }
         };
+
+        // Existing notes already carry their project tag; this resolves it (and creates the
+        // folder if it vanished) without moving a note the user placed by hand.
+        let mut resolved_tags = existing.tags.clone();
+        let project = self.notes.assign_project(&mut resolved_tags, workspace).await;
 
         let append = update
             .mode
@@ -511,6 +532,7 @@ impl MemorySaver {
         {
             Ok(saved) => {
                 self.refresh_note_pointer(&saved).await;
+                self.refresh_graph(project.as_deref()).await;
                 let mode_str = if append { "append" } else { "replace" };
                 let lines = update.content.trim().lines().count();
                 let detail = Some(format!("{mode_str}, +{lines} lines"));
@@ -522,6 +544,23 @@ impl MemorySaver {
                 report.skip(SaveStorage::Note, existing.title, "store error");
                 None
             }
+        }
+    }
+
+    /// Rewrite a project's graph artifacts after a note write.
+    ///
+    /// Best effort: the note is already stored, so a graph that cannot be rebuilt is a warning,
+    /// never a failed save. Engines that keep no graph return `Ok(())`.
+    async fn refresh_graph(&self, project: Option<&str>) {
+        let Some(project) = project.map(str::trim).filter(|slug| !slug.is_empty()) else {
+            return;
+        };
+        if let Err(error) = self.notes.refresh_graph(project).await {
+            tracing::warn!(
+                "background saver wrote a note but could not refresh project '{}' graph: {}",
+                project,
+                error
+            );
         }
     }
 

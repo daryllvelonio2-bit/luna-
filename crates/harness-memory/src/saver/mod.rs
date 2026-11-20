@@ -43,6 +43,7 @@ mod plan;
 mod prompt;
 mod save;
 mod transcript;
+mod workspace;
 
 #[cfg(test)]
 mod tests;

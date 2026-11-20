@@ -83,7 +83,8 @@ pub fn build_saver_for(
         memory.clone(),
         notes,
         policy,
-    ))
+    )
+    .with_workspace_root(Some(config.paths.workspace_root.clone())))
 }
 
 pub fn notice(config: &Config) -> Option<String> {

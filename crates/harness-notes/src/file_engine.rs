@@ -1030,6 +1030,87 @@ impl NotesEngine for FileNotesEngine {
             Ok(false)
         }
     }
+
+    /// Place a note in the project its workspace belongs to, creating that project on first use.
+    ///
+    /// The note's own `project:` tag always wins: a caller that named a project is never moved.
+    /// Otherwise the first candidate root that sits inside a source tree becomes the project,
+    /// linked in the manifest so `luna notes docs` can document the repository. No marker above
+    /// any candidate means the note keeps its default (`inbox`) project.
+    async fn assign_project(
+        &self,
+        tags: &mut Vec<String>,
+        workspace_roots: &[PathBuf],
+    ) -> Option<String> {
+        if let Some(slug) = projects::project_from_tags(tags) {
+            return match projects::ensure(&self.dir, &slug) {
+                Ok(project) => Some(project.slug),
+                Err(error) => {
+                    warn!("could not open project '{}': {}", slug, error);
+                    None
+                }
+            };
+        }
+
+        for root in workspace_roots {
+            // A candidate may be a file inside the tree; `detect_source_root` walks up from it.
+            let Some(source) = projects::detect_source_root(root) else {
+                continue;
+            };
+            let Some(name) = source
+                .file_name()
+                .and_then(|name| name.to_str())
+                .filter(|name| !name.trim().is_empty())
+            else {
+                continue;
+            };
+            let project = match projects::ensure(&self.dir, name) {
+                Ok(project) => project,
+                Err(error) => {
+                    warn!("could not create project '{}': {}", name, error);
+                    continue;
+                }
+            };
+            // Link once: a later session in a different checkout must not silently repoint a
+            // project that already names its source tree.
+            if project.source_root().is_none() {
+                if let Err(error) = projects::link_source(&project, Some(&source)) {
+                    warn!(
+                        "could not link project '{}' to '{}': {}",
+                        project.slug,
+                        source.display(),
+                        error
+                    );
+                }
+            }
+            projects::tag_for_project(tags, &project.slug);
+            info!(
+                "note assigned to project '{}' from {}",
+                project.slug,
+                source.display()
+            );
+            return Some(project.slug);
+        }
+        None
+    }
+
+    /// Rewrite one project's graph artifacts from the notes on disk.
+    async fn refresh_graph(&self, project: &str) -> Result<(), HarnessError> {
+        let notes: Vec<Note> = self
+            .load_all()?
+            .into_iter()
+            .filter(|note| note.parent_id.is_none())
+            .filter(|note| {
+                projects::project_from_tags(&note.tags).as_deref() == Some(project)
+            })
+            .collect();
+        if notes.is_empty() {
+            return Ok(());
+        }
+        let project = projects::ensure(&self.dir, project)?;
+        crate::graph_export::write(&notes, &project.graph_dir())?;
+        Ok(())
+    }
 }
 
 /// The id to resolve a note with, including its project when one is recorded in the tags.

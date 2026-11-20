@@ -99,6 +99,82 @@ pub(super) fn note_is_verbatim(content: &str, transcript: &str) -> bool {
     stripped_transcript.contains(&body)
 }
 
+/// The share of a synthesized note's distinctive terms that must also appear in the transcript.
+///
+/// High enough that a note cannot smuggle in invented entities, paths, or versions, low enough
+/// that a faithful digest which drops connective words and compresses phrasing still passes.
+const GROUNDED_MIN_SHARE: f32 = 0.85;
+
+/// How many distinct terms a note needs before this judgement is meaningful. A short note is
+/// either verbatim (and caught above) or too thin to call a digest.
+const GROUNDED_MIN_TERMS: usize = 6;
+
+/// Whether a note is a grounded digest of the transcript rather than copied text.
+///
+/// A synthesized note is accepted when nearly every distinctive term it uses also appears in the
+/// conversation. This permits a condensed brief built from what the user said and what tools
+/// proved, while refusing invention: fabricated names, paths, versions, or claims introduce
+/// distinctive terms that are not in the transcript and push the share below the threshold.
+pub(super) fn note_is_grounded(content: &str, transcript: &str) -> bool {
+    let body = normalize_strip_formatting(&strip_headings(content));
+    let terms = distinctive_terms(&body);
+    if terms.len() < GROUNDED_MIN_TERMS {
+        return false;
+    }
+    let haystack: std::collections::HashSet<String> =
+        tokens(&normalize_strip_formatting(transcript))
+            .map(str::to_string)
+            .collect();
+    let seen = terms
+        .iter()
+        .filter(|term| haystack.contains(term.as_str()))
+        .count();
+    seen as f32 / terms.len() as f32 >= GROUNDED_MIN_SHARE
+}
+
+/// Unique content-bearing words, in first-seen order.
+///
+/// Normalized text is lowercase and whitespace-collapsed; this drops the short function words
+/// and discourse filler that a paraphrase naturally changes, so what remains is the terminology
+/// a note either shares with the transcript or invented.
+fn distinctive_terms(normalized: &str) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut terms = Vec::new();
+    for term in tokens(normalized) {
+        if term.chars().count() < 4 || STOPWORDS.contains(&term) {
+            continue;
+        }
+        if seen.insert(term.to_string()) {
+            terms.push(term.to_string());
+        }
+    }
+    terms
+}
+
+/// Split normalized text into words, trimming the punctuation a sentence puts around them while
+/// leaving interior punctuation alone, so `value.rs`, `project:luna`, and `~/.local/bin` stay
+/// recognisable terms.
+fn tokens(normalized: &str) -> impl Iterator<Item = &str> {
+    normalized
+        .split_whitespace()
+        .map(|token| token.trim_matches(|c: char| !c.is_alphanumeric()))
+}
+
+/// Function words and discourse filler that carry no evidence. Technical nouns are deliberately
+/// absent: they are exactly what distinguishes a grounded note from an invented one.
+const STOPWORDS: &[&str] = &[
+    "about", "after", "again", "against", "also", "although", "always", "among", "another",
+    "because", "been", "before", "being", "below", "between", "both", "cannot", "could",
+    "does", "doing", "done", "down", "during", "each", "either", "else", "even", "every",
+    "from", "further", "have", "having", "here", "herself", "himself", "into", "itself",
+    "just", "like", "made", "make", "many", "might", "more", "most", "much", "must",
+    "myself", "never", "only", "other", "otherwise", "over", "same", "should", "since",
+    "some", "still", "such", "than", "that", "their", "them", "then", "there", "these",
+    "they", "this", "those", "through", "thus", "under", "until", "upon", "very", "want",
+    "were", "what", "when", "where", "which", "while", "will", "with", "within", "without",
+    "would", "your", "yourself",
+];
+
 /// Whether an evidence quote appears in the rendered transcript.
 ///
 /// The comparison ignores case, runs of whitespace, and markdown inline formatting (such as

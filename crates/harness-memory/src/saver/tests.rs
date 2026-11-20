@@ -124,6 +124,9 @@ impl ModelProvider for CannedProvider {
 
 const LONG_BUILD_LINE: &str = "I always build with cargo and run tests with cargo test, then I install the release binary to ~/.local/bin/luna so the next session uses the same build and never guesses the command";
 
+/// A synthesized note whose every distinctive term is in [`LONG_BUILD_LINE`].
+const GROUNDED_DIGEST: &str = "Always build with cargo and run cargo test. Install the release binary so the next session uses the same build and never guesses the command, and the tests run before the install.";
+
 fn conversation() -> Vec<Message> {
     vec![
         Message::system("system prompt"),
@@ -403,8 +406,11 @@ async fn the_prompt_carries_the_rules_the_inventory_and_the_conversation() {
         system.contains("100% recall is the design requirement"),
         "{system}"
     );
-    assert!(system.contains("Verbatim always"), "{system}");
+    assert!(system.contains("Faithful always"), "{system}");
     assert!(system.contains("VERBATIM PROTOCOL"), "{system}");
+    assert!(system.contains("synthesized digest"), "{system}");
+    assert!(system.contains("PROJECTS"), "{system}");
+    assert!(system.contains("Do not invent `project:` tags"), "{system}");
     assert!(
         system.contains("A repository or codebase brief"),
         "{system}"
@@ -581,6 +587,85 @@ async fn a_note_that_paraphrases_the_transcript_is_refused() {
             .is_empty(),
         "a refused note must not leave a pointer behind"
     );
+}
+
+#[test]
+fn a_grounded_digest_is_accepted_while_an_invented_one_is_refused() {
+    assert!(
+        super::evidence::note_is_grounded(GROUNDED_DIGEST, LONG_BUILD_LINE),
+        "a digest built only from transcript terms must pass"
+    );
+
+    let invented = "Always build with Bazel and run the Gradle test suite. Install the release artifact so the next session uses the same pipeline and never guesses the command, and the tests run before the deploy.";
+    assert!(
+        !super::evidence::note_is_grounded(invented, LONG_BUILD_LINE),
+        "invented tools and pipeline terms must fail grounding"
+    );
+}
+
+#[tokio::test]
+async fn a_note_in_a_source_workspace_is_filed_under_that_project() {
+    let root = std::env::temp_dir().join(format!("luna-saver-project-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).expect("workspace");
+    std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"demo\"\n").expect("marker");
+    let slug = root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("workspace name");
+
+    let provider = CannedProvider::new(&format!(
+        r#"{{"operations":[{{"op":"create_note","note":{{"title":"Build Recipe","content":"{}","tags":["build"]}},"evidence":"I always build with cargo","confidence":0.9,"reason":"the user's verified build recipe"}}]}}"#,
+        GROUNDED_DIGEST
+    ));
+    let (saver, _memory, notes) = saver(provider);
+    let saver = saver.with_workspace_root(Some(root.clone()));
+
+    let report = saver.distil(&conversation()).await.expect("distils");
+
+    assert_eq!(report.notes, 1, "{report:?}");
+    let stored = notes.list_notes(10, 0).await.expect("lists");
+    assert_eq!(stored.len(), 1);
+    assert!(
+        stored[0].tags.iter().any(|tag| tag == &format!("project:{slug}")),
+        "the note must carry the project tag it was filed under: {:?}",
+        stored[0].tags
+    );
+    assert!(
+        notes.dir().join(slug).join("notes").is_dir(),
+        "the project folder is created on first save, not by a manual command"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn a_note_write_leaves_the_project_graph_behind() {
+    let root = std::env::temp_dir().join(format!("luna-saver-graph-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).expect("workspace");
+    std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"graph-demo\"\n").expect("marker");
+    let slug = root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("workspace name");
+
+    let provider = CannedProvider::new(&format!(
+        r#"{{"operations":[{{"op":"create_note","note":{{"title":"Build Recipe","content":"{}","tags":[]}},"evidence":"I always build with cargo","confidence":0.9,"reason":"the user's verified build recipe"}}]}}"#,
+        GROUNDED_DIGEST
+    ));
+    let (saver, _memory, notes) = saver(provider);
+    let saver = saver.with_workspace_root(Some(root.clone()));
+
+    saver.distil(&conversation()).await.expect("distils");
+
+    let graph = notes.dir().join(slug).join("graph");
+    assert!(
+        graph.join("graph.json").is_file(),
+        "the graph is rewritten by the save, not by `luna notes graph`"
+    );
+    assert!(graph.join("graph.html").is_file());
+    assert!(graph.join("graph.svg").is_file());
+
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[tokio::test]

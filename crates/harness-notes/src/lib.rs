@@ -1,6 +1,7 @@
 pub mod distiller;
 pub mod docs;
 pub mod file_engine;
+pub mod graph_export;
 pub mod projects;
 pub mod tools;
 
