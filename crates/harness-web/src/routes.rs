@@ -21,8 +21,6 @@ use harness_core::{
     ApprovalDecision, ClarifyAnswer, ClarifyResponse, CompactionSetup, MemoryEngine, Message,
     ModelProvider, NotesEngine, SessionRecord, SessionStore,
 };
-use harness_memory::build_memory_engine;
-use harness_notes::FileNotesEngine;
 use harness_plugins::{
     plugin_skill, PluginAgentEntry, PluginBuilderSpec, PluginSummary, SkillLoader,
     PLUGIN_SKILL_NAME,
@@ -142,9 +140,7 @@ pub fn create_router(state: Arc<WebState>) -> Router {
                 .patch(update_schedule_task)
                 .delete(delete_schedule_task),
         )
-        .route("/api/memories", get(search_memories))
-        .route("/api/notes", get(search_notes))
-        .route("/api/notes/{note_id}", get(get_note))
+        .merge(crate::knowledge_routes::knowledge_router())
         .merge(crate::plugin_routes::plugin_router())
         .merge(crate::extra_routes::extra_router())
         // Static assets fallback
@@ -1634,92 +1630,4 @@ async fn delete_schedule_task(
         .delete(&task_id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(StatusCode::OK)
-}
-
-#[derive(Deserialize)]
-struct SearchQuery {
-    q: Option<String>,
-}
-
-async fn search_memories(
-    State(state): State<Arc<WebState>>,
-    Query(query): Query<SearchQuery>,
-) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
-    let q = query.q.unwrap_or_default();
-    let cfg = state.config.read().await.clone();
-    let engine = build_memory_engine(&cfg)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let records = engine
-        .retrieve(&q, 30)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    let out = records
-        .into_iter()
-        .map(|r| {
-            serde_json::json!({
-                "id": r.id,
-                "category": r.category,
-                "predicate": r.predicate,
-                "text": r.raw_content,
-                "updated_at": r.updated_at.to_rfc3339()
-            })
-        })
-        .collect();
-    Ok(Json(out))
-}
-
-async fn search_notes(
-    State(state): State<Arc<WebState>>,
-    Query(query): Query<SearchQuery>,
-) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
-    let q = query.q.unwrap_or_default();
-    let (notes_dir, notes_db) = {
-        let cfg = state.config.read().await;
-        (cfg.paths.notes_dir.clone(), cfg.paths.notes_db.clone())
-    };
-    let engine = FileNotesEngine::new(notes_dir, Some(notes_db))
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let notes = engine
-        .search_notes(&q, 30)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    let out = notes
-        .into_iter()
-        .map(|n| {
-            serde_json::json!({
-                "id": n.id,
-                "title": n.title,
-                "body": n.content,
-                "summary_pointer": n.summary_pointer,
-                "updated_at": n.updated_at.to_rfc3339()
-            })
-        })
-        .collect();
-    Ok(Json(out))
-}
-
-async fn get_note(
-    State(state): State<Arc<WebState>>,
-    Path(note_id): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let (notes_dir, notes_db) = {
-        let cfg = state.config.read().await;
-        (cfg.paths.notes_dir.clone(), cfg.paths.notes_db.clone())
-    };
-    let engine = FileNotesEngine::new(notes_dir, Some(notes_db))
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let note = engine
-        .read_note(&note_id)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    Ok(Json(serde_json::json!({
-        "id": note.id,
-        "title": note.title,
-        "body": note.content,
-        "summary_pointer": note.summary_pointer,
-        "updated_at": note.updated_at.to_rfc3339()
-    })))
 }

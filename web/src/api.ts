@@ -6,6 +6,7 @@ import type {
   GuiSessionItem,
   HeartbeatPayload,
   JobSummary,
+  KnowledgeGraphResponse,
   MemoryFact,
   ModelScope,
   ModelTarget,
@@ -758,6 +759,15 @@ class ApiClient {
 
   public async searchNotes(q: string): Promise<NoteEntry[]> {
     return this.request<NoteEntry[]>(`/api/notes?q=${encodeURIComponent(q)}`);
+  }
+
+  public async getNote(noteId: string): Promise<NoteEntry> {
+    return this.request<NoteEntry>(`/api/notes/${encodeURIComponent(noteId)}`);
+  }
+
+  public async getKnowledgeGraph(q = ''): Promise<KnowledgeGraphResponse> {
+    const qs = q.trim() ? `?q=${encodeURIComponent(q.trim())}` : '';
+    return this.request<KnowledgeGraphResponse>(`/api/knowledge-graph${qs}`);
   }
 }
 

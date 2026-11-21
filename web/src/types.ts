@@ -233,9 +233,15 @@ export interface ScheduleTask {
 
 export interface MemoryFact {
   id?: string;
-  category?: string;
+  subject?: string;
   predicate?: string;
+  object?: string;
+  name?: string | null;
+  path?: string | null;
+  category?: string;
+  confidence?: number;
   text: string;
+  created_at?: string;
   updated_at?: string;
 }
 
@@ -243,8 +249,69 @@ export interface NoteEntry {
   id?: string;
   title: string;
   body?: string;
+  summary_pointer?: string;
+  tags?: string[];
+  project?: string | null;
   path?: string;
+  created_at?: string;
   updated_at?: string;
+}
+
+export interface KnowledgeNodeMeta {
+  subject?: string | null;
+  predicate?: string | null;
+  object?: string | null;
+  path?: string | null;
+  confidence?: number | null;
+  project?: string | null;
+}
+
+export interface KnowledgeNode {
+  id: string;
+  kind: 'memory' | 'note' | 'hub' | 'tag' | 'concept';
+  label: string;
+  subtitle: string;
+  category: string;
+  cluster: number;
+  degree: number;
+  ref_id?: string | null;
+  updated_at?: string | null;
+  preview: string;
+  tags: string[];
+  meta: KnowledgeNodeMeta;
+}
+
+export interface KnowledgeEdge {
+  id: string;
+  source: string;
+  target: string;
+  relation: string;
+  confidence: string;
+  weight: number;
+  reason: string;
+}
+
+export interface KnowledgeCluster {
+  id: number;
+  label: string;
+  node_count: number;
+}
+
+export interface KnowledgeStats {
+  total_memories: number;
+  total_notes: number;
+  total_hubs: number;
+  total_tags: number;
+  total_concepts: number;
+  total_nodes: number;
+  total_edges: number;
+}
+
+export interface KnowledgeGraphResponse {
+  nodes: KnowledgeNode[];
+  edges: KnowledgeEdge[];
+  clusters: KnowledgeCluster[];
+  stats: KnowledgeStats;
 }
 
 export interface ApprovalRequestPayload {

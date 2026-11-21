@@ -1519,6 +1519,8 @@ export const App: React.FC = () => {
             onToggleSidebar={() => setSidebarOpen((v) => !v)}
             onSearchMemories={api.searchMemories.bind(api)}
             onSearchNotes={api.searchNotes.bind(api)}
+            onGetNote={api.getNote.bind(api)}
+            onGetKnowledgeGraph={api.getKnowledgeGraph.bind(api)}
           />
         )}
       </main>

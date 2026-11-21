@@ -8,6 +8,7 @@
 
 pub mod auth;
 pub mod extra_routes;
+pub mod knowledge_routes;
 pub mod plugin_routes;
 pub mod routes;
 pub mod server;
