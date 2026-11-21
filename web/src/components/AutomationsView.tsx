@@ -418,7 +418,7 @@ export const AutomationsView: React.FC<AutomationsViewProps> = ({
           {!sidebarOpen && (
             <button
               type="button"
-              className="icon-btn"
+              className="icon-btn header-sidebar-toggle"
               onClick={onToggleSidebar}
               title="Open sidebar"
               aria-label="Open sidebar"

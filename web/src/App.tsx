@@ -1379,6 +1379,7 @@ export const App: React.FC = () => {
     <div className="app-container">
       <Sidebar
         isOpen={sidebarOpen}
+        onOpen={() => setSidebarOpen(true)}
         onClose={() => setSidebarOpen(false)}
         currentTab={currentTab}
         onSelectTab={setCurrentTab}

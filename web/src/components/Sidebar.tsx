@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useRef } from 'react';
+import React, { useState, useMemo, useRef, useEffect } from 'react';
 import type { GuiSessionItem, PluginAgentEntry } from '../types';
 import {
   MessageSquare,
@@ -7,6 +7,7 @@ import {
   BookOpen,
   Settings,
   Plus,
+  SquarePen,
   Trash2,
   GitFork,
   Edit2,
@@ -21,6 +22,7 @@ import {
 
 interface SidebarProps {
   isOpen: boolean;
+  onOpen: () => void;
   onClose: () => void;
   currentTab: 'chat' | 'automations' | 'plugins' | 'memories';
   onSelectTab: (tab: 'chat' | 'automations' | 'plugins' | 'memories') => void;
@@ -42,6 +44,7 @@ interface SidebarProps {
 export const Sidebar: React.FC<SidebarProps> = React.memo(
   ({
     isOpen,
+    onOpen,
     onClose,
     currentTab,
     onSelectTab,
@@ -65,8 +68,16 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(
     const [filter, setFilter] = useState('');
     const [visibleLimit, setVisibleLimit] = useState(40);
     const filterInputRef = useRef<HTMLInputElement>(null);
+    const pendingSearchFocusRef = useRef(false);
     void theme;
     void onToggleTheme;
+
+    useEffect(() => {
+      if (isOpen && pendingSearchFocusRef.current) {
+        pendingSearchFocusRef.current = false;
+        requestAnimationFrame(() => filterInputRef.current?.focus());
+      }
+    }, [isOpen]);
 
     const filteredSessions = useMemo(() => {
       const q = filter.trim().toLowerCase();
@@ -82,7 +93,98 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(
       [filteredSessions, visibleLimit]
     );
 
-    if (!isOpen) return null;
+    if (!isOpen) {
+      return (
+        <aside className="sidebar-rail" aria-label="Minimized navigation">
+          <div className="sidebar-rail-top">
+            <button
+              type="button"
+              className="sidebar-rail-logo-btn"
+              onClick={onOpen}
+              title="Expand sidebar"
+              aria-label="Expand sidebar"
+            >
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path
+                  d="M20.5 14.5A8.5 8.5 0 0 1 9.5 3.5a8.5 8.5 0 1 0 11 11Z"
+                  fill="currentColor"
+                />
+              </svg>
+            </button>
+          </div>
+
+          <div className="sidebar-rail-nav">
+            <button
+              type="button"
+              className="sidebar-rail-btn"
+              onClick={() => {
+                onNewSession(null);
+                onSelectTab('chat');
+              }}
+              title="New Chat"
+              aria-label="New Chat"
+            >
+              <SquarePen size={17} />
+            </button>
+
+            <button
+              type="button"
+              className="sidebar-rail-btn"
+              onClick={() => {
+                pendingSearchFocusRef.current = true;
+                onOpen();
+              }}
+              title="Search conversations"
+              aria-label="Search conversations"
+            >
+              <Search size={17} />
+            </button>
+
+            <button
+              type="button"
+              className={`sidebar-rail-btn ${currentTab === 'automations' ? 'active' : ''}`}
+              onClick={() => onSelectTab('automations')}
+              title="Automations"
+              aria-label="Automations"
+            >
+              <Clock size={17} />
+            </button>
+
+            <button
+              type="button"
+              className={`sidebar-rail-btn ${currentTab === 'plugins' ? 'active' : ''}`}
+              onClick={() => onSelectTab('plugins')}
+              title="Plugins"
+              aria-label="Plugins"
+            >
+              <Layers size={17} />
+            </button>
+
+            <button
+              type="button"
+              className={`sidebar-rail-btn ${currentTab === 'memories' ? 'active' : ''}`}
+              onClick={() => onSelectTab('memories')}
+              title="Memory & Notes"
+              aria-label="Memory & Notes"
+            >
+              <BookOpen size={17} />
+            </button>
+          </div>
+
+          <div className="sidebar-rail-footer">
+            <button
+              type="button"
+              className="sidebar-rail-btn"
+              onClick={onOpenSettings}
+              title="Settings"
+              aria-label="Settings"
+            >
+              <Settings size={17} />
+            </button>
+          </div>
+        </aside>
+      );
+    }
 
     const commitRename = (sid: string) => {
       const trimmed = editingName.trim();

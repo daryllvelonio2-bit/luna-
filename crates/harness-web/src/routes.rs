@@ -17,9 +17,10 @@ use tokio_util::sync::CancellationToken;
 use harness_app::events::AppEvent;
 use harness_app::memory_writer::build_saver_for;
 use harness_app::session::create_session as create_store_session;
+use harness_core::session::clean_user_display_text;
 use harness_core::{
     ApprovalDecision, ClarifyAnswer, ClarifyResponse, CompactionSetup, MemoryEngine, Message,
-    ModelProvider, NotesEngine, SessionRecord, SessionStore,
+    ModelProvider, NotesEngine, Role, SessionRecord, SessionStore,
 };
 use harness_plugins::{
     plugin_skill, PluginAgentEntry, PluginBuilderSpec, PluginSummary, SkillLoader,
@@ -493,32 +494,50 @@ async fn list_sessions(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let agent_map = state.session_agents.read().await;
-    let active_sessions = state.sessions.lock().await;
+    let active_ids: std::collections::HashSet<String> = {
+        let active_sessions = state.sessions.lock().await;
+        active_sessions.keys().cloned().collect()
+    };
     let limit = query.limit.unwrap_or(150);
 
-    let iter = records
-        .into_iter()
-        .filter(|r| r.message_count > 0 || active_sessions.contains_key(&r.id));
-    let items = if limit > 0 {
-        iter.take(limit)
-            .map(|r| {
-                let pid = agent_map.get(&r.id).cloned();
-                GuiSessionItem {
-                    record: r,
-                    plugin_agent_id: pid,
-                }
-            })
-            .collect()
-    } else {
-        iter.map(|r| {
-            let pid = agent_map.get(&r.id).cloned();
-            GuiSessionItem {
-                record: r,
-                plugin_agent_id: pid,
+    let mut items = Vec::new();
+    let max_items = if limit > 0 { limit } else { usize::MAX };
+    for mut r in records {
+        if !(r.message_count > 0 || active_ids.contains(&r.id)) {
+            continue;
+        }
+        if r.title.starts_with("[PLAN MODE ACTIVE:")
+            || r.title.starts_with("[OUT-OF-BAND USER MESSAGE")
+            || r.title.starts_with("Autonomous Goal Mode (iteration 1/")
+            || r.title.starts_with("[background job finished]")
+        {
+            let cleaned = clean_user_display_text(&r.title);
+            if !cleaned.is_empty() && !cleaned.starts_with("[PLAN MODE ACTIVE:") {
+                r.title = cleaned.chars().take(80).collect();
+            } else if let Ok(outcome) = state.store.replay(&r.id, 20).await {
+                let first_user = outcome
+                    .history
+                    .into_iter()
+                    .filter(|sm| sm.message.role == Role::User)
+                    .filter_map(|sm| sm.message.content)
+                    .map(|c| clean_user_display_text(&c))
+                    .find(|c| !c.is_empty());
+                r.title = first_user
+                    .map(|c| c.chars().take(80).collect())
+                    .unwrap_or_else(|| "New conversation".to_string());
+            } else {
+                r.title = "New conversation".to_string();
             }
-        })
-        .collect()
-    };
+        }
+        let pid = agent_map.get(&r.id).cloned();
+        items.push(GuiSessionItem {
+            record: r,
+            plugin_agent_id: pid,
+        });
+        if items.len() >= max_items {
+            break;
+        }
+    }
     Ok(Json(items))
 }
 
@@ -566,7 +585,19 @@ async fn get_session_transcript(
     let messages = outcome
         .history
         .into_iter()
-        .map(|sm| message_to_dto(sm.message))
+        .filter_map(|sm| {
+            let mut msg = sm.message;
+            if msg.role == Role::User {
+                if let Some(raw) = msg.content.as_deref() {
+                    let cleaned = clean_user_display_text(raw);
+                    if cleaned.is_empty() {
+                        return None;
+                    }
+                    msg.content = Some(cleaned);
+                }
+            }
+            Some(message_to_dto(msg))
+        })
         .collect();
     Ok(Json(messages))
 }

@@ -220,3 +220,94 @@ pub fn default_sessions_db() -> PathBuf {
 pub use sqlite::SqliteSessionStore;
 
 mod sqlite;
+
+/// Strip internal harness prompt envelopes (plan mode banners, out-of-band steer
+/// wrappers, goal-loop iteration wrappers, and background job completion triggers)
+/// from a stored user message so UIs and auto-derived session titles display only
+/// what the human actually typed.
+pub fn clean_user_display_text(raw: &str) -> String {
+    let mut text = raw.trim();
+    if text.is_empty() {
+        return String::new();
+    }
+
+    // Internal harness-initiated turns are not user-authored text.
+    if text.starts_with("[background job finished]")
+        || text.starts_with(crate::GOAL_ITERATION_PREFIX)
+    {
+        return String::new();
+    }
+
+    // Collapse iteration-1 autonomous goal prompts back to `/goal <objective>`.
+    if text.starts_with("Autonomous Goal Mode (iteration 1/") {
+        if let Some(after_obj) = text.split("\n\nObjective:\n").nth(1) {
+            let objective = after_obj
+                .split("\n\nExecution contract:")
+                .next()
+                .unwrap_or(after_obj)
+                .trim();
+            if !objective.is_empty() {
+                return format!("/goal {objective}");
+            }
+        }
+    }
+
+    // Unwrap `[OUT-OF-BAND USER MESSAGE ...]` ... `[/OUT-OF-BAND USER MESSAGE]`.
+    if let Some(start_pos) = text.find("[OUT-OF-BAND USER MESSAGE") {
+        let prefix = text[..start_pos].trim();
+        if prefix.is_empty() || prefix.starts_with("[PLAN MODE ACTIVE:") {
+            let after_start = &text[start_pos..];
+            let body_start = if let Some(nl) = after_start.find('\n') {
+                start_pos + nl + 1
+            } else if let Some(br) = after_start.find(']') {
+                start_pos + br + 1
+            } else {
+                start_pos + "[OUT-OF-BAND USER MESSAGE".len()
+            };
+            let body = if let Some(end_pos) = text.find("[/OUT-OF-BAND USER MESSAGE]") {
+                if end_pos >= body_start {
+                    &text[body_start..end_pos]
+                } else {
+                    &text[body_start..]
+                }
+            } else {
+                &text[body_start..]
+            };
+            text = body.trim();
+        }
+    }
+
+    // Strip `[PLAN MODE ACTIVE: ...]` prefix (including repeated/nested occurrences).
+    loop {
+        let trimmed = text.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("[PLAN MODE ACTIVE:") {
+            if let Some(end) = rest.find(']') {
+                text = rest[end + 1..].trim_start_matches(['\r', '\n', ' ', '\t']);
+                continue;
+            }
+        }
+        text = trimmed;
+        break;
+    }
+
+    text.trim().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clean_user_display_text;
+
+    #[test]
+    fn strips_plan_mode_and_out_of_band_prefixes() {
+        let raw = "[PLAN MODE ACTIVE: Formulate a detailed, step-by-step plan/blueprint. Do not attempt to modify files or execute mutating commands until the plan is approved.]\n\nhi";
+        assert_eq!(clean_user_display_text(raw), "hi");
+
+        let steer = "[OUT-OF-BAND USER MESSAGE — a direct message from the user]\nfocus on tests\n[/OUT-OF-BAND USER MESSAGE]";
+        assert_eq!(clean_user_display_text(steer), "focus on tests");
+
+        assert_eq!(
+            clean_user_display_text("[background job finished]\nsome internal info"),
+            ""
+        );
+    }
+}

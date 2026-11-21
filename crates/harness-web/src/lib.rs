@@ -14,5 +14,5 @@ pub mod routes;
 pub mod server;
 pub mod state;
 
-pub use server::{run_web_server, WebServerOptions};
+pub use server::{open_browser_detached, run_web_server, WebServerOptions};
 pub use state::WebState;

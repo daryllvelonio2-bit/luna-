@@ -502,10 +502,27 @@ const AssistantTurnRow: React.FC<AssistantTurnRowProps> = React.memo(
 
 const INITIAL_VISIBLE_TURNS = 35;
 
+function stripInternalUserPrefixes(raw: string): string {
+  let text = raw.trim();
+  const oobMatch = text.match(
+    /^\[OUT-OF-BAND USER MESSAGE[^\]]*\]\s*([\s\S]*?)\s*\[\/OUT-OF-BAND USER MESSAGE\]$/
+  );
+  if (oobMatch) {
+    text = oobMatch[1].trim();
+  }
+  while (text.startsWith('[PLAN MODE ACTIVE:')) {
+    const closeIdx = text.indexOf(']');
+    if (closeIdx === -1) break;
+    text = text.slice(closeIdx + 1).trimStart();
+  }
+  return text.trim();
+}
+
 function parseUserMessageParts(content: string): { text: string; images: string[] } {
+  const cleaned = stripInternalUserPrefixes(content);
   const images: string[] = [];
   const textLines: string[] = [];
-  for (const line of content.split('\n')) {
+  for (const line of cleaned.split('\n')) {
     const trimmed = line.trim();
     if (trimmed.startsWith('data:image/') && trimmed.includes(';base64,')) {
       images.push(trimmed);
@@ -733,7 +750,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
           {!sidebarOpen && (
             <button
               type="button"
-              className="icon-btn"
+              className="icon-btn header-sidebar-toggle"
               onClick={onToggleSidebar}
               title="Open sidebar"
               aria-label="Open sidebar"
@@ -924,7 +941,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
       </header>
       ) : (
         !sidebarOpen && (
-          <div className="landing-floating-bar">
+          <div className="landing-floating-bar header-sidebar-toggle">
             <button
               type="button"
               className="icon-btn"

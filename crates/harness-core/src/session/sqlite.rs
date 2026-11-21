@@ -9,7 +9,10 @@ use rusqlite::{params, params_from_iter, types::Value, Connection, OptionalExten
 use std::sync::Mutex;
 use tracing::debug;
 
-use super::{default_sessions_db, ReplayOutcome, SessionRecord, SessionStore, StoredMessage};
+use super::{
+    clean_user_display_text, default_sessions_db, ReplayOutcome, SessionRecord, SessionStore,
+    StoredMessage,
+};
 use crate::error::HarnessError;
 use crate::types::{Message, Role, TokenUsage, ToolCall, ToolResult};
 
@@ -866,12 +869,15 @@ impl SessionStore for SqliteSessionStore {
             // The first user line becomes the title `luna sessions list` shows.
             if message.role == Role::User {
                 if let Some(content) = &message.content {
-                    let title: String = content.trim().chars().take(TITLE_MAX_CHARS).collect();
-                    conn.execute(
-                        "UPDATE sessions SET title = ?1 WHERE id = ?2 AND title = ''",
-                        params![title, session_id],
-                    )
-                    .map_err(|error| session_error("failed to set the session title", error))?;
+                    let cleaned = clean_user_display_text(content);
+                    let title: String = cleaned.trim().chars().take(TITLE_MAX_CHARS).collect();
+                    if !title.is_empty() {
+                        conn.execute(
+                            "UPDATE sessions SET title = ?1 WHERE id = ?2 AND title = ''",
+                            params![title, session_id],
+                        )
+                        .map_err(|error| session_error("failed to set the session title", error))?;
+                    }
                 }
             }
 

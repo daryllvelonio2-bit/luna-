@@ -80,7 +80,7 @@ export const PluginsView: React.FC<PluginsViewProps> = ({
           {!sidebarOpen && (
             <button
               type="button"
-              className="icon-btn"
+              className="icon-btn header-sidebar-toggle"
               onClick={onToggleSidebar}
               title="Open sidebar"
               aria-label="Open sidebar"
