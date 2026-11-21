@@ -139,6 +139,7 @@ pub fn create_router(state: Arc<WebState>) -> Router {
             "/api/schedules/{task_id}",
             get(get_schedule_task)
                 .put(update_schedule_task)
+                .patch(update_schedule_task)
                 .delete(delete_schedule_task),
         )
         .route("/api/memories", get(search_memories))
@@ -636,6 +637,18 @@ fn spawn_session_turn(
                 session_id: session_id.clone(),
                 query: msg.clone(),
             });
+            {
+                let pm = state.plugin_manager.clone();
+                let s = session_id.clone();
+                let q = msg.clone();
+                tokio::spawn(async move {
+                    pm.dispatch_event(
+                        "turn_started",
+                        serde_json::json!({ "sessionId": s, "query": q }),
+                    )
+                    .await;
+                });
+            }
             let started = std::time::Instant::now();
             let plugin_gen_before = state.plugin_manager.generation();
 
@@ -661,6 +674,22 @@ fn spawn_session_turn(
                             .await;
                     }
                     let usage = turn_outcome.usage;
+                    {
+                        let pm = state.plugin_manager.clone();
+                        let s = session_id.clone();
+                        let r = turn_outcome.reply.clone();
+                        tokio::spawn(async move {
+                            pm.dispatch_event(
+                                "turn_finished",
+                                serde_json::json!({
+                                    "sessionId": s,
+                                    "reply": r,
+                                    "durationMs": elapsed,
+                                }),
+                            )
+                            .await;
+                        });
+                    }
                     state.emit_event(AppEvent::TurnFinished {
                         session_id: session_id.clone(),
                         reply: turn_outcome.reply,
@@ -1432,6 +1461,7 @@ struct CreateScheduleReq {
     interval_secs: Option<u64>,
     target: Option<String>,
     session_id: Option<String>,
+    require_approval: Option<bool>,
 }
 
 async fn create_schedule_task(
@@ -1469,11 +1499,20 @@ async fn create_schedule_task(
     };
 
     let target = parse_delivery_target(payload.target.as_deref(), payload.session_id.as_deref());
+    let require_approval = payload.require_approval.unwrap_or(false);
 
     let task = state
         .scheduler
         .store()
-        .create(None, name, instruction, rule, target, None)
+        .create_with_approval(
+            None,
+            name,
+            instruction,
+            rule,
+            target,
+            None,
+            require_approval,
+        )
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
     Ok(Json(task))
@@ -1487,6 +1526,7 @@ struct UpdateScheduleReq {
     paused: Option<bool>,
     target: Option<String>,
     session_id: Option<String>,
+    require_approval: Option<bool>,
 }
 
 async fn update_schedule_task(
@@ -1502,13 +1542,14 @@ async fn update_schedule_task(
     let updated = state
         .scheduler
         .store()
-        .update(
+        .update_with_approval(
             &task_id,
             payload.name,
             payload.instruction,
             payload.rule,
             delivery_target,
             payload.paused,
+            payload.require_approval,
         )
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 

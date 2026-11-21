@@ -146,7 +146,12 @@ impl Tool for PluginCreateTool {
     ) -> Result<ToolResult, HarnessError> {
         let args: CreatePluginArgs = match serde_json::from_value(arguments.clone()) {
             Ok(a) => a,
-            Err(e) => return Ok(ToolResult::error(call_id, format!("invalid arguments: {e}"))),
+            Err(e) => {
+                return Ok(ToolResult::error(
+                    call_id,
+                    format!("invalid arguments: {e}"),
+                ))
+            }
         };
 
         let id = slugify_plugin_id(&args.id);
@@ -651,7 +656,9 @@ export function apply(ctx: Context): void {
         assert!(String::from_utf8_lossy(&css_bytes).contains("sans-serif"));
 
         // Reject path traversal
-        assert!(manager.read_ui_asset("counter-app", "../plugin.json").is_err());
+        assert!(manager
+            .read_ui_asset("counter-app", "../plugin.json")
+            .is_err());
 
         // Invoke command -> live panel updates!
         let cmd_out = manager

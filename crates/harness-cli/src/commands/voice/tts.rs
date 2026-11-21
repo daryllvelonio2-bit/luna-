@@ -204,10 +204,7 @@ pub async fn stream_gemini_tts_sse(
     let candidates: Vec<&str> = if !model.is_empty() {
         vec![model]
     } else {
-        vec![
-            "gemini-3.8-flash-tts",
-            "gemini-2.5-flash-preview-tts",
-        ]
+        vec!["gemini-3.8-flash-tts", "gemini-2.5-flash-preview-tts"]
     };
 
     let start_idx =

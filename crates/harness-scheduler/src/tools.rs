@@ -95,7 +95,11 @@ impl Tool for ScheduleCreateTool {
                     "enum": ["existing_session", "single_new_session", "new_session_each_run"],
                     "description": "Where each run delivers its instruction"
                 },
-                "session_id": { "type": "string", "description": "Optional explicit session id for existing_session" }
+                "session_id": { "type": "string", "description": "Optional explicit session id for existing_session" },
+                "require_approval": {
+                    "type": "boolean",
+                    "description": "Whether tool calls during scheduled runs ask for permission (default: false — automations run without needing permissions unless changed)"
+                }
             },
             "required": ["name", "instruction", "rule"]
         })
@@ -120,15 +124,21 @@ impl Tool for ScheduleCreateTool {
         let name = args["name"].as_str().unwrap_or_default().to_string();
         let instruction = args["instruction"].as_str().unwrap_or_default().to_string();
         let rule = args["rule"].as_str().unwrap_or_default().to_string();
+        let require_approval = args["require_approval"].as_bool().unwrap_or(false);
         let target = parse_target(
             args["target"].as_str(),
             args["session_id"].as_str(),
             self.current_session_id.as_deref(),
         );
-        match self
-            .store
-            .create(None, name, instruction, rule, target, None)
-        {
+        match self.store.create_with_approval(
+            None,
+            name,
+            instruction,
+            rule,
+            target,
+            None,
+            require_approval,
+        ) {
             Ok(task) => Ok(ToolResult::success(
                 call_id,
                 serde_json::to_string_pretty(&task).unwrap_or_default(),
@@ -261,7 +271,8 @@ impl Tool for ScheduleEditTool {
                 "instruction": { "type": "string" },
                 "rule": { "type": "string" },
                 "target": { "type": "string", "enum": ["existing_session", "single_new_session", "new_session_each_run"] },
-                "session_id": { "type": "string" }
+                "session_id": { "type": "string" },
+                "require_approval": { "type": "boolean", "description": "Toggle whether scheduled runs require interactive approval (default false)" }
             },
             "required": ["id"]
         })
@@ -315,6 +326,7 @@ impl Tool for ScheduleEditTool {
                 let name = args["name"].as_str().map(str::to_string);
                 let instruction = args["instruction"].as_str().map(str::to_string);
                 let rule = args["rule"].as_str().map(str::to_string);
+                let require_approval = args["require_approval"].as_bool();
                 let target = args["target"].as_str().map(|mode| {
                     parse_target(
                         Some(mode),
@@ -322,7 +334,15 @@ impl Tool for ScheduleEditTool {
                         self.current_session_id.as_deref(),
                     )
                 });
-                match self.store.update(id, name, instruction, rule, target, None) {
+                match self.store.update_with_approval(
+                    id,
+                    name,
+                    instruction,
+                    rule,
+                    target,
+                    None,
+                    require_approval,
+                ) {
                     Ok(t) => Ok(ToolResult::success(
                         call_id,
                         serde_json::to_string_pretty(&t).unwrap_or_default(),

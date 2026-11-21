@@ -48,6 +48,7 @@ Once requirements are confirmed, use the scheduling tools:
     - `new_session_each_run` (default — isolated fresh session per run).
     - `single_new_session` (reuses one dedicated automation thread across runs).
     - `existing_session` (delivers into an existing session ID).
+  - `require_approval`: `false` by default — automations run autonomously without asking for tool permissions so scheduled runs never stall unattended. Users can change this later in the Automations view or via `schedule_edit`.
 - `schedule_list`, `schedule_view`, `schedule_edit`: Inspect, update, pause, or resume existing automations.
 
 ### 4. Summarize for the User

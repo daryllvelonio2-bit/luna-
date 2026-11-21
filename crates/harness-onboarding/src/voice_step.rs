@@ -32,8 +32,7 @@ pub const PANEL: Panel = Panel {
 pub const PROMPT: &str = "Select 1-5 ▸ ";
 
 /// The footer: what to type and what is recorded.
-pub const HINT: &str =
-    "Enter a number, then press Enter — blank keeps Voice disabled (5). \
+pub const HINT: &str = "Enter a number, then press Enter — blank keeps Voice disabled (5). \
      Change it anytime later with `luna setup voice` or `/voice on`.";
 
 /// How many rejected answers are tolerated before falling back to default.
@@ -85,7 +84,8 @@ pub const CHOICES: [Choice; 5] = [
     Choice {
         id: 5,
         name: "Disabled (no voice mode) [Default]",
-        detail: "Keep voice and microphone disabled. Luna runs strictly via text and terminal without \
+        detail:
+            "Keep voice and microphone disabled. Luna runs strictly via text and terminal without \
                  opening audio devices.",
         provider: "none",
         enabled: false,

@@ -143,12 +143,21 @@ ctx.schedules.register({
 });
 ```
 
-### 6. Host Capabilities (`ctx.net`, `ctx.process`, `ctx.fs`, `ctx.storage`, `ctx.settings`, `ctx.events`, `ctx.log`)
+### 6. Host Capabilities (`ctx.net`, `ctx.process`, `ctx.fs`, `ctx.storage`, `ctx.settings`, `ctx.events`, `ctx.workspace`, `ctx.env`, `ctx.log`)
+- **Async / Promises & Web Globals**:
+  - `apply(ctx)`, `ctx.tools.register(...)`, `ctx.commands.register(...)`, and `ctx.events.on(...)` handlers may be **sync OR `async`** (returning a `Promise`).
+  - Standard `console.log / warn / error` and `await fetch(url, opts)` (`res.ok`, `res.status`, `await res.text()`, `await res.json()`) work natively inside QuickJS alongside `ctx.net.fetch`.
+  - Multi-file TypeScript modules inside `<plugin_dir>/src/` can use relative imports (e.g. `import { helper } from './helper'`).
+- **Workspace & Metadata**:
+  - `ctx.workspace.root`: active workspace directory path
+  - `ctx.pluginDir`: plugin directory path on disk
+  - `ctx.manifest`: `{ id, name, version, description }`
+  - `ctx.env.get(key)`: read environment variable (`string | undefined`)
 - **HTTP (`ctx.net.fetch`)**:
   `const res = ctx.net.fetch(url, { method: 'GET', headers: { Accept: 'application/json' }, body: undefined });`
   Returns `{ ok: boolean, status: number, body: string, error?: string }`.
 - **Shell / Subprocess (`ctx.process.exec`)**:
-  `const res = ctx.process.exec('git', ['status', '--short'], '/path/to/cwd');`
+  `const res = ctx.process.exec('git', ['status', '--short'], ctx.workspace.root || undefined);`
   Returns `{ status: number, stdout: string, stderr: string }`.
 - **Filesystem (`ctx.fs`)**:
   - `ctx.fs.readText(path): string` (returns `"ERR:..."` on read error — check `ctx.fs.exists(path)` first)
@@ -161,13 +170,19 @@ ctx.schedules.register({
   - `ctx.storage.set(key, value)`
   - `ctx.storage.delete(key)` -> `boolean`
   - `ctx.storage.list()` -> `string[]`
+  - `ctx.storage.entries()` -> `Record<string, unknown>`
+  - `ctx.storage.clear()`
 - **Plugin Settings (`ctx.settings`)** (stored in plugin's `settings.json`):
-  - `ctx.settings.get(key?)` -> single value or full settings object
+  - `ctx.settings.all()` -> full settings object
+  - `ctx.settings.get(key?, defaultValue?)` -> single value (or `defaultValue`) or full settings object
   - `ctx.settings.set(key, value)`
 - **Events & Lifecycle**:
-  - `ctx.events.on(eventName, (payload) => { ... })` / `ctx.events.emit(eventName, payload)`
+  - `ctx.events.on(eventName, (payload) => { ... })` — host dispatches `session_started`, `turn_started`, `tool_executed`, `turn_finished`, and `settings_changed`.
+  - `ctx.events.emit(eventName, payload)`
   - `ctx.effect(() => { /* cleanup */ })`
   - `ctx.log('info' | 'warn' | 'error', 'message')`
+- **Live UI updates**:
+  - In custom HTML (`ui/index.html`), subscribe to live refreshes via `window.lunaPlugin.onUpdate((summary) => { ... })` so your UI automatically updates whenever tools run in chat!
 
 ## Manifest Schema (`plugin.json`)
 `plugin_create` writes `plugin.json` automatically using these fields:

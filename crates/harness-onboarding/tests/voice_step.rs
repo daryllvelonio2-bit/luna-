@@ -131,8 +131,8 @@ fn voice_step_blank_defaults_to_disabled() {
     let mut out = Vec::new();
     let mut pacer = InstantPacer;
 
-    let (voice, _) = run_voice(&layers, &mut reader, &mut out, &mut pacer, &columns)
-        .expect("blank voice runs");
+    let (voice, _) =
+        run_voice(&layers, &mut reader, &mut out, &mut pacer, &columns).expect("blank voice runs");
 
     assert!(!voice.enabled);
     assert_eq!(voice.provider, "none");

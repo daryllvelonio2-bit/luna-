@@ -39,24 +39,9 @@ pub fn write(notes: &[Note], out_dir: &Path) -> Result<WrittenGraph, HarnessErro
     let svg = out_dir.join("graph.svg");
     let wiki = out_dir.join("wiki");
 
-    export::to_json(
-        &built.graph,
-        &built.communities,
-        &built.labels,
-        &graph,
-    )?;
-    export::to_html(
-        &built.graph,
-        &built.communities,
-        &built.labels,
-        &html,
-    )?;
-    export::to_svg(
-        &built.graph,
-        &built.communities,
-        &built.labels,
-        &svg,
-    )?;
+    export::to_json(&built.graph, &built.communities, &built.labels, &graph)?;
+    export::to_html(&built.graph, &built.communities, &built.labels, &html)?;
+    export::to_svg(&built.graph, &built.communities, &built.labels, &svg)?;
     export::to_wiki(
         &built.graph,
         &built.communities,

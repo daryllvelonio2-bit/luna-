@@ -35,6 +35,7 @@ impl ScheduleStore {
                 rule TEXT NOT NULL,
                 delivery_target TEXT NOT NULL,
                 plugin_id TEXT,
+                require_approval INTEGER NOT NULL DEFAULT 0,
                 paused INTEGER NOT NULL DEFAULT 0,
                 completed INTEGER NOT NULL DEFAULT 0,
                 next_run_at TEXT,
@@ -46,6 +47,7 @@ impl ScheduleStore {
             [],
         )
         .map_err(|e| e.to_string())?;
+        ensure_require_approval_column(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -59,6 +61,28 @@ impl ScheduleStore {
         rule: String,
         delivery_target: DeliveryTarget,
         plugin_id: Option<String>,
+    ) -> Result<ScheduleTask, String> {
+        self.create_with_approval(
+            id,
+            name,
+            instruction,
+            rule,
+            delivery_target,
+            plugin_id,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_with_approval(
+        &self,
+        id: Option<String>,
+        name: String,
+        instruction: String,
+        rule: String,
+        delivery_target: DeliveryTarget,
+        plugin_id: Option<String>,
+        require_approval: bool,
     ) -> Result<ScheduleTask, String> {
         if name.trim().is_empty() {
             return Err("schedule name cannot be empty".to_string());
@@ -78,6 +102,7 @@ impl ScheduleStore {
             rule,
             delivery_target,
             plugin_id,
+            require_approval,
             paused: false,
             completed: next_run_at.is_none(),
             next_run_at,
@@ -97,15 +122,16 @@ impl ScheduleStore {
         let history_json = serde_json::to_string(&task.history).map_err(|e| e.to_string())?;
         conn.execute(
             "INSERT INTO schedules (
-                id, name, instruction, rule, delivery_target, plugin_id, paused, completed,
-                next_run_at, last_run_at, created_at, updated_at, history_json
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                id, name, instruction, rule, delivery_target, plugin_id, require_approval,
+                paused, completed, next_run_at, last_run_at, created_at, updated_at, history_json
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
             ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 instruction = excluded.instruction,
                 rule = excluded.rule,
                 delivery_target = excluded.delivery_target,
                 plugin_id = excluded.plugin_id,
+                require_approval = excluded.require_approval,
                 paused = excluded.paused,
                 completed = excluded.completed,
                 next_run_at = excluded.next_run_at,
@@ -119,6 +145,7 @@ impl ScheduleStore {
                 task.rule,
                 target_json,
                 task.plugin_id,
+                i32::from(task.require_approval),
                 i32::from(task.paused),
                 i32::from(task.completed),
                 task.next_run_at.map(|d| d.to_rfc3339()),
@@ -136,8 +163,8 @@ impl ScheduleStore {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, name, instruction, rule, delivery_target, plugin_id, paused, completed,
-                        next_run_at, last_run_at, created_at, updated_at, history_json
+                "SELECT id, name, instruction, rule, delivery_target, plugin_id, require_approval,
+                        paused, completed, next_run_at, last_run_at, created_at, updated_at, history_json
                  FROM schedules ORDER BY created_at DESC",
             )
             .map_err(|e| e.to_string())?;
@@ -152,8 +179,8 @@ impl ScheduleStore {
     pub fn get(&self, id: &str) -> Result<ScheduleTask, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.query_row(
-            "SELECT id, name, instruction, rule, delivery_target, plugin_id, paused, completed,
-                    next_run_at, last_run_at, created_at, updated_at, history_json
+            "SELECT id, name, instruction, rule, delivery_target, plugin_id, require_approval,
+                    paused, completed, next_run_at, last_run_at, created_at, updated_at, history_json
              FROM schedules WHERE id = ?1",
             params![id],
             row_to_task,
@@ -169,6 +196,20 @@ impl ScheduleStore {
         rule: Option<String>,
         delivery_target: Option<DeliveryTarget>,
         paused: Option<bool>,
+    ) -> Result<ScheduleTask, String> {
+        self.update_with_approval(id, name, instruction, rule, delivery_target, paused, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_with_approval(
+        &self,
+        id: &str,
+        name: Option<String>,
+        instruction: Option<String>,
+        rule: Option<String>,
+        delivery_target: Option<DeliveryTarget>,
+        paused: Option<bool>,
+        require_approval: Option<bool>,
     ) -> Result<ScheduleTask, String> {
         let mut task = self.get(id)?;
         let now = Utc::now();
@@ -196,6 +237,9 @@ impl ScheduleStore {
             if !p && !task.completed && task.next_run_at.is_none() {
                 task.next_run_at = compute_next_run(&task.rule, now)?;
             }
+        }
+        if let Some(req_app) = require_approval {
+            task.require_approval = req_app;
         }
         task.updated_at = now;
         self.upsert(&task)?;
@@ -251,16 +295,36 @@ impl ScheduleStore {
     }
 }
 
+fn ensure_require_approval_column(conn: &Connection) -> Result<(), String> {
+    let mut stmt = conn
+        .prepare("PRAGMA table_info(schedules)")
+        .map_err(|e| e.to_string())?;
+    let cols: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|e| e.to_string())?
+        .filter_map(Result::ok)
+        .collect();
+    if !cols.iter().any(|c| c == "require_approval") {
+        conn.execute(
+            "ALTER TABLE schedules ADD COLUMN require_approval INTEGER NOT NULL DEFAULT 0",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 fn row_to_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScheduleTask> {
     let target_raw: String = row.get(4)?;
     let target: DeliveryTarget = serde_json::from_str(&target_raw).unwrap_or_default();
-    let paused_int: i32 = row.get(6)?;
-    let completed_int: i32 = row.get(7)?;
-    let next_raw: Option<String> = row.get(8)?;
-    let last_raw: Option<String> = row.get(9)?;
-    let created_raw: String = row.get(10)?;
-    let updated_raw: String = row.get(11)?;
-    let history_raw: String = row.get(12)?;
+    let req_app_int: i32 = row.get(6)?;
+    let paused_int: i32 = row.get(7)?;
+    let completed_int: i32 = row.get(8)?;
+    let next_raw: Option<String> = row.get(9)?;
+    let last_raw: Option<String> = row.get(10)?;
+    let created_raw: String = row.get(11)?;
+    let updated_raw: String = row.get(12)?;
+    let history_raw: String = row.get(13)?;
 
     Ok(ScheduleTask {
         id: row.get(0)?,
@@ -269,6 +333,7 @@ fn row_to_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScheduleTask> {
         rule: row.get(3)?,
         delivery_target: target,
         plugin_id: row.get(5)?,
+        require_approval: req_app_int != 0,
         paused: paused_int != 0,
         completed: completed_int != 0,
         next_run_at: next_raw.and_then(|s| {

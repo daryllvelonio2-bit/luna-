@@ -303,10 +303,8 @@ pub fn parse_antigravity_stt_sse(body: &str) -> String {
                             .and_then(|p| p.as_array())
                         {
                             for p in parts {
-                                let is_thought = p
-                                    .get("thought")
-                                    .and_then(|t| t.as_bool())
-                                    .unwrap_or(false);
+                                let is_thought =
+                                    p.get("thought").and_then(|t| t.as_bool()).unwrap_or(false);
                                 if !is_thought {
                                     if let Some(t) = p.get("text").and_then(|t| t.as_str()) {
                                         transcript.push_str(t);
@@ -399,10 +397,7 @@ pub async fn transcribe_gemini_audio_with_keys(
             let mut transcript = String::new();
             if let Some(parts) = val["candidates"][0]["content"]["parts"].as_array() {
                 for p in parts {
-                    let is_thought = p
-                        .get("thought")
-                        .and_then(|t| t.as_bool())
-                        .unwrap_or(false);
+                    let is_thought = p.get("thought").and_then(|t| t.as_bool()).unwrap_or(false);
                     if !is_thought {
                         if let Some(t) = p["text"].as_str() {
                             transcript.push_str(t);

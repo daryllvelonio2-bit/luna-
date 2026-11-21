@@ -4,9 +4,14 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use rquickjs::{Context as JsContext, Function, Module, Runtime as JsRuntime, Value as JsValue};
+use rquickjs::loader::{ImportAttributes, Loader, Resolver};
+use rquickjs::{
+    Context as JsContext, Error as JsError, Function, Module, Object as JsObject,
+    Runtime as JsRuntime,
+};
 use tokio::sync::{mpsc, oneshot};
 
+use crate::compiler::compile_typescript;
 use crate::manifest::{
     PluginAgentEntry, PluginCommandSpec, PluginManifest, PluginScheduleDecl, PluginUiPanel,
     PluginWidget,
@@ -70,6 +75,15 @@ impl PluginRuntimeHandle {
         plugin_dir: PathBuf,
         js_code: String,
     ) -> Result<Self, String> {
+        Self::spawn_with_workspace(manifest, plugin_dir, None, js_code)
+    }
+
+    pub fn spawn_with_workspace(
+        manifest: PluginManifest,
+        plugin_dir: PathBuf,
+        workspace_root: Option<PathBuf>,
+        js_code: String,
+    ) -> Result<Self, String> {
         let tokio_handle = tokio::runtime::Handle::try_current().ok();
         let (init_tx, init_rx) = std::sync::mpsc::channel::<
             Result<(PluginRegistrations, mpsc::UnboundedSender<ActorCmd>), String>,
@@ -87,6 +101,7 @@ impl PluginRuntimeHandle {
                 run_plugin_actor(
                     manifest,
                     plugin_dir,
+                    workspace_root,
                     js_code,
                     tokio_handle,
                     live_panels_clone,
@@ -210,9 +225,63 @@ globalThis.__luna_state = {
   disposers: []
 };
 
+(function installWebGlobals() {
+  const fmtArgs = (args) =>
+    Array.from(args)
+      .map((a) => {
+        if (typeof a === 'string') return a;
+        try { return JSON.stringify(a); } catch (_) { return String(a); }
+      })
+      .join(' ');
+  globalThis.console = {
+    log: function() { __luna_host.log('info', fmtArgs(arguments)); },
+    info: function() { __luna_host.log('info', fmtArgs(arguments)); },
+    debug: function() { __luna_host.log('info', fmtArgs(arguments)); },
+    warn: function() { __luna_host.log('warn', fmtArgs(arguments)); },
+    error: function() { __luna_host.log('error', fmtArgs(arguments)); },
+  };
+  globalThis.fetch = function(url, options) {
+    return new Promise(function(resolve, reject) {
+      try {
+        const res = JSON.parse(__luna_host.netFetch(String(url), JSON.stringify(options || {})));
+        if (res.error && !res.status) {
+          reject(new Error(String(res.error)));
+          return;
+        }
+        const bodyText = String(res.body || '');
+        resolve({
+          ok: Boolean(res.ok),
+          status: Number(res.status || 0),
+          statusText: res.ok ? 'OK' : 'Error',
+          url: String(url),
+          text: function() { return Promise.resolve(bodyText); },
+          json: function() {
+            try { return Promise.resolve(JSON.parse(bodyText)); }
+            catch (e) { return Promise.reject(e); }
+          }
+        });
+      } catch (err) {
+        reject(err);
+      }
+    });
+  };
+})();
+
 globalThis.__luna_create_ctx = function(pluginId) {
+  const manifestObj = JSON.parse(__luna_host.manifestJson());
   return {
     pluginId: pluginId,
+    pluginDir: __luna_host.pluginDir(),
+    manifest: manifestObj,
+    workspace: {
+      root: __luna_host.workspaceRoot()
+    },
+    env: {
+      get: function(key) {
+        const val = __luna_host.envGet(String(key));
+        return val === null ? undefined : val;
+      }
+    },
     tools: {
       register: function(def, handler) {
         if (!def || !def.name) throw new Error('tool definition requires a name');
@@ -289,12 +358,29 @@ globalThis.__luna_create_ctx = function(pluginId) {
         __luna_host.storageSet(String(key), JSON.stringify(val === undefined ? null : val));
       },
       delete: function(key) { return __luna_host.storageDelete(String(key)); },
-      list: function() { return JSON.parse(__luna_host.storageList()); }
+      list: function() { return JSON.parse(__luna_host.storageList()); },
+      entries: function() {
+        const keys = JSON.parse(__luna_host.storageList());
+        const out = {};
+        for (const k of keys) {
+          const raw = __luna_host.storageGet(String(k));
+          out[k] = raw === '' ? null : JSON.parse(raw);
+        }
+        return out;
+      },
+      clear: function() {
+        const keys = JSON.parse(__luna_host.storageList());
+        for (const k of keys) {
+          __luna_host.storageDelete(String(k));
+        }
+      }
     },
     settings: {
-      get: function(key) {
+      all: function() { return JSON.parse(__luna_host.settingsAll()); },
+      get: function(key, defaultValue) {
         const all = JSON.parse(__luna_host.settingsAll());
-        return key ? all[key] : all;
+        if (!key) return all;
+        return Object.prototype.hasOwnProperty.call(all, key) ? all[key] : defaultValue;
       },
       set: function(key, val) {
         __luna_host.settingsSet(String(key), JSON.stringify(val === undefined ? null : val));
@@ -315,6 +401,9 @@ globalThis.__luna_create_ctx = function(pluginId) {
       },
       setCustomHtml: function(html) {
         __luna_host.setCustomHtml(html === null || html === undefined ? '' : String(html));
+      },
+      notify: function(message, kind) {
+        __luna_host.log(kind === 'error' ? 'error' : 'info', '[notify] ' + String(message || ''));
       }
     },
     effect: function(disposer) {
@@ -328,28 +417,62 @@ globalThis.__luna_create_ctx = function(pluginId) {
   };
 };
 
+globalThis.__luna_async_state = { done: true, ok: true, value: '' };
+
+globalThis.__luna_track_promise = function(factory) {
+  globalThis.__luna_async_state = { done: false, ok: false, value: '' };
+  let p;
+  try {
+    p = Promise.resolve(factory());
+  } catch (e) {
+    globalThis.__luna_async_state = { done: true, ok: false, value: e && e.stack ? String(e.stack) : String(e) };
+    return;
+  }
+  p.then(
+    function(out) {
+      const str = typeof out === 'string' ? out : JSON.stringify(out === undefined ? null : out);
+      globalThis.__luna_async_state = { done: true, ok: true, value: str };
+    },
+    function(err) {
+      const msg = err && err.stack ? String(err.stack) : String(err);
+      globalThis.__luna_async_state = { done: true, ok: false, value: msg };
+    }
+  );
+};
+
+globalThis.__luna_start_apply = function(applyFn, pluginId) {
+  const ctx = globalThis.__luna_create_ctx(pluginId);
+  globalThis.__luna_track_promise(function() { return applyFn(ctx); });
+};
+
 globalThis.__luna_invoke_tool = function(name, argsJson) {
-  const fn = globalThis.__luna_state.tools[name];
-  if (!fn) throw new Error('unknown plugin tool: ' + name);
-  const args = argsJson ? JSON.parse(argsJson) : {};
-  const out = fn(args);
-  return typeof out === 'string' ? out : JSON.stringify(out === undefined ? null : out);
+  globalThis.__luna_track_promise(function() {
+    const fn = globalThis.__luna_state.tools[name];
+    if (!fn) throw new Error('unknown plugin tool: ' + name);
+    const args = argsJson ? JSON.parse(argsJson) : {};
+    return fn(args);
+  });
 };
 
 globalThis.__luna_invoke_command = function(name, argsJson) {
-  const fn = globalThis.__luna_state.commands[name];
-  if (!fn) throw new Error('unknown plugin command: ' + name);
-  const args = argsJson ? JSON.parse(argsJson) : {};
-  const out = fn(args);
-  return typeof out === 'string' ? out : JSON.stringify(out === undefined ? null : out);
+  globalThis.__luna_track_promise(function() {
+    const fn = globalThis.__luna_state.commands[name];
+    if (!fn) throw new Error('unknown plugin command: ' + name);
+    const args = argsJson ? JSON.parse(argsJson) : {};
+    return fn(args);
+  });
 };
 
 globalThis.__luna_dispatch_event = function(eventName, payloadJson) {
-  const list = globalThis.__luna_state.events[eventName] || [];
-  const payload = payloadJson ? JSON.parse(payloadJson) : {};
-  for (const fn of list) {
-    fn(payload);
-  }
+  globalThis.__luna_track_promise(function() {
+    const list = globalThis.__luna_state.events[eventName] || [];
+    const payload = payloadJson ? JSON.parse(payloadJson) : {};
+    const tasks = [];
+    for (const fn of list) {
+      tasks.push(Promise.resolve(fn(payload)));
+    }
+    return Promise.all(tasks).then(function() { return 'ok'; });
+  });
 };
 
 globalThis.__luna_dispose_all = function() {
@@ -360,9 +483,126 @@ globalThis.__luna_dispose_all = function() {
 };
 "#;
 
+struct PluginModuleResolver {
+    plugin_dir: PathBuf,
+}
+
+impl Resolver for PluginModuleResolver {
+    fn resolve<'js>(
+        &mut self,
+        _ctx: &rquickjs::Ctx<'js>,
+        base: &str,
+        name: &str,
+        _attributes: Option<ImportAttributes<'js>>,
+    ) -> rquickjs::Result<String> {
+        if name == "@luna/sdk" {
+            return Ok("@luna/sdk".to_string());
+        }
+        if !name.starts_with('.') {
+            return Err(JsError::new_resolving(base, name));
+        }
+        let base_path = Path::new(base);
+        let base_dir = if base_path.is_absolute() {
+            base_path.parent().unwrap_or(&self.plugin_dir).to_path_buf()
+        } else {
+            // Entry module name is plugin_id; resolve relative imports from `src/` or plugin root.
+            let src_dir = self.plugin_dir.join("src");
+            if src_dir.is_dir() {
+                src_dir
+            } else {
+                self.plugin_dir.clone()
+            }
+        };
+        let raw_candidate = base_dir.join(name);
+        let candidates = [
+            raw_candidate.clone(),
+            raw_candidate.with_extension("ts"),
+            raw_candidate.with_extension("tsx"),
+            raw_candidate.with_extension("js"),
+            raw_candidate.with_extension("mjs"),
+            raw_candidate.with_extension("json"),
+            raw_candidate.join("index.ts"),
+            raw_candidate.join("index.js"),
+        ];
+        let root_canon = self
+            .plugin_dir
+            .canonicalize()
+            .unwrap_or_else(|_| self.plugin_dir.clone());
+        for cand in candidates {
+            if cand.is_file() {
+                if let Ok(canon) = cand.canonicalize() {
+                    if canon.starts_with(&root_canon) {
+                        return Ok(canon.to_string_lossy().into_owned());
+                    }
+                }
+            }
+        }
+        Err(JsError::new_resolving(base, name))
+    }
+}
+
+struct PluginModuleLoader;
+
+impl Loader for PluginModuleLoader {
+    fn load<'js>(
+        &mut self,
+        ctx: &rquickjs::Ctx<'js>,
+        name: &str,
+        _attributes: Option<ImportAttributes<'js>>,
+    ) -> rquickjs::Result<Module<'js>> {
+        if name == "@luna/sdk" {
+            return Module::declare(
+                ctx.clone(),
+                name,
+                "export const SDK_VERSION = '0.1.9';\nexport default { SDK_VERSION };",
+            );
+        }
+        let path = Path::new(name);
+        let raw = std::fs::read_to_string(path).map_err(|_| JsError::new_loading(name))?;
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let js = if ext == "ts" || ext == "tsx" {
+            compile_typescript(name, &raw).map_err(|_| JsError::new_loading(name))?
+        } else if ext == "json" {
+            format!("export default {raw};")
+        } else {
+            raw
+        };
+        Module::declare(ctx.clone(), name, js)
+    }
+}
+
+fn drain_pending_jobs(runtime: &JsRuntime) -> Result<(), String> {
+    while runtime.is_job_pending() {
+        runtime
+            .execute_pending_job()
+            .map_err(|err| format!("pending async job failed: {err:?}"))?;
+    }
+    Ok(())
+}
+
+fn take_async_result<'js>(ctx: &rquickjs::Ctx<'js>) -> Result<String, String> {
+    let state: JsObject<'js> = ctx
+        .globals()
+        .get("__luna_async_state")
+        .map_err(|e| format!("missing async state: {e}"))?;
+    let done: bool = state.get("done").unwrap_or(false);
+    if !done {
+        return Err("plugin async handler did not settle".to_string());
+    }
+    let ok: bool = state.get("ok").unwrap_or(false);
+    let val: String = state.get("value").unwrap_or_default();
+    if ok {
+        Ok(val)
+    } else {
+        Err(val)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn run_plugin_actor(
     manifest: PluginManifest,
     plugin_dir: PathBuf,
+    workspace_root: Option<PathBuf>,
     js_code: String,
     tokio_handle: Option<tokio::runtime::Handle>,
     live_panels: Arc<Mutex<Vec<PluginUiPanel>>>,
@@ -378,6 +618,12 @@ fn run_plugin_actor(
             return;
         }
     };
+    runtime.set_loader(
+        PluginModuleResolver {
+            plugin_dir: plugin_dir.clone(),
+        },
+        PluginModuleLoader,
+    );
     let context = match JsContext::full(&runtime) {
         Ok(ctx) => ctx,
         Err(e) => {
@@ -398,8 +644,9 @@ fn run_plugin_actor(
     let startup_res = context.with(|ctx| -> Result<(), String> {
         install_host_bindings(
             &ctx,
-            &manifest.id,
+            &manifest,
             &plugin_dir,
+            workspace_root.as_deref(),
             registrations.clone(),
             live_panels.clone(),
             live_custom_html.clone(),
@@ -419,32 +666,29 @@ fn run_plugin_actor(
         let _ = promise;
 
         if let Ok(apply_fn) = evaluated.get::<_, Function>("apply") {
-            let create_ctx: Function = ctx
+            let start_apply: Function = ctx
                 .globals()
-                .get("__luna_create_ctx")
-                .map_err(|e| format!("missing ctx factory: {e}"))?;
-            let plugin_ctx: JsValue = create_ctx
-                .call((manifest.id.as_str(),))
-                .map_err(|e| format!("ctx creation failed: {e}"))?;
-            apply_fn
-                .call::<_, JsValue>((plugin_ctx,))
+                .get("__luna_start_apply")
+                .map_err(|e| format!("missing apply starter: {e}"))?;
+            start_apply
+                .call::<_, ()>((apply_fn, manifest.id.as_str()))
                 .map_err(|e| format!("plugin apply(ctx) threw: {e}"))?;
         }
 
         Ok(())
     });
 
-    if startup_res.is_ok() {
-        while runtime.is_job_pending() {
-            if let Err(err) = runtime.execute_pending_job() {
-                let _ = init_tx.send(Err(format!("pending async job failed: {err:?}")));
-                return;
-            }
-        }
-    }
-
     if let Err(err) = startup_res {
         let _ = init_tx.send(Err(err));
+        return;
+    }
+
+    if let Err(err) = drain_pending_jobs(&runtime) {
+        let _ = init_tx.send(Err(err));
+        return;
+    }
+    if let Err(err) = context.with(|ctx| take_async_result(&ctx)) {
+        let _ = init_tx.send(Err(format!("plugin apply(ctx) failed: {err}")));
         return;
     }
 
@@ -464,15 +708,19 @@ fn run_plugin_actor(
                 args_json,
                 reply,
             } => {
-                let res = context.with(|ctx| -> Result<String, String> {
+                let start = context.with(|ctx| -> Result<(), String> {
                     let invoker: Function = ctx
                         .globals()
                         .get("__luna_invoke_tool")
                         .map_err(|e| e.to_string())?;
                     invoker
-                        .call::<_, String>((name, args_json))
+                        .call::<_, ()>((name, args_json))
                         .map_err(|e| e.to_string())
                 });
+                let res = match start.and_then(|()| drain_pending_jobs(&runtime)) {
+                    Ok(()) => context.with(|ctx| take_async_result(&ctx)),
+                    Err(e) => Err(e),
+                };
                 let _ = reply.send(res);
             }
             ActorCmd::CallCommand {
@@ -480,15 +728,19 @@ fn run_plugin_actor(
                 args_json,
                 reply,
             } => {
-                let res = context.with(|ctx| -> Result<String, String> {
+                let start = context.with(|ctx| -> Result<(), String> {
                     let invoker: Function = ctx
                         .globals()
                         .get("__luna_invoke_command")
                         .map_err(|e| e.to_string())?;
                     invoker
-                        .call::<_, String>((name, args_json))
+                        .call::<_, ()>((name, args_json))
                         .map_err(|e| e.to_string())
                 });
+                let res = match start.and_then(|()| drain_pending_jobs(&runtime)) {
+                    Ok(()) => context.with(|ctx| take_async_result(&ctx)),
+                    Err(e) => Err(e),
+                };
                 let _ = reply.send(res);
             }
             ActorCmd::EmitEvent {
@@ -496,7 +748,7 @@ fn run_plugin_actor(
                 payload_json,
                 reply,
             } => {
-                let res = context.with(|ctx| -> Result<(), String> {
+                let start = context.with(|ctx| -> Result<(), String> {
                     let invoker: Function = ctx
                         .globals()
                         .get("__luna_dispatch_event")
@@ -505,6 +757,10 @@ fn run_plugin_actor(
                         .call::<_, ()>((event, payload_json))
                         .map_err(|e| e.to_string())
                 });
+                let res = match start.and_then(|()| drain_pending_jobs(&runtime)) {
+                    Ok(()) => context.with(|ctx| take_async_result(&ctx)).map(|_| ()),
+                    Err(e) => Err(e),
+                };
                 let _ = reply.send(res);
             }
             ActorCmd::Dispose { reply } => {
@@ -537,17 +793,53 @@ fn upsert_panel(panels: &mut Vec<PluginUiPanel>, panel: PluginUiPanel) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn install_host_bindings<'js>(
     ctx: &rquickjs::Ctx<'js>,
-    plugin_id: &str,
+    manifest: &PluginManifest,
     plugin_dir: &Path,
+    workspace_root: Option<&Path>,
     regs: Arc<Mutex<PluginRegistrations>>,
     live_panels: Arc<Mutex<Vec<PluginUiPanel>>>,
     live_custom_html: Arc<Mutex<Option<String>>>,
     storage: Arc<PluginStorage>,
     tokio_handle: Option<tokio::runtime::Handle>,
 ) -> rquickjs::Result<()> {
+    let plugin_id = manifest.id.as_str();
     let host = rquickjs::Object::new(ctx.clone())?;
+
+    // Metadata bindings (manifest, pluginDir, workspaceRoot, envGet)
+    {
+        let m_json = serde_json::json!({
+            "id": manifest.id,
+            "name": manifest.name,
+            "version": manifest.version,
+            "description": manifest.description,
+        })
+        .to_string();
+        host.set(
+            "manifestJson",
+            Function::new(ctx.clone(), move || -> String { m_json.clone() })?,
+        )?;
+        let p_dir = plugin_dir.display().to_string();
+        host.set(
+            "pluginDir",
+            Function::new(ctx.clone(), move || -> String { p_dir.clone() })?,
+        )?;
+        let ws_root = workspace_root
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        host.set(
+            "workspaceRoot",
+            Function::new(ctx.clone(), move || -> String { ws_root.clone() })?,
+        )?;
+        host.set(
+            "envGet",
+            Function::new(ctx.clone(), |key: String| -> Option<String> {
+                std::env::var(key).ok()
+            })?,
+        )?;
+    }
 
     // registerTool
     {
@@ -881,7 +1173,6 @@ fn install_host_bindings<'js>(
 
     // getPanels
     {
-        let live_panels = live_panels;
         host.set(
             "getPanels",
             Function::new(ctx.clone(), move || -> String {

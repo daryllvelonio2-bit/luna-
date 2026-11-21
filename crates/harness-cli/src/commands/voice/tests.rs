@@ -278,7 +278,10 @@ fn test_generate_instant_voice_ack_matches_natural_conversational_patterns() {
     // 3. Affirmation / Thanks
     let thanks = super::summary::generate_instant_voice_ack("thanks luna");
     assert!(
-        thanks.contains("got it") || thanks.contains("help") || thanks.contains("Sounds good") || thanks.contains("Understood"),
+        thanks.contains("got it")
+            || thanks.contains("help")
+            || thanks.contains("Sounds good")
+            || thanks.contains("Understood"),
         "thanks should yield a natural closing/acknowledgment: {thanks}"
     );
 
@@ -353,7 +356,10 @@ fn test_extract_ready_speech_chunks_sentence_and_word_boundary() {
         &mut in_code,
         true,
     );
-    assert_eq!(chunks_dot, vec!["The server is ready, and all services are online."]);
+    assert_eq!(
+        chunks_dot,
+        vec!["The server is ready, and all services are online."]
+    );
     assert_eq!(consumed_dot, 50);
 
     let (chunks_words, consumed_words) = extract_ready_speech_chunks(

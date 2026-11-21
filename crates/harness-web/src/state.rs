@@ -87,7 +87,10 @@ impl WebState {
             .unwrap_or(std::path::Path::new("."));
         let plugins_dir = luna_dir.join("plugins");
         let ws_plugins = config.paths.workspace_root.join(".luna/plugins");
-        let plugin_manager = Arc::new(PluginManager::new(plugins_dir, Some(ws_plugins)));
+        let plugin_manager = Arc::new(
+            PluginManager::new(plugins_dir, Some(ws_plugins))
+                .with_workspace_root(config.paths.workspace_root.clone()),
+        );
         if let Err(err) = ensure_scheduler_plugin(&plugin_manager) {
             tracing::warn!("failed to ensure builtin scheduler plugin: {}", err);
         }
@@ -166,6 +169,16 @@ impl WebState {
         &self,
         session_id: &str,
         plugin_agent_id: Option<String>,
+    ) -> Result<Arc<ActiveSessionHandle>, HarnessError> {
+        self.get_or_open_session_with_approval(session_id, plugin_agent_id, None)
+            .await
+    }
+
+    pub async fn get_or_open_session_with_approval(
+        &self,
+        session_id: &str,
+        plugin_agent_id: Option<String>,
+        approval_mode_override: Option<harness_core::ApprovalMode>,
     ) -> Result<Arc<ActiveSessionHandle>, HarnessError> {
         let mut map = self.sessions.lock().await;
         if let Some(handle) = map.get(session_id) {
@@ -255,12 +268,31 @@ impl WebState {
             explicit_model: false,
             system_prompt_prefix: agent_entry.as_ref().map(|a| a.system_prompt.clone()),
             extra_tools,
+            approval_mode_override,
         };
 
         let event_tx = self.event_tx.clone();
         let sid = session_id.to_string();
+        let plugin_mgr_for_obs = self.plugin_manager.clone();
         let observer: harness_core::AgentObserver = Arc::new(move |event| {
             let app_evt = from_agent_event(&sid, event);
+            if let AppEvent::ToolExecuted {
+                session_id: ref esid,
+                ref name,
+                ref output,
+                ..
+            } = app_evt
+            {
+                let pm = plugin_mgr_for_obs.clone();
+                let payload = serde_json::json!({
+                    "sessionId": esid,
+                    "name": name,
+                    "output": output,
+                });
+                tokio::spawn(async move {
+                    pm.dispatch_event("tool_executed", payload).await;
+                });
+            }
             let _ = event_tx.send(app_evt);
         });
 
@@ -367,6 +399,16 @@ impl WebState {
                 .insert(session_id.to_string(), agent_id);
         }
 
+        let pm = self.plugin_manager.clone();
+        let sid_evt = session_id.to_string();
+        tokio::spawn(async move {
+            pm.dispatch_event(
+                "session_started",
+                serde_json::json!({ "sessionId": sid_evt }),
+            )
+            .await;
+        });
+
         Ok(handle)
     }
 
@@ -396,8 +438,13 @@ impl WebState {
         task: &ScheduleTask,
         session_id: String,
     ) -> Result<DeliveryReceipt, String> {
+        let desired_approval = if task.require_approval {
+            harness_core::ApprovalMode::Ask
+        } else {
+            harness_core::ApprovalMode::Allow
+        };
         let handle = self
-            .get_or_open_session(&session_id, None)
+            .get_or_open_session_with_approval(&session_id, None, Some(desired_approval))
             .await
             .map_err(|e| format!("failed to open automation session: {e}"))?;
 
@@ -413,15 +460,27 @@ impl WebState {
             query: task.instruction.clone(),
         });
         let started = std::time::Instant::now();
+        let plugin_gen_before = self.plugin_manager.generation();
 
+        let is_existing_target =
+            matches!(task.delivery_target, DeliveryTarget::ExistingSession { .. });
         let (result, provider, model) = {
             let rt = handle.runtime.lock().await;
+            let prev_allow_all = rt
+                .allow_all_session
+                .swap(!task.require_approval, Ordering::SeqCst);
             let ag = rt.agent.lock().await;
             let res = ag.run_turn(&task.instruction, cancel).await;
+            if is_existing_target {
+                rt.allow_all_session.store(prev_allow_all, Ordering::SeqCst);
+            }
             (res, rt.current_provider.clone(), rt.current_model.clone())
         };
 
         handle.turn_running.store(false, Ordering::SeqCst);
+        if self.plugin_manager.generation() != plugin_gen_before {
+            self.sync_plugins_after_change().await;
+        }
         let elapsed = started.elapsed().as_millis() as u64;
 
         match result {

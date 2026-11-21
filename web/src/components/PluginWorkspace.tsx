@@ -1,12 +1,13 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api';
-import type { PluginSummary, PluginWidget } from '../types';
+import type { PluginSourceSnapshot, PluginSummary, PluginWidget } from '../types';
 import { MarkdownContent } from './MarkdownContent';
 import {
   AppWindow,
   ArrowLeft,
   Bot,
   Check,
+  Code2,
   LayoutGrid,
   Play,
   RefreshCw,
@@ -16,7 +17,7 @@ import {
   X,
 } from 'lucide-react';
 
-type WorkspaceTab = 'ui' | 'panels' | 'runner' | 'settings';
+type WorkspaceTab = 'ui' | 'panels' | 'runner' | 'settings' | 'source';
 
 interface PluginWorkspaceProps {
   plugin: PluginSummary;
@@ -75,11 +76,28 @@ export const PluginWorkspace: React.FC<PluginWorkspaceProps> = ({
   );
   const [settingsSaved, setSettingsSaved] = useState(false);
 
+  // Source snapshot
+  const [sourceSnapshot, setSourceSnapshot] = useState<PluginSourceSnapshot | null>(null);
+  const [activeSourceFile, setActiveSourceFile] = useState<string>('src/index.ts');
+
   const iframeRef = useRef<HTMLIFrameElement>(null);
 
   useEffect(() => {
     setSettingsDraft(plugin.settings || {});
-  }, [plugin.id, plugin.settings]);
+    const win = iframeRef.current?.contentWindow;
+    if (win) {
+      win.postMessage({ type: 'luna:plugin-updated', summary: plugin }, '*');
+    }
+  }, [plugin]);
+
+  useEffect(() => {
+    if (tab === 'source') {
+      api
+        .getPluginSource(plugin.id)
+        .then((snap) => setSourceSnapshot(snap))
+        .catch(() => {});
+    }
+  }, [tab, plugin.id, refreshNonce]);
 
   useEffect(() => {
     setTab(
@@ -474,6 +492,14 @@ export const PluginWorkspace: React.FC<PluginWorkspaceProps> = ({
             <span>Settings</span>
           </button>
         )}
+        <button
+          type="button"
+          className={`plugin-tab-btn ${tab === 'source' ? 'active' : ''}`}
+          onClick={() => setTab('source')}
+        >
+          <Code2 size={13} />
+          <span>Source</span>
+        </button>
       </div>
 
       <div className="plugin-workspace-body">
@@ -690,7 +716,44 @@ export const PluginWorkspace: React.FC<PluginWorkspaceProps> = ({
           </div>
         )}
 
-        {!hasUi && !hasPanels && !hasRunner && !hasSettings && (
+        {tab === 'source' && (
+          <div className="plugin-panels-scroll">
+            {!sourceSnapshot ? (
+              <div className="empty-inline-flat">Loading plugin package files…</div>
+            ) : (
+              <>
+                <div className="plugin-runner-mode" style={{ flexWrap: 'wrap' }}>
+                  {['src/index.ts', 'plugin.json', ...Object.keys(sourceSnapshot.ui_files).map((f) => `ui/${f}`)].map(
+                    (fname) => (
+                      <button
+                        key={fname}
+                        type="button"
+                        className={`pill-btn ${activeSourceFile === fname ? 'active' : ''}`}
+                        onClick={() => setActiveSourceFile(fname)}
+                      >
+                        {fname}
+                      </button>
+                    )
+                  )}
+                </div>
+                <div className="plugin-output-box">
+                  <div className="plugin-output-head">
+                    <span>{activeSourceFile}</span>
+                  </div>
+                  <pre>
+                    {activeSourceFile === 'src/index.ts'
+                      ? sourceSnapshot.ts_source
+                      : activeSourceFile === 'plugin.json'
+                      ? JSON.stringify(sourceSnapshot.manifest, null, 2)
+                      : sourceSnapshot.ui_files[activeSourceFile.replace(/^ui\//, '')] || ''}
+                  </pre>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
+        {!hasUi && !hasPanels && !hasRunner && !hasSettings && tab !== 'source' && (
           <div className="empty-state">
             <p>This plugin has no UI panels, commands, or settings yet.</p>
           </div>

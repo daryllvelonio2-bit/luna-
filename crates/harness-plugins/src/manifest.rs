@@ -224,6 +224,8 @@ pub struct PluginSummary {
     pub enabled: bool,
     pub loaded: bool,
     pub builtin: bool,
+    #[serde(default)]
+    pub scope: String,
     pub path: PathBuf,
     pub last_error: Option<String>,
     pub has_custom_ui: bool,

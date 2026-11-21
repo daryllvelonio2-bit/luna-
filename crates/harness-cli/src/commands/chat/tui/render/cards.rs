@@ -563,7 +563,10 @@ pub(crate) fn render_completed_turn_process(
         Span::styled(meta, Style::default().fg(text_muted()).bg(bg_canvas())),
         Span::styled(hint, Style::default().fg(text_dim()).bg(bg_canvas())),
     ]));
-    hit_targets.push((header_idx, TranscriptClickTarget::ToggleTurnProcess(turn_idx)));
+    hit_targets.push((
+        header_idx,
+        TranscriptClickTarget::ToggleTurnProcess(turn_idx),
+    ));
     out.push(Line::default());
 
     if !is_turn_expanded {

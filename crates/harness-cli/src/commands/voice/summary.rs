@@ -423,8 +423,9 @@ pub fn strip_wake_word_and_direct_address(input: &str) -> String {
 
     for prefix in ["hey luna", "ok luna", "okay luna", "luna"] {
         if lower.starts_with(prefix) {
-            text = text[prefix.len()..]
-                .trim_start_matches(|c: char| c == ',' || c == ':' || c == '-' || c.is_whitespace());
+            text = text[prefix.len()..].trim_start_matches(|c: char| {
+                c == ',' || c == ':' || c == '-' || c.is_whitespace()
+            });
             break;
         }
     }
@@ -461,7 +462,7 @@ pub fn generate_instant_voice_ack(user_query: &str) -> String {
 
     let lower = cleaned
         .to_ascii_lowercase()
-        .trim_end_matches(|c: char| c == '.' || c == '?' || c == '!')
+        .trim_end_matches(['.', '?', '!'])
         .to_string();
 
     // 1. Casual greetings
@@ -529,8 +530,18 @@ pub fn generate_instant_voice_ack(user_query: &str) -> String {
 
     // 4. Questions starting with question words ("what is...", "can you...", "how do I...")
     let question_starters = [
-        "what", "where", "how", "why", "when", "who", "which", "can you", "could you",
-        "is there", "are there", "do you",
+        "what",
+        "where",
+        "how",
+        "why",
+        "when",
+        "who",
+        "which",
+        "can you",
+        "could you",
+        "is there",
+        "are there",
+        "do you",
     ];
     for q in question_starters {
         if lower.starts_with(q) {
@@ -580,7 +591,7 @@ pub fn generate_instant_voice_ack(user_query: &str) -> String {
         if lower.starts_with(verb) {
             let rest = cleaned[verb.len()..]
                 .trim()
-                .trim_end_matches(|c: char| c == '.' || c == '?' || c == '!');
+                .trim_end_matches(['.', '?', '!']);
             let words: Vec<&str> = rest.split_whitespace().collect();
             if !words.is_empty() {
                 let rest_lower = rest.to_ascii_lowercase();
@@ -604,8 +615,8 @@ pub fn generate_instant_voice_ack(user_query: &str) -> String {
                     format!("Alright, let's take a look at {topic}."),
                     format!("Got it, working on {topic} right away."),
                 ];
-                let idx =
-                    ACK_ROTATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % templates.len();
+                let idx = ACK_ROTATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    % templates.len();
                 return templates[idx].clone();
             }
             break;
@@ -620,7 +631,7 @@ pub fn generate_instant_voice_ack(user_query: &str) -> String {
             matches!(l.as_str(), "yes" | "no")
         })
     {
-        let clean = cleaned.trim_end_matches(|c: char| c == '.' || c == '?' || c == '!');
+        let clean = cleaned.trim_end_matches(['.', '?', '!']);
         let topics = [
             format!("Looking into {clean} for you now."),
             format!("On it — checking the details of {clean} right away."),

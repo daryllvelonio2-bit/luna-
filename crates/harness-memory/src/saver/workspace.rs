@@ -73,7 +73,10 @@ mod tests {
         let roots = candidates(&configured, &tail);
         assert_eq!(roots[0], PathBuf::from("/work/app"));
         assert_eq!(
-            roots.iter().filter(|root| *root == &PathBuf::from("/work/app")).count(),
+            roots
+                .iter()
+                .filter(|root| *root == &PathBuf::from("/work/app"))
+                .count(),
             1
         );
         assert!(roots.contains(&PathBuf::from("/work/app/src/main.rs")));

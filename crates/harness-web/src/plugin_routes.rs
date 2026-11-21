@@ -16,6 +16,7 @@ use crate::state::WebState;
 pub fn plugin_router() -> Router<Arc<WebState>> {
     Router::new()
         .route("/api/plugins/{plugin_id}", get(get_plugin))
+        .route("/api/plugins/{plugin_id}/source", get(get_plugin_source))
         .route("/api/plugins/{plugin_id}/reload", post(reload_plugin))
         .route(
             "/api/plugins/{plugin_id}/commands/{command_name}",
@@ -57,7 +58,23 @@ async fn get_plugin(
         .plugin_manager
         .get_summary(&plugin_id)
         .map(Json)
-        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("plugin '{plugin_id}' not found")))
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                format!("plugin '{plugin_id}' not found"),
+            )
+        })
+}
+
+async fn get_plugin_source(
+    State(state): State<Arc<WebState>>,
+    Path(plugin_id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    state
+        .plugin_manager
+        .read_package_snapshot(&plugin_id)
+        .map(Json)
+        .map_err(|e| (StatusCode::NOT_FOUND, e))
 }
 
 async fn reload_plugin(
@@ -121,7 +138,12 @@ async fn get_plugin_settings(
     let summary = state
         .plugin_manager
         .get_summary(&plugin_id)
-        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("plugin '{plugin_id}' not found")))?;
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                format!("plugin '{plugin_id}' not found"),
+            )
+        })?;
     Ok(Json(summary.settings))
 }
 
@@ -144,7 +166,13 @@ async fn serve_plugin_ui_index(
     headers: HeaderMap,
     Query(query): Query<UiThemeQuery>,
 ) -> Response {
-    serve_ui_inner(state, &plugin_id, "index.html", headers, query.theme.as_deref())
+    serve_ui_inner(
+        state,
+        &plugin_id,
+        "index.html",
+        headers,
+        query.theme.as_deref(),
+    )
 }
 
 async fn serve_plugin_ui_asset(
@@ -180,7 +208,10 @@ fn serve_ui_inner(
     let Ok((bytes, mime)) = state.plugin_manager.read_ui_asset(plugin_id, rel_path) else {
         return (
             StatusCode::NOT_FOUND,
-            format!("UI asset '{}' not found for plugin '{}'", rel_path, plugin_id),
+            format!(
+                "UI asset '{}' not found for plugin '{}'",
+                rel_path, plugin_id
+            ),
         )
             .into_response();
     };
@@ -264,10 +295,16 @@ body {{
   var pid = {pid_json};
   var enc = encodeURIComponent(pid);
   var root = document.documentElement;
+  var updateListeners = [];
   root.setAttribute('data-theme', '{theme_norm}');
   window.addEventListener('message', function(ev) {{
     if (ev && ev.data && ev.data.type === 'luna:theme' && (ev.data.theme === 'dark' || ev.data.theme === 'light')) {{
       root.setAttribute('data-theme', ev.data.theme);
+    }}
+    if (ev && ev.data && ev.data.type === 'luna:plugin-updated') {{
+      for (var i = 0; i < updateListeners.length; i++) {{
+        try {{ updateListeners[i](ev.data.summary); }} catch (_) {{}}
+      }}
     }}
   }});
   async function postJson(url, payload) {{
@@ -314,6 +351,16 @@ body {{
     }},
     refreshParent: function() {{
       window.parent.postMessage({{ type: 'luna:plugin:refresh', pluginId: pid }}, '*');
+    }},
+    onUpdate: function(cb) {{
+      if (typeof cb === 'function') {{
+        updateListeners.push(cb);
+        return function() {{
+          var idx = updateListeners.indexOf(cb);
+          if (idx >= 0) updateListeners.splice(idx, 1);
+        }};
+      }}
+      return function() {{}};
     }}
   }};
 }})();
@@ -533,12 +580,20 @@ export function apply(ctx: Context): void {
             .await
             .unwrap();
         assert_eq!(tool_resp["ok"], true);
-        assert!(tool_resp["output"].as_str().unwrap().contains("Ship custom plugin UI"));
-        assert_eq!(tool_resp["summary"]["panels"][0]["widgets"][0]["value"], "1");
+        assert!(tool_resp["output"]
+            .as_str()
+            .unwrap()
+            .contains("Ship custom plugin UI"));
+        assert_eq!(
+            tool_resp["summary"]["panels"][0]["widgets"][0]["value"],
+            "1"
+        );
 
         // 5. Invoke plugin command via REST bridge -> updates progress widget live
         let cmd_resp: serde_json::Value = client
-            .post(format!("{base}/api/plugins/task-board/commands/mark_first_done"))
+            .post(format!(
+                "{base}/api/plugins/task-board/commands/mark_first_done"
+            ))
             .json(&serde_json::json!({}))
             .send()
             .await
@@ -560,9 +615,58 @@ export function apply(ctx: Context): void {
             .await
             .unwrap();
         assert_eq!(
-            settings_resp.settings.get("board_name").and_then(|v| v.as_str()),
+            settings_resp
+                .settings
+                .get("board_name")
+                .and_then(|v| v.as_str()),
             Some("Q4 Launch")
         );
+
+        // 7. Fetch plugin source snapshot (/api/plugins/{id}/source)
+        let source_resp: serde_json::Value = client
+            .get(format!("{base}/api/plugins/task-board/source"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(source_resp["ts_source"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("add_task"));
+        assert!(source_resp["ui_files"]["app.js"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("task-board ready"));
+
+        // 8. Schedules default to require_approval=false and can be toggled to true
+        let created_sched: serde_json::Value = client
+            .post(format!("{base}/api/schedules"))
+            .json(&serde_json::json!({
+                "name": "Autonomous Check",
+                "instruction": "Run daily diagnostics",
+                "rule": "daily:09:00"
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(created_sched["require_approval"], false);
+        let sched_id = created_sched["id"].as_str().unwrap();
+
+        let updated_sched: serde_json::Value = client
+            .put(format!("{base}/api/schedules/{sched_id}"))
+            .json(&serde_json::json!({ "require_approval": true }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(updated_sched["require_approval"], true);
 
         srv.abort();
     }

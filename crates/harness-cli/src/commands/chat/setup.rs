@@ -763,10 +763,10 @@ async fn register_tools(
         .unwrap_or(std::path::Path::new("."))
         .join("plugins");
     let ws_plugins_dir = config.paths.workspace_root.join(".luna/plugins");
-    let plugin_mgr = Arc::new(harness_plugins::PluginManager::new(
-        plugins_dir,
-        Some(ws_plugins_dir),
-    ));
+    let plugin_mgr = Arc::new(
+        harness_plugins::PluginManager::new(plugins_dir, Some(ws_plugins_dir))
+            .with_workspace_root(config.paths.workspace_root.clone()),
+    );
     let _ = plugin_mgr.discover_and_load();
     let reg_dyn: Arc<dyn ToolRegistry> = registry.clone();
     harness_plugins::register_plugin_tools(&reg_dyn, plugin_mgr).await?;

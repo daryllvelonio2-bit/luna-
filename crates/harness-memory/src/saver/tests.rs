@@ -626,7 +626,10 @@ async fn a_note_in_a_source_workspace_is_filed_under_that_project() {
     let stored = notes.list_notes(10, 0).await.expect("lists");
     assert_eq!(stored.len(), 1);
     assert!(
-        stored[0].tags.iter().any(|tag| tag == &format!("project:{slug}")),
+        stored[0]
+            .tags
+            .iter()
+            .any(|tag| tag == &format!("project:{slug}")),
         "the note must carry the project tag it was filed under: {:?}",
         stored[0].tags
     );
@@ -642,7 +645,11 @@ async fn a_note_in_a_source_workspace_is_filed_under_that_project() {
 async fn a_note_write_leaves_the_project_graph_behind() {
     let root = std::env::temp_dir().join(format!("luna-saver-graph-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&root).expect("workspace");
-    std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"graph-demo\"\n").expect("marker");
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"graph-demo\"\n",
+    )
+    .expect("marker");
     let slug = root
         .file_name()
         .and_then(|name| name.to_str())

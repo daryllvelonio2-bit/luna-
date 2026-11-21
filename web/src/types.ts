@@ -175,6 +175,7 @@ export interface PluginSummary {
   enabled: boolean;
   loaded: boolean;
   builtin: boolean;
+  scope?: string;
   path?: string;
   last_error?: string | null;
   has_custom_ui?: boolean;
@@ -193,6 +194,12 @@ export interface PluginExecResponse {
   ok: boolean;
   output: string;
   summary?: PluginSummary | null;
+}
+
+export interface PluginSourceSnapshot {
+  manifest: Record<string, unknown>;
+  ts_source: string;
+  ui_files: Record<string, string>;
 }
 
 export type DeliveryTarget =
@@ -214,6 +221,7 @@ export interface ScheduleTask {
   rule: string;
   delivery_target: DeliveryTarget;
   plugin_id?: string | null;
+  require_approval?: boolean;
   paused: boolean;
   completed: boolean;
   last_run_at?: string | null;

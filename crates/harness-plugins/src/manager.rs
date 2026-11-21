@@ -31,18 +31,30 @@ struct LoadedPlugin {
 pub struct PluginManager {
     plugins_dir: PathBuf,
     workspace_plugins_dir: Option<PathBuf>,
+    workspace_root: Option<PathBuf>,
     plugins: RwLock<BTreeMap<String, LoadedPlugin>>,
     generation: AtomicU64,
 }
 
 impl PluginManager {
     pub fn new(plugins_dir: PathBuf, workspace_plugins_dir: Option<PathBuf>) -> Self {
+        let workspace_root = workspace_plugins_dir
+            .as_ref()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.parent())
+            .map(Path::to_path_buf);
         Self {
             plugins_dir,
             workspace_plugins_dir,
+            workspace_root,
             plugins: RwLock::new(BTreeMap::new()),
             generation: AtomicU64::new(0),
         }
+    }
+
+    pub fn with_workspace_root(mut self, root: PathBuf) -> Self {
+        self.workspace_root = Some(root);
+        self
     }
 
     pub fn generation(&self) -> u64 {
@@ -111,7 +123,7 @@ impl PluginManager {
         }
 
         for (id, (manifest, dir)) in discovered {
-            let loaded = Self::load_one(manifest, dir);
+            let loaded = Self::load_one(manifest, dir, self.workspace_root.clone());
             self.plugins
                 .write()
                 .unwrap_or_else(|e| e.into_inner())
@@ -122,7 +134,11 @@ impl PluginManager {
         Ok(())
     }
 
-    fn load_one(manifest: PluginManifest, dir: PathBuf) -> LoadedPlugin {
+    fn load_one(
+        manifest: PluginManifest,
+        dir: PathBuf,
+        workspace_root: Option<PathBuf>,
+    ) -> LoadedPlugin {
         if !manifest.enabled {
             return LoadedPlugin {
                 manifest,
@@ -134,8 +150,12 @@ impl PluginManager {
 
         let js_result = Self::ensure_compiled(&manifest, &dir);
         match js_result {
-            Ok(js_code) => match PluginRuntimeHandle::spawn(manifest.clone(), dir.clone(), js_code)
-            {
+            Ok(js_code) => match PluginRuntimeHandle::spawn_with_workspace(
+                manifest.clone(),
+                dir.clone(),
+                workspace_root,
+                js_code,
+            ) {
                 Ok(rt) => LoadedPlugin {
                     manifest,
                     dir,
@@ -269,7 +289,7 @@ impl PluginManager {
                     rt.shutdown();
                 }
             }
-            let loaded = Self::load_one(manifest.clone(), dir);
+            let loaded = Self::load_one(manifest.clone(), dir, self.workspace_root.clone());
             guard.insert(manifest.id.clone(), loaded);
         }
         self.bump_generation();
@@ -309,7 +329,7 @@ impl PluginManager {
             (entry.manifest.clone(), entry.dir.clone())
         };
 
-        let reloaded = Self::load_one(manifest, dir);
+        let reloaded = Self::load_one(manifest, dir, self.workspace_root.clone());
         self.plugins
             .write()
             .unwrap_or_else(|e| e.into_inner())
@@ -337,7 +357,7 @@ impl PluginManager {
             (fresh_manifest, entry.dir.clone())
         };
 
-        let reloaded = Self::load_one(manifest, dir);
+        let reloaded = Self::load_one(manifest, dir, self.workspace_root.clone());
         self.plugins
             .write()
             .unwrap_or_else(|e| e.into_inner())
@@ -419,14 +439,44 @@ impl PluginManager {
         std::fs::read_to_string(dir.join(entry)).map_err(|e| e.to_string())
     }
 
+    pub fn read_package_snapshot(&self, plugin_id: &str) -> Result<serde_json::Value, String> {
+        let (manifest, dir) = {
+            let guard = self.plugins.read().unwrap_or_else(|e| e.into_inner());
+            let p = guard
+                .get(plugin_id)
+                .ok_or_else(|| format!("plugin '{plugin_id}' not found"))?;
+            (p.manifest.clone(), p.dir.clone())
+        };
+        let ts_source = std::fs::read_to_string(dir.join(&manifest.entry)).unwrap_or_default();
+        let mut ui_files: BTreeMap<String, String> = BTreeMap::new();
+        let ui_dir = dir.join("ui");
+        if ui_dir.is_dir() {
+            for entry in walkdir::WalkDir::new(&ui_dir).into_iter().flatten() {
+                if entry.file_type().is_file() {
+                    if let Ok(rel) = entry.path().strip_prefix(&ui_dir) {
+                        let rel_str = rel.to_string_lossy().replace('\\', "/");
+                        if let Ok(text) = std::fs::read_to_string(entry.path()) {
+                            ui_files.insert(rel_str, text);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(serde_json::json!({
+            "manifest": manifest,
+            "ts_source": ts_source,
+            "ui_files": ui_files,
+        }))
+    }
+
     pub fn list_summaries(&self) -> Vec<PluginSummary> {
         let guard = self.plugins.read().unwrap_or_else(|e| e.into_inner());
-        guard.values().map(Self::summarize).collect()
+        guard.values().map(|p| self.summarize(p)).collect()
     }
 
     pub fn get_summary(&self, plugin_id: &str) -> Option<PluginSummary> {
         let guard = self.plugins.read().unwrap_or_else(|e| e.into_inner());
-        guard.get(plugin_id).map(Self::summarize)
+        guard.get(plugin_id).map(|p| self.summarize(p))
     }
 
     /// Return one automatic sidebar agent per enabled & loaded plugin.
@@ -570,7 +620,18 @@ impl PluginManager {
         }
     }
 
-    fn summarize(p: &LoadedPlugin) -> PluginSummary {
+    fn summarize(&self, p: &LoadedPlugin) -> PluginSummary {
+        let scope = if p.manifest.builtin {
+            "builtin".to_string()
+        } else if self
+            .workspace_plugins_dir
+            .as_ref()
+            .is_some_and(|ws| p.dir.starts_with(ws))
+        {
+            "workspace".to_string()
+        } else {
+            "global".to_string()
+        };
         let settings = load_settings(&p.dir);
         let (tools, tool_schemas, commands, panels, schedules, explicit_agent, has_runtime_html) =
             match &p.runtime {
@@ -654,6 +715,7 @@ impl PluginManager {
             enabled: p.manifest.enabled,
             loaded: p.runtime.is_some(),
             builtin: p.manifest.builtin,
+            scope,
             path: p.dir.clone(),
             last_error: p.last_error.clone(),
             has_custom_ui,
@@ -886,5 +948,90 @@ export function apply(ctx: any) {
         assert_eq!(agents.len(), 1);
         assert_eq!(agents[0].plugin_id, "raw-tool");
         assert_eq!(agents[0].registered_tools, vec!["ping_pong".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn supports_async_handlers_workspace_ctx_console_and_multifile_ts_imports() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws_root = tmp.path().join("workspace");
+        let plugins_dir = tmp.path().join("plugins");
+        let helper_dir = plugins_dir.join("async-mod").join("src");
+        std::fs::create_dir_all(&ws_root).unwrap();
+        std::fs::create_dir_all(&helper_dir).unwrap();
+        std::fs::write(
+            helper_dir.join("helper.ts"),
+            "export const prefix = (s: string): string => `ok:${s}`;\n",
+        )
+        .unwrap();
+
+        let mgr = PluginManager::new(plugins_dir, None).with_workspace_root(ws_root.clone());
+        let manifest = PluginManifest {
+            id: "async-mod".to_string(),
+            name: "Async Mod".to_string(),
+            version: "0.2.0".to_string(),
+            description: "Tests async apply/tool/command and relative TS imports".to_string(),
+            entry: "src/index.ts".to_string(),
+            compiled: "dist/index.js".to_string(),
+            ui_entry: None,
+            enabled: true,
+            builtin: false,
+            auto_agent: Default::default(),
+            config_schema: Vec::new(),
+            builder_spec: None,
+        };
+        let ts = r#"
+import { prefix } from './helper';
+
+export async function apply(ctx: any): Promise<void> {
+  console.log('booting', ctx.manifest.id, ctx.workspace.root);
+  await Promise.resolve();
+  ctx.storage.set('booted', true);
+
+  ctx.tools.register(
+    { name: 'async_echo', description: 'Async echo', parameters: { type: 'object', properties: {} } },
+    async (args: Record<string, unknown>) => {
+      await Promise.resolve();
+      return JSON.stringify({
+        val: prefix(String(args.text || 'hi')),
+        ws: ctx.workspace.root,
+        entries: ctx.storage.entries(),
+      });
+    }
+  );
+
+  ctx.commands.register('async_cmd', 'Async cmd', async () => {
+    await Promise.resolve();
+    ctx.storage.clear();
+    return JSON.stringify({ keys: ctx.storage.list() });
+  });
+}
+"#;
+        let summary = mgr.install_raw(manifest, ts).expect("install async plugin");
+        assert!(summary.loaded, "err: {:?}", summary.last_error);
+
+        let tools = mgr.registered_tools();
+        let echo = tools.iter().find(|t| t.name() == "async_echo").unwrap();
+        let out = echo
+            .execute(
+                "c1",
+                &serde_json::json!({ "text": "luna" }),
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.contains("ok:luna"), "{}", out.content);
+        assert!(
+            out.content.contains(&ws_root.display().to_string()),
+            "{}",
+            out.content
+        );
+        assert!(out.content.contains("\"booted\":true"), "{}", out.content);
+
+        let cmd_out = mgr
+            .invoke_command("async-mod", "async_cmd", serde_json::json!({}))
+            .await
+            .unwrap();
+        assert!(cmd_out.contains("[]"), "{cmd_out}");
     }
 }

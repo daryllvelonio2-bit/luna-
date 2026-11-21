@@ -12,6 +12,7 @@ import type {
   NoteEntry,
   PluginBuilderSpec,
   PluginExecResponse,
+  PluginSourceSnapshot,
   PluginSummary,
   ProfileItem,
   ProviderInfo,
@@ -612,6 +613,12 @@ class ApiClient {
     return this.request<PluginSummary>(`/api/plugins/${encodeURIComponent(pluginId)}`);
   }
 
+  public async getPluginSource(pluginId: string): Promise<PluginSourceSnapshot> {
+    return this.request<PluginSourceSnapshot>(
+      `/api/plugins/${encodeURIComponent(pluginId)}/source`
+    );
+  }
+
   public async reloadPlugin(pluginId: string): Promise<PluginSummary> {
     return this.request<PluginSummary>(`/api/plugins/${encodeURIComponent(pluginId)}/reload`, {
       method: 'POST',
@@ -695,6 +702,7 @@ class ApiClient {
     rule: string;
     target?: 'new_session_each_run' | 'single_new_session' | 'existing_session';
     session_id?: string;
+    require_approval?: boolean;
   }): Promise<ScheduleTask> {
     return this.request<ScheduleTask>('/api/schedules', {
       method: 'POST',
@@ -711,6 +719,7 @@ class ApiClient {
       paused?: boolean;
       target?: 'new_session_each_run' | 'single_new_session' | 'existing_session';
       session_id?: string;
+      require_approval?: boolean;
     }
   ): Promise<ScheduleTask> {
     return this.request<ScheduleTask>(`/api/schedules/${encodeURIComponent(taskId)}`, {

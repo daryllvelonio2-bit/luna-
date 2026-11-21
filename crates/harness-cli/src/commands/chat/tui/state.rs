@@ -1552,7 +1552,11 @@ impl TuiState {
         };
         (
             side(self.diff_anim_from_added, self.diff_anim_target_added, 1),
-            side(self.diff_anim_from_deleted, self.diff_anim_target_deleted, -1),
+            side(
+                self.diff_anim_from_deleted,
+                self.diff_anim_target_deleted,
+                -1,
+            ),
         )
     }
 

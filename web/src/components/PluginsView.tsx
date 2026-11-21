@@ -20,6 +20,7 @@ interface PluginsViewProps {
   sidebarOpen: boolean;
   onToggleSidebar: () => void;
   onTogglePlugin: (id: string, enabled: boolean) => void;
+  onReloadPlugin: (id: string) => void;
   onDeletePlugin: (id: string) => void;
   onPluginUpdated: (updated: PluginSummary) => void;
   onRefresh: () => void;
@@ -35,6 +36,7 @@ export const PluginsView: React.FC<PluginsViewProps> = ({
   sidebarOpen,
   onToggleSidebar,
   onTogglePlugin,
+  onReloadPlugin,
   onDeletePlugin,
   onPluginUpdated,
   onRefresh,
@@ -131,13 +133,7 @@ export const PluginsView: React.FC<PluginsViewProps> = ({
           ) : (
             <div className="surface-list">
               {plugins.map((p) => {
-                const sourceKind = p.builtin
-                  ? 'builtin'
-                  : p.path?.includes('.luna/plugins') && !p.path?.includes('/.luna/plugins/' + p.id)
-                    ? 'workspace'
-                    : p.path?.includes('/.luna/plugins/')
-                      ? 'global'
-                      : 'plugin';
+                const sourceKind = p.scope || (p.builtin ? 'builtin' : 'global');
                 const toolsCount = p.tools?.length ?? 0;
                 const agentsCount = p.agent ? 1 : 0;
                 const schedulesCount = p.schedules?.length ?? 0;
@@ -221,6 +217,15 @@ export const PluginsView: React.FC<PluginsViewProps> = ({
                           <Bot size={15} />
                         </button>
                       )}
+                      <button
+                        type="button"
+                        className="icon-btn"
+                        title="Reload plugin"
+                        aria-label={`Reload ${p.name}`}
+                        onClick={() => onReloadPlugin(p.id)}
+                      >
+                        <RefreshCw size={14} />
+                      </button>
                       <span
                         className={`status-label ${
                           p.enabled && p.loaded ? 'text-success' : 'text-muted'

@@ -78,13 +78,10 @@ pub fn build_saver_for(
     policy.max_memory_writes = config.memory.background_max_memory_writes;
     policy.max_note_writes = config.memory.background_max_note_writes;
     policy.max_operations = config.memory.background_max_operations;
-    Ok(MemorySaver::new(
-        Arc::new(client),
-        memory.clone(),
-        notes,
-        policy,
+    Ok(
+        MemorySaver::new(Arc::new(client), memory.clone(), notes, policy)
+            .with_workspace_root(Some(config.paths.workspace_root.clone())),
     )
-    .with_workspace_root(Some(config.paths.workspace_root.clone())))
 }
 
 pub fn notice(config: &Config) -> Option<String> {

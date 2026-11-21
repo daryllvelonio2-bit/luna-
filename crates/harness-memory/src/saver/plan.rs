@@ -339,7 +339,8 @@ impl MemorySaver {
             report.skip(SaveStorage::Note, display, "already known");
             return None;
         }
-        if !note_is_verbatim(&note.content, transcript) && !note_is_grounded(&note.content, transcript)
+        if !note_is_verbatim(&note.content, transcript)
+            && !note_is_grounded(&note.content, transcript)
         {
             report.skip(
                 SaveStorage::Note,

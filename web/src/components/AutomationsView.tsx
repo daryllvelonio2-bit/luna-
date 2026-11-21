@@ -21,6 +21,8 @@ import {
   X,
   ArrowRight,
   Repeat,
+  ShieldCheck,
+  ShieldOff,
 } from 'lucide-react';
 
 interface AutomationsViewProps {
@@ -33,6 +35,7 @@ interface AutomationsViewProps {
     rule: string;
     target?: 'new_session_each_run' | 'single_new_session' | 'existing_session';
     session_id?: string;
+    require_approval?: boolean;
   }) => Promise<void> | void;
   onUpdateTask: (
     id: string,
@@ -42,6 +45,7 @@ interface AutomationsViewProps {
       rule?: string;
       paused?: boolean;
       target?: 'new_session_each_run' | 'single_new_session' | 'existing_session';
+      require_approval?: boolean;
     }
   ) => Promise<void> | void;
   onToggleTask: (id: string, paused: boolean) => Promise<void> | void;
@@ -277,6 +281,7 @@ export const AutomationsView: React.FC<AutomationsViewProps> = ({
   const [targetKind, setTargetKind] = useState<'new_session_each_run' | 'single_new_session'>(
     'new_session_each_run'
   );
+  const [requireApproval, setRequireApproval] = useState(false);
   const [saving, setSaving] = useState(false);
 
   const counts = useMemo(() => {
@@ -362,6 +367,7 @@ export const AutomationsView: React.FC<AutomationsViewProps> = ({
         ? 'single_new_session'
         : 'new_session_each_run'
     );
+    setRequireApproval(Boolean(task.require_approval));
     setShowEditorModal(true);
   };
 
@@ -376,6 +382,7 @@ export const AutomationsView: React.FC<AutomationsViewProps> = ({
           instruction: instruction.trim(),
           rule: computedRule,
           target: targetKind,
+          require_approval: requireApproval,
         });
       } else {
         await onCreateTask({
@@ -383,6 +390,7 @@ export const AutomationsView: React.FC<AutomationsViewProps> = ({
           instruction: instruction.trim(),
           rule: computedRule,
           target: targetKind,
+          require_approval: requireApproval,
         });
       }
       setShowEditorModal(false);
@@ -808,6 +816,32 @@ export const AutomationsView: React.FC<AutomationsViewProps> = ({
                           {formatTargetLabel(task.delivery_target)}
                         </span>
                       </div>
+                      <button
+                        type="button"
+                        className="auto-meta-item"
+                        style={{
+                          background: 'transparent',
+                          border: 'none',
+                          padding: 0,
+                          cursor: 'pointer',
+                          color: task.require_approval ? 'var(--warning, #f59e0b)' : 'var(--text-secondary)',
+                        }}
+                        title={
+                          task.require_approval
+                            ? 'Requires manual approval for mutating tools — click to switch to no permissions needed'
+                            : 'No permissions needed (default) — click to require manual approval'
+                        }
+                        onClick={() =>
+                          onUpdateTask(task.id, {
+                            require_approval: !task.require_approval,
+                          })
+                        }
+                      >
+                        {task.require_approval ? <ShieldCheck size={12} /> : <ShieldOff size={12} />}
+                        <span className="auto-meta-value">
+                          {task.require_approval ? 'Asks permission' : 'No permissions needed'}
+                        </span>
+                      </button>
                     </div>
 
                     <div className="auto-card-footer">
@@ -1042,6 +1076,37 @@ export const AutomationsView: React.FC<AutomationsViewProps> = ({
                     Single dedicated thread
                   </button>
                 </div>
+              </div>
+
+              <div className="form-group">
+                <label className="form-label">Permissions</label>
+                <label
+                  style={{
+                    display: 'flex',
+                    alignItems: 'flex-start',
+                    gap: '10px',
+                    padding: '10px 12px',
+                    borderRadius: '8px',
+                    border: '1px solid var(--border-subtle)',
+                    background: 'var(--bg-canvas)',
+                    cursor: 'pointer',
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={requireApproval}
+                    onChange={(e) => setRequireApproval(e.target.checked)}
+                    style={{ marginTop: '3px' }}
+                  />
+                  <div>
+                    <div style={{ fontSize: '13px', fontWeight: 500, color: 'var(--text-primary)' }}>
+                      Require permission prompts before mutating tools
+                    </div>
+                    <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '2px' }}>
+                      Off by default so automations run autonomously without blocking. Turn on if you want manual approval prompts.
+                    </div>
+                  </div>
+                </label>
               </div>
 
               <div className="form-group">

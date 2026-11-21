@@ -504,7 +504,10 @@ impl MemorySaver {
         // Existing notes already carry their project tag; this resolves it (and creates the
         // folder if it vanished) without moving a note the user placed by hand.
         let mut resolved_tags = existing.tags.clone();
-        let project = self.notes.assign_project(&mut resolved_tags, workspace).await;
+        let project = self
+            .notes
+            .assign_project(&mut resolved_tags, workspace)
+            .await;
 
         let append = update
             .mode

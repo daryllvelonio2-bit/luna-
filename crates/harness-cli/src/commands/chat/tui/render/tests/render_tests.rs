@@ -357,8 +357,22 @@ fn compaction_turn_renders_yellow_card_and_compacted_footer() {
     let empty_set: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
     let empty_turns: std::collections::HashSet<usize> = std::collections::HashSet::new();
     render_single_settled_turn(
-        &mut out, &mut hits, 0, &turn, None, false, true, None, &empty_set, &empty_set, &empty_turns, &empty_turns, "Build",
-        "gpt-4o", 80, 76,
+        &mut out,
+        &mut hits,
+        0,
+        &turn,
+        None,
+        false,
+        true,
+        None,
+        &empty_set,
+        &empty_set,
+        &empty_turns,
+        &empty_turns,
+        "Build",
+        "gpt-4o",
+        80,
+        76,
     );
     let text: Vec<String> = out.iter().map(line_text).collect();
     let all_text = text.join("\n");
@@ -491,7 +505,19 @@ fn completed_turn_thinking_collapses_when_process_collapsed() {
 
     // When process_expanded = false (auto-collapse on), the whole process collapses to 1 line
     render_completed_turn_process(
-        &mut out, &mut hits, 0, &turn, false, true, None, &empty, &empty, &empty_turns, &empty_turns, 84, 80,
+        &mut out,
+        &mut hits,
+        0,
+        &turn,
+        false,
+        true,
+        None,
+        &empty,
+        &empty,
+        &empty_turns,
+        &empty_turns,
+        84,
+        80,
     );
     let collapsed = out.iter().map(line_text).collect::<Vec<_>>().join("\n");
     assert!(collapsed.contains("▶ Process"), "{collapsed}");
@@ -502,7 +528,19 @@ fn completed_turn_thinking_collapses_when_process_collapsed() {
     out.clear();
     hits.clear();
     render_completed_turn_process(
-        &mut out, &mut hits, 0, &turn, true, true, None, &empty, &empty, &empty_turns, &empty_turns, 84, 80,
+        &mut out,
+        &mut hits,
+        0,
+        &turn,
+        true,
+        true,
+        None,
+        &empty,
+        &empty,
+        &empty_turns,
+        &empty_turns,
+        84,
+        80,
     );
     let expanded = out.iter().map(line_text).collect::<Vec<_>>().join("\n");
     assert!(expanded.contains("▼ Process"), "{expanded}");
@@ -513,7 +551,19 @@ fn completed_turn_thinking_collapses_when_process_collapsed() {
     out.clear();
     hits.clear();
     render_completed_turn_process(
-        &mut out, &mut hits, 0, &turn, true, false, None, &empty, &empty, &empty_turns, &empty_turns, 84, 80,
+        &mut out,
+        &mut hits,
+        0,
+        &turn,
+        true,
+        false,
+        None,
+        &empty,
+        &empty,
+        &empty_turns,
+        &empty_turns,
+        84,
+        80,
     );
     let fully_open = out.iter().map(line_text).collect::<Vec<_>>().join("\n");
     assert!(fully_open.contains("hidden thought body"), "{fully_open}");
@@ -578,7 +628,19 @@ fn block_limit_caps_thinking_blocks_while_tool_cards_stay_capped_at_ten() {
     out.clear();
     hits.clear();
     render_completed_turn_process(
-        &mut out, &mut hits, 0, &turn, false, true, None, &empty, &empty, &empty_turns, &empty_turns, 84, 80,
+        &mut out,
+        &mut hits,
+        0,
+        &turn,
+        false,
+        true,
+        None,
+        &empty,
+        &empty,
+        &empty_turns,
+        &empty_turns,
+        84,
+        80,
     );
     let tool_collapsed = out.iter().map(line_text).collect::<Vec<_>>().join("\n");
     assert!(tool_collapsed.contains("▶ Process"));
@@ -591,7 +653,19 @@ fn block_limit_caps_thinking_blocks_while_tool_cards_stay_capped_at_ten() {
     out.clear();
     hits.clear();
     render_completed_turn_process(
-        &mut out, &mut hits, 0, &turn, true, true, None, &empty, &empty, &empty_turns, &empty_turns, 84, 80,
+        &mut out,
+        &mut hits,
+        0,
+        &turn,
+        true,
+        true,
+        None,
+        &empty,
+        &empty,
+        &empty_turns,
+        &empty_turns,
+        84,
+        80,
     );
     let tool_capped = out.iter().map(line_text).collect::<Vec<_>>().join("\n");
     assert!(tool_capped.contains("▼ Process"));
@@ -1401,8 +1475,22 @@ fn test_turn_footer_renders_additions_and_deletions() {
     let empty_set: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
     let empty_turns: std::collections::HashSet<usize> = std::collections::HashSet::new();
     render_single_settled_turn(
-        &mut out, &mut hits, 0, &turn, None, false, true, None, &empty_set, &empty_set, &empty_turns, &empty_turns, "Build",
-        "gemini-3.8-flash", 80, 76,
+        &mut out,
+        &mut hits,
+        0,
+        &turn,
+        None,
+        false,
+        true,
+        None,
+        &empty_set,
+        &empty_set,
+        &empty_turns,
+        &empty_turns,
+        "Build",
+        "gemini-3.8-flash",
+        80,
+        76,
     );
     let text: Vec<String> = out.iter().map(line_text).collect();
     let all_text = text.join("\n");
@@ -1437,7 +1525,11 @@ fn test_turn_footer_renders_additions_and_deletions() {
         80,
         76,
     );
-    let empty_text = out_empty.iter().map(line_text).collect::<Vec<_>>().join("\n");
+    let empty_text = out_empty
+        .iter()
+        .map(line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(!empty_text.contains("+0"), "expected no +0 in {empty_text}");
     assert!(!empty_text.contains("-0"), "expected no -0 in {empty_text}");
 }
@@ -1472,9 +1564,7 @@ fn test_total_code_changes_across_sessions() {
         tool_name: "write_file".to_string(),
         call_formatted: "write_file()".to_string(),
         result_formatted: "".to_string(),
-        diff_lines: vec![
-            "  + line d".to_string(),
-        ],
+        diff_lines: vec!["  + line d".to_string()],
         output: String::new(),
         output_dropped: 0,
         arguments: None,
@@ -1503,8 +1593,7 @@ fn test_total_code_changes_across_sessions() {
     assert_eq!(deleted_label.as_deref(), Some("0"));
 
     // Once the roll window has passed the labels settle on the real totals.
-    st.diff_anim_start =
-        Some(std::time::Instant::now() - std::time::Duration::from_millis(800));
+    st.diff_anim_start = Some(std::time::Instant::now() - std::time::Duration::from_millis(800));
     assert!(!st.is_diff_animating());
     let (added_label, deleted_label) = st.animated_diff_labels();
     assert_eq!(added_label.as_deref(), Some("3"));

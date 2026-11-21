@@ -56,6 +56,8 @@ pub struct AppSessionOptions {
     pub explicit_model: bool,
     pub system_prompt_prefix: Option<String>,
     pub extra_tools: Option<ExtraToolRegistrar>,
+    /// Optional per-session approval mode override (e.g. autonomous automations).
+    pub approval_mode_override: Option<harness_core::ApprovalMode>,
 }
 
 pub struct AppSessionChannels {
@@ -306,16 +308,19 @@ impl AppRuntime {
             }));
         }
 
+        let effective_approval = options
+            .approval_mode_override
+            .unwrap_or(config.tools.approval);
         let (approval_tx, approval_rx) =
             mpsc::unbounded_channel::<(ApprovalRequest, oneshot::Sender<ApprovalDecision>)>();
         let allow_all_session = Arc::new(AtomicBool::new(
-            config.tools.approval == harness_core::ApprovalMode::Allow,
+            effective_approval == harness_core::ApprovalMode::Allow,
         ));
         let plan_mode = Arc::new(AtomicBool::new(false));
         let (approver, approval_activity): (
             Arc<dyn harness_core::Approver>,
             Arc<tokio::sync::Notify>,
-        ) = if options.interactive && config.tools.approval == harness_core::ApprovalMode::Ask {
+        ) = if options.interactive && effective_approval != harness_core::ApprovalMode::Deny {
             let ch = Arc::new(ChannelApprover::new(
                 approval_tx.clone(),
                 allow_all_session.clone(),

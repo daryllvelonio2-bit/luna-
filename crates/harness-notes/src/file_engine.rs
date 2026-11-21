@@ -1100,9 +1100,7 @@ impl NotesEngine for FileNotesEngine {
             .load_all()?
             .into_iter()
             .filter(|note| note.parent_id.is_none())
-            .filter(|note| {
-                projects::project_from_tags(&note.tags).as_deref() == Some(project)
-            })
+            .filter(|note| projects::project_from_tags(&note.tags).as_deref() == Some(project))
             .collect();
         if notes.is_empty() {
             return Ok(());

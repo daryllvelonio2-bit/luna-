@@ -54,6 +54,7 @@ mod tests {
             )
             .unwrap();
         assert!(!task.paused);
+        assert!(!task.require_approval);
         assert!(task.next_run_at.is_some());
 
         let handler: ScheduleDeliveryHandler = Arc::new(|t| {
@@ -72,9 +73,10 @@ mod tests {
         assert_eq!(updated.history[0].session_id, "s_sched_1");
 
         let paused = store
-            .update(&task.id, None, None, None, None, Some(true))
+            .update_with_approval(&task.id, None, None, None, None, Some(true), Some(true))
             .unwrap();
         assert!(paused.paused);
+        assert!(paused.require_approval);
     }
 
     #[tokio::test]

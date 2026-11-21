@@ -377,6 +377,14 @@ export const App: React.FC = () => {
                   // ignore non-JSON outputs
                 }
               }
+            } else {
+              // Refresh plugins if any registered plugin tool ran so live panels & custom UI update immediately.
+              setPlugins((curr) => {
+                if (curr.some((p) => p.tools?.includes(event.name))) {
+                  api.listPlugins().then(setPlugins).catch(() => {});
+                }
+                return curr;
+              });
             }
           }
           break;
@@ -1184,6 +1192,7 @@ export const App: React.FC = () => {
     rule: string;
     target?: 'new_session_each_run' | 'single_new_session' | 'existing_session';
     session_id?: string;
+    require_approval?: boolean;
   }) => {
     try {
       await api.createSchedule(payload);
@@ -1203,6 +1212,7 @@ export const App: React.FC = () => {
       rule?: string;
       paused?: boolean;
       target?: 'new_session_each_run' | 'single_new_session' | 'existing_session';
+      require_approval?: boolean;
     }
   ) => {
     try {
@@ -1484,6 +1494,15 @@ export const App: React.FC = () => {
             sidebarOpen={sidebarOpen}
             onToggleSidebar={() => setSidebarOpen((v) => !v)}
             onTogglePlugin={handleTogglePlugin}
+            onReloadPlugin={async (id) => {
+              try {
+                const updated = await api.reloadPlugin(id);
+                handlePluginUpdated(updated);
+                pushNotice(`Reloaded plugin "${updated.name}".`);
+              } catch (e) {
+                showError(`Failed to reload plugin: ${String(e)}`);
+              }
+            }}
             onDeletePlugin={handleDeletePlugin}
             onPluginUpdated={handlePluginUpdated}
             onRefresh={() => api.listPlugins().then(setPlugins).catch(() => {})}

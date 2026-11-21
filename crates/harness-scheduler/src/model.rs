@@ -40,6 +40,10 @@ pub struct ScheduleTask {
     pub delivery_target: DeliveryTarget,
     #[serde(default)]
     pub plugin_id: Option<String>,
+    /// Whether tool calls during scheduled runs ask for interactive permission.
+    /// Defaults to `false` so automations run autonomously without blocking.
+    #[serde(default)]
+    pub require_approval: bool,
     pub paused: bool,
     pub completed: bool,
     pub next_run_at: Option<DateTime<Utc>>,
