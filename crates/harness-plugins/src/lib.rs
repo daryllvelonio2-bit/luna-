@@ -17,7 +17,7 @@ pub use compiler::{compile_typescript, CompileError};
 pub use manager::{command_index, PluginManager, PluginToolBridge};
 pub use manifest::{
     AutoAgentSpec, PluginAgentEntry, PluginCommandSpec, PluginConfigField, PluginManifest,
-    PluginScheduleDecl, PluginSummary, PluginUiPanel, PluginWidget,
+    PluginScheduleDecl, PluginSummary, PluginToolDescriptor, PluginUiPanel, PluginWidget,
 };
 pub use plugin_skill::{
     build_plugin_turn_prompt, plugin_skill, PLUGIN_PREFILL, PLUGIN_SKILL_DESCRIPTION,

@@ -73,14 +73,98 @@ export type ModelTarget = 'session' | 'default' | 'compact' | 'bgsaver' | 'appro
 export type ModelScope = 'session' | 'global';
 
 export interface PluginAgentEntry {
+  plugin_id?: string;
   id: string;
   name: string;
   description: string;
   icon?: string;
   system_prompt?: string;
+  model?: string | null;
+  registered_tools?: string[];
+  panel_ids?: string[];
   tools?: string[];
   default_provider?: string;
   default_model?: string;
+}
+
+export type PluginWidget =
+  | {
+      kind: 'stat_card';
+      id: string;
+      label: string;
+      value: string;
+      subtitle?: string | null;
+    }
+  | {
+      kind: 'table';
+      id: string;
+      title: string;
+      columns: string[];
+      rows: string[][];
+    }
+  | {
+      kind: 'action_button';
+      id: string;
+      label: string;
+      action: string;
+      variant?: string | null;
+      args?: unknown;
+    }
+  | {
+      kind: 'input_action';
+      id: string;
+      label: string;
+      placeholder?: string | null;
+      button_label: string;
+      action: string;
+      arg_name?: string | null;
+      variant?: string | null;
+    }
+  | {
+      kind: 'progress';
+      id: string;
+      label: string;
+      value: number;
+      max: number;
+      subtitle?: string | null;
+    }
+  | {
+      kind: 'markdown';
+      id: string;
+      content: string;
+    }
+  | {
+      kind: 'key_value';
+      id: string;
+      items: Array<[string, string]>;
+    }
+  | {
+      kind: 'html';
+      id: string;
+      content: string;
+    };
+
+export interface PluginUiPanel {
+  plugin_id: string;
+  id: string;
+  title: string;
+  icon?: string | null;
+  widgets: PluginWidget[];
+}
+
+export interface PluginConfigField {
+  key: string;
+  label: string;
+  field_type: string;
+  description?: string;
+  default_value?: unknown;
+}
+
+export interface PluginToolDescriptor {
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+  mutating: boolean;
 }
 
 export interface PluginSummary {
@@ -93,11 +177,22 @@ export interface PluginSummary {
   builtin: boolean;
   path?: string;
   last_error?: string | null;
+  has_custom_ui?: boolean;
+  ui_entry?: string | null;
   tools: string[];
+  tool_schemas?: PluginToolDescriptor[];
   commands: Array<{ plugin_id: string; name: string; description: string }>;
   agent?: PluginAgentEntry | null;
-  panels: Array<{ id: string; title: string }>;
+  panels: PluginUiPanel[];
   schedules: Array<{ id: string; name: string; rule: string }>;
+  settings?: Record<string, unknown>;
+  config_schema?: PluginConfigField[];
+}
+
+export interface PluginExecResponse {
+  ok: boolean;
+  output: string;
+  summary?: PluginSummary | null;
 }
 
 export type DeliveryTarget =

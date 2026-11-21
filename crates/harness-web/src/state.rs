@@ -101,6 +101,11 @@ impl WebState {
                 .map_err(|e| HarnessError::Io(format!("failed to open schedules store: {}", e)))?,
         );
         let scheduler = Arc::new(SchedulerService::new(sched_store));
+        if let Err(err) =
+            scheduler.sync_plugin_declarations(&plugin_manager.schedule_declarations())
+        {
+            tracing::warn!("failed to sync plugin schedules: {}", err);
+        }
 
         let (event_tx, _) = broadcast::channel(512);
         let launch_workspace_root = config.paths.workspace_root.clone();
@@ -134,6 +139,15 @@ impl WebState {
                 .turn_running
                 .load(std::sync::atomic::Ordering::SeqCst)
         });
+    }
+
+    /// Re-sync plugin-declared schedules and drop idle cached sessions so newly created,
+    /// updated, toggled, or deleted plugins take effect immediately across chat sessions.
+    pub async fn sync_plugins_after_change(&self) {
+        let _ = self
+            .scheduler
+            .sync_plugin_declarations(&self.plugin_manager.schedule_declarations());
+        self.invalidate_idle_sessions().await;
     }
 
     pub async fn drop_session_if_idle(&self, session_id: &str) {

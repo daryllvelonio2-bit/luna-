@@ -35,3 +35,4 @@ open = "5.3"
 
 [dev-dependencies]
 tempfile = { workspace = true }
+reqwest = { workspace = true }

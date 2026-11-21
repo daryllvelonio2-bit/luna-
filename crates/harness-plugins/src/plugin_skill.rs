@@ -91,7 +91,23 @@ ctx.commands.register('mycmd', 'Short command description', (args: Record<string
 });
 ```
 
-### 4. Registering UI Panels (`ctx.ui.registerPanel`)
+### 4. Building Complete Plugin UIs (Custom Web App UI + Live Declarative Panels)
+
+Plugins can provide **full interactive web UIs** AND/OR **live declarative widget panels** rendered directly inside Luna Web (both in the Plugins view and side-by-side inside Chat when using the plugin's sidebar agent).
+
+#### Option A: Full Custom HTML/CSS/JS Web UI (`ui_html` or `ui_files` in `plugin_create`, or `ctx.ui.setCustomHtml`)
+Pass `ui_html` (single-file HTML/CSS/JS) or `ui_files: { "index.html": "...", "styles.css": "...", "app.js": "..." }` to `plugin_create` (stored under `<plugin_dir>/ui/`).
+Luna Web serves `ui/` at `/api/plugins/<id>/ui/` and **automatically injects `window.lunaPlugin`** and CSS theme variables (`--bg`, `--surface`, `--surface-2`, `--text`, `--muted`, `--border`, `--accent`, `--accent-fg`, `--danger`, `--success`, plus `data-theme="dark|light"` on `<html>`):
+- `await window.lunaPlugin.callTool(toolName, args)` -> executes a plugin tool in QuickJS and returns `{ ok, output, summary }`.
+- `await window.lunaPlugin.runCommand(commandName, args)` -> executes a registered command and returns `{ ok, output, summary }`.
+- `await window.lunaPlugin.getSettings()` / `await window.lunaPlugin.setSettings(patch)` -> reads/saves plugin `settings.json` and notifies `ctx.events.on('settings_changed', ...)`.
+- `await window.lunaPlugin.getSummary()` -> returns the live `PluginSummary` (panels, tools, commands, settings).
+- `window.lunaPlugin.sendToChat(prompt)` -> sends a message into the active plugin chat session.
+- `window.lunaPlugin.notify(message, 'info' | 'err')` -> shows a toast notification in Luna Web.
+
+Use Option A whenever the plugin benefits from rich, interactive controls (boards, timers, forms, charts, lists, editors, live status views, custom layouts). Make the UI self-contained (no external CDN dependencies required so it works offline), responsive, keyboard-accessible, and styled using Luna's CSS theme variables (`var(--bg)`, `var(--surface)`, `var(--text)`, `var(--border)`, `var(--accent)`).
+
+#### Option B: Live Declarative Panels (`ctx.ui.registerPanel` & `ctx.ui.updatePanel`)
 ```ts
 ctx.ui.registerPanel({
   id: 'my-panel-id',
@@ -100,11 +116,20 @@ ctx.ui.registerPanel({
   widgets: [
     { kind: 'markdown', id: 'intro', content: 'Usage notes in **Markdown**.' },
     { kind: 'stat_card', id: 'count', label: 'Items', value: '0', subtitle: 'Cached locally' },
-    { kind: 'key_value', id: 'cfg', entries: [['Mode', 'Local'], ['Scope', 'Global']] },
+    { kind: 'progress', id: 'pct', label: 'Completion', value: 3, max: 10, subtitle: '3 / 10 done' },
+    { kind: 'key_value', id: 'cfg', items: [['Mode', 'Local'], ['Scope', 'Global']] },
     { kind: 'table', id: 'rows', title: 'Recent', columns: ['Name', 'Status'], rows: [] },
-    { kind: 'action_button', id: 'run', label: 'Refresh', action: 'mycmd', variant: 'primary' }
+    { kind: 'action_button', id: 'run', label: 'Refresh', action: 'mycmd', variant: 'primary', args: { force: true } },
+    { kind: 'input_action', id: 'add', label: 'Add item', placeholder: 'Enter title...', button_label: 'Add', action: 'add_item', arg_name: 'title' },
+    { kind: 'html', id: 'preview', content: '<div>Custom HTML snippet</div>' }
   ]
 });
+```
+You can update panels dynamically whenever a tool or command runs:
+```ts
+ctx.ui.updatePanel('my-panel-id', { widgets: [ /* updated widgets */ ] });
+ctx.ui.removePanel('my-panel-id');
+ctx.ui.setCustomHtml('<!doctype html>...'); // optional runtime-generated HTML
 ```
 
 ### 5. Registering Schedules (`ctx.schedules.register`)
@@ -151,21 +176,25 @@ ctx.schedules.register({
 - `version`: semver string (default `"0.1.0"`)
 - `description`: concise 1-line summary
 - `auto_agent`: `{ name, icon, system_prompt, model?, tools }`
-- `config_schema`: optional array of `{ key, label, field_type: "text" | "secret" | "boolean" | "number", required, default_value?, description? }`
+- `config_schema`: optional array of `{ key, label, field_type: "string" | "secret" | "boolean" | "number", default_value?, description? }`
+- `ui_entry`: optional UI entry relative path (automatically set to `"ui/index.html"` when `ui_html` or `ui_files` includes `index.html`).
 
 ## Workflow
 
 ### 1. Inspect & Clarify Before Building
 - Call `plugin_list` if needed to avoid ID/tool-name collisions or when modifying an existing plugin.
-- If the user's request omits critical design decisions (e.g., which tools/actions to expose, external APIs/CLI tools or auth/env vars to integrate, whether it should be **global** or **workspace**-scoped, or whether a dedicated sidebar agent/panel is desired), use `clarify` first with concise, clickable options (plus free-text) before writing code.
+- If the user's request omits critical design decisions (e.g., which tools/actions/UI views to build, external APIs/CLI tools or auth/env vars to integrate, whether it should be **global** or **workspace**-scoped, or whether a dedicated sidebar agent is desired), use `clarify` first with concise, clickable options (plus free-text) before writing code.
 - If the request is already specific and unambiguous, proceed directly to building.
 
 ### 2. Design & Implement with `plugin_create`
-Call `plugin_create` with:
+Build **everything** the plugin needs — backend logic, persistence, tools, commands, settings, sidebar agent, AND complete interactive UI (`ui_html` / `ui_files` and/or `ctx.ui.registerPanel` + `ctx.ui.updatePanel`):
 - `id`, `name`, `description`, `scope` (`"global"` default or `"workspace"`),
 - `auto_agent` (`{ name, icon, system_prompt, tools }`),
 - `config_schema` (optional),
-- `ts_source`: complete TypeScript code for `src/index.ts`.
+- `ts_source`: complete TypeScript code for `src/index.ts`,
+- `ui_html` or `ui_files`: complete, interactive, theme-aware HTML/CSS/JS frontend wired to `window.lunaPlugin`.
+
+You can also edit any file inside `<plugin_dir>/` directly using `read_file`, `patch`, or `write_file` and call `plugin_reload` to recompile & reload.
 
 ### 3. Verify Compilation & Runtime Loading
 `plugin_create` transpiles `src/index.ts`, writes `plugin.json` + `src/index.ts` + `dist/index.js`, and spawns the QuickJS runtime immediately.
@@ -188,7 +217,7 @@ pub fn plugin_skill() -> Skill {
 }
 
 /// Default pre-fill string when the user selects `/plugin` in CLI/TUI/Web composers.
-pub const PLUGIN_PREFILL: &str = "/plugin guide me with creating a plugin ";
+pub const PLUGIN_PREFILL: &str = "/plugin help me create a ";
 
 /// Format a user `/plugin <arg>` request into the model prompt that tells
 /// the agent to load the `plugin` skill, clarify if needed, and build/register the plugin.
@@ -196,10 +225,10 @@ pub fn build_plugin_turn_prompt(user_request: &str) -> String {
     let trimmed = user_request.trim();
     format!(
         "Plugin Creation Request:\n\
-         1. First call `skill_view` with `name: \"plugin\"` to load Luna's plugin architecture, `@luna/sdk` API reference, and QuickJS runtime rules.\n\
+         1. First call `skill_view` with `name: \"plugin\"` to load Luna's plugin architecture, `@luna/sdk` API reference, custom UI (`ui_html` / `ui_files` + `window.lunaPlugin` bridge + `ctx.ui`), and QuickJS runtime rules.\n\
          2. Follow those instructions carefully for the user's request below.\n\
-         3. If critical details (required tools/actions, external APIs or CLI tools, inputs/outputs, sidebar agent behavior, or global vs workspace scope) are missing or ambiguous, call `clarify` first before creating the plugin.\n\
-         4. Once requirements are clear, implement, compile, and register the plugin using `plugin_create` (and verify `\"loaded\": true` with no errors).\n\n\
+         3. If critical details (required tools/actions, custom UI screens/controls, external APIs or CLI tools, inputs/outputs, sidebar agent behavior, or global vs workspace scope) are missing or ambiguous, call `clarify` first before creating the plugin.\n\
+         4. Once requirements are clear, implement the complete plugin — backend TypeScript tools/commands/storage/settings/agent AND full interactive UI (`ui_html` / `ui_files` and/or live `ctx.ui` panels) — using `plugin_create` (and verify `\"loaded\": true` with no errors).\n\n\
          User request:\n{trimmed}"
     )
 }

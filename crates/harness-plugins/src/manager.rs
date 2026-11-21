@@ -2,7 +2,8 @@
 //! automatic sidebar agent synthesis, and `Tool` bridge into `harness-core`.
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
@@ -14,7 +15,7 @@ use crate::builder::{generate_plugin_files, PluginBuilderSpec};
 use crate::compiler::compile_typescript;
 use crate::manifest::{
     PluginAgentEntry, PluginCommandSpec, PluginManifest, PluginScheduleDecl, PluginSummary,
-    PluginUiPanel,
+    PluginToolDescriptor, PluginUiPanel,
 };
 use crate::runtime::{PluginRuntimeHandle, RegisteredPluginTool};
 use crate::storage::{load_settings, save_settings};
@@ -31,6 +32,7 @@ pub struct PluginManager {
     plugins_dir: PathBuf,
     workspace_plugins_dir: Option<PathBuf>,
     plugins: RwLock<BTreeMap<String, LoadedPlugin>>,
+    generation: AtomicU64,
 }
 
 impl PluginManager {
@@ -39,7 +41,16 @@ impl PluginManager {
             plugins_dir,
             workspace_plugins_dir,
             plugins: RwLock::new(BTreeMap::new()),
+            generation: AtomicU64::new(0),
         }
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
+    }
+
+    fn bump_generation(&self) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
     }
 
     pub fn plugins_dir(&self) -> &Path {
@@ -106,6 +117,7 @@ impl PluginManager {
                 .unwrap_or_else(|e| e.into_inner())
                 .insert(id, loaded);
         }
+        self.bump_generation();
 
         Ok(())
     }
@@ -195,6 +207,18 @@ impl PluginManager {
         ts_source: &str,
         workspace_scope: bool,
     ) -> Result<PluginSummary, String> {
+        self.install_package_in_scope(manifest, ts_source, None, workspace_scope)
+    }
+
+    /// Install or update a full plugin package (manifest + TypeScript source + optional `ui/` files)
+    /// into either the global plugins directory or the workspace `.luna/plugins` directory.
+    pub fn install_package_in_scope(
+        &self,
+        mut manifest: PluginManifest,
+        ts_source: &str,
+        ui_files: Option<&BTreeMap<String, String>>,
+        workspace_scope: bool,
+    ) -> Result<PluginSummary, String> {
         let js_code = compile_typescript(&manifest.entry, ts_source).map_err(|e| e.to_string())?;
 
         let base_dir = if workspace_scope {
@@ -215,6 +239,23 @@ impl PluginManager {
             std::fs::create_dir_all(p).map_err(|e| e.to_string())?;
         }
 
+        if let Some(files) = ui_files {
+            let ui_root = dir.join("ui");
+            std::fs::create_dir_all(&ui_root).map_err(|e| e.to_string())?;
+            for (rel_path, content) in files {
+                let safe_rel = sanitize_relative_ui_path(rel_path)?;
+                let target = ui_root.join(&safe_rel);
+                if let Some(parent) = target.parent() {
+                    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                }
+                std::fs::write(&target, content).map_err(|e| e.to_string())?;
+            }
+        }
+
+        if manifest.ui_entry.is_none() && dir.join("ui/index.html").is_file() {
+            manifest.ui_entry = Some("ui/index.html".to_string());
+        }
+
         std::fs::write(&entry_path, ts_source).map_err(|e| e.to_string())?;
         std::fs::write(&compiled_path, &js_code).map_err(|e| e.to_string())?;
         let manifest_json = serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
@@ -231,6 +272,7 @@ impl PluginManager {
             let loaded = Self::load_one(manifest.clone(), dir);
             guard.insert(manifest.id.clone(), loaded);
         }
+        self.bump_generation();
 
         self.get_summary(&manifest.id)
             .ok_or_else(|| format!("plugin '{}' failed to register", manifest.id))
@@ -272,6 +314,7 @@ impl PluginManager {
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .insert(plugin_id.to_string(), reloaded);
+        self.bump_generation();
 
         self.get_summary(plugin_id)
             .ok_or_else(|| format!("plugin '{plugin_id}' missing after reload"))
@@ -299,6 +342,7 @@ impl PluginManager {
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .insert(plugin_id.to_string(), reloaded);
+        self.bump_generation();
 
         self.get_summary(plugin_id)
             .ok_or_else(|| format!("plugin '{plugin_id}' missing after reload"))
@@ -318,6 +362,7 @@ impl PluginManager {
         if dir.exists() {
             std::fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
         }
+        self.bump_generation();
         Ok(())
     }
 
@@ -334,6 +379,33 @@ impl PluginManager {
                 .ok_or_else(|| format!("plugin '{plugin_id}' not found"))?
         };
         save_settings(&dir, &settings)
+    }
+
+    /// Merge settings keys into `settings.json`, notify the running plugin via
+    /// `settings_changed`, and return the updated `PluginSummary`.
+    pub async fn set_settings_patch(
+        &self,
+        plugin_id: &str,
+        patch: BTreeMap<String, serde_json::Value>,
+    ) -> Result<PluginSummary, String> {
+        let (dir, rt) = {
+            let guard = self.plugins.read().unwrap_or_else(|e| e.into_inner());
+            let p = guard
+                .get(plugin_id)
+                .ok_or_else(|| format!("plugin '{plugin_id}' not found"))?;
+            (p.dir.clone(), p.runtime.clone())
+        };
+        let mut merged = load_settings(&dir);
+        for (k, v) in patch {
+            merged.insert(k, v);
+        }
+        save_settings(&dir, &merged)?;
+        if let Some(runtime) = rt {
+            let payload = serde_json::to_value(&merged).unwrap_or_else(|_| serde_json::json!({}));
+            let _ = runtime.emit_event("settings_changed", &payload).await;
+        }
+        self.get_summary(plugin_id)
+            .ok_or_else(|| format!("plugin '{plugin_id}' missing after settings update"))
     }
 
     pub fn read_source(&self, plugin_id: &str) -> Result<String, String> {
@@ -419,6 +491,75 @@ impl PluginManager {
         rt.call_command(command, &args).await
     }
 
+    pub async fn invoke_tool(
+        &self,
+        plugin_id: &str,
+        tool_name: &str,
+        args: serde_json::Value,
+    ) -> Result<String, String> {
+        let rt = {
+            let guard = self.plugins.read().unwrap_or_else(|e| e.into_inner());
+            guard
+                .get(plugin_id)
+                .and_then(|p| p.runtime.clone())
+                .ok_or_else(|| format!("plugin '{plugin_id}' is not loaded"))?
+        };
+        rt.call_tool(tool_name, &args).await
+    }
+
+    /// Read a custom UI file for `plugin_id` (`ui/` directory or `ctx.ui.setCustomHtml`),
+    /// returning `(bytes, content_type)`.
+    pub fn read_ui_asset(
+        &self,
+        plugin_id: &str,
+        rel_path: &str,
+    ) -> Result<(Vec<u8>, String), String> {
+        let (dir, ui_entry, custom_html) = {
+            let guard = self.plugins.read().unwrap_or_else(|e| e.into_inner());
+            let p = guard
+                .get(plugin_id)
+                .ok_or_else(|| format!("plugin '{plugin_id}' not found"))?;
+            let html = p.runtime.as_ref().and_then(|r| r.live_custom_html());
+            (p.dir.clone(), p.manifest.ui_entry.clone(), html)
+        };
+
+        let trimmed = rel_path.trim().trim_start_matches('/');
+        let requested = if trimmed.is_empty() {
+            "index.html"
+        } else {
+            trimmed
+        };
+        let safe_rel = sanitize_relative_ui_path(requested)?;
+
+        let ui_dir = dir.join("ui");
+        let candidate = ui_dir.join(&safe_rel);
+        if candidate.is_file() {
+            let bytes = std::fs::read(&candidate).map_err(|e| e.to_string())?;
+            let mime = guess_ui_mime(&safe_rel);
+            return Ok((bytes, mime));
+        }
+
+        if requested == "index.html" {
+            if let Some(entry) = ui_entry {
+                let safe_entry = sanitize_relative_ui_path(&entry)?;
+                let entry_path = dir.join(&safe_entry);
+                if entry_path.is_file() {
+                    let bytes = std::fs::read(&entry_path).map_err(|e| e.to_string())?;
+                    let mime = guess_ui_mime(&safe_entry);
+                    return Ok((bytes, mime));
+                }
+            }
+            if let Some(html) = custom_html {
+                return Ok((html.into_bytes(), "text/html; charset=utf-8".to_string()));
+            }
+        }
+
+        Err(format!(
+            "UI asset '{}' not found for plugin '{}'",
+            requested, plugin_id
+        ))
+    }
+
     pub async fn dispatch_event(&self, event: &str, payload: serde_json::Value) {
         let runtimes: Vec<Arc<PluginRuntimeHandle>> = {
             let guard = self.plugins.read().unwrap_or_else(|e| e.into_inner());
@@ -431,20 +572,47 @@ impl PluginManager {
 
     fn summarize(p: &LoadedPlugin) -> PluginSummary {
         let settings = load_settings(&p.dir);
-        let (tools, commands, panels, schedules, explicit_agent) = match &p.runtime {
-            Some(rt) => (
-                rt.registrations
-                    .tools
-                    .iter()
-                    .map(|t| t.name.clone())
-                    .collect::<Vec<_>>(),
-                rt.registrations.commands.clone(),
-                rt.registrations.panels.clone(),
-                rt.registrations.schedules.clone(),
-                rt.registrations.agents.first().cloned(),
-            ),
-            None => (Vec::new(), Vec::new(), Vec::new(), Vec::new(), None),
-        };
+        let (tools, tool_schemas, commands, panels, schedules, explicit_agent, has_runtime_html) =
+            match &p.runtime {
+                Some(rt) => (
+                    rt.registrations
+                        .tools
+                        .iter()
+                        .map(|t| t.name.clone())
+                        .collect::<Vec<_>>(),
+                    rt.registrations
+                        .tools
+                        .iter()
+                        .map(|t| PluginToolDescriptor {
+                            name: t.name.clone(),
+                            description: t.description.clone(),
+                            parameters: t.parameters.clone(),
+                            mutating: t.is_mutating,
+                        })
+                        .collect::<Vec<_>>(),
+                    rt.registrations.commands.clone(),
+                    rt.live_panels(),
+                    rt.registrations.schedules.clone(),
+                    rt.registrations.agents.first().cloned(),
+                    rt.live_custom_html().is_some(),
+                ),
+                None => (
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    None,
+                    false,
+                ),
+            };
+
+        let has_disk_ui = p.dir.join("ui/index.html").is_file()
+            || p.manifest
+                .ui_entry
+                .as_ref()
+                .is_some_and(|u| p.dir.join(u).is_file());
+        let has_custom_ui = has_runtime_html || has_disk_ui;
 
         // Guarantee every enabled & loaded plugin gets one automatic sidebar agent.
         let agent = if p.manifest.enabled && p.runtime.is_some() {
@@ -488,15 +656,61 @@ impl PluginManager {
             builtin: p.manifest.builtin,
             path: p.dir.clone(),
             last_error: p.last_error.clone(),
+            has_custom_ui,
+            ui_entry: p.manifest.ui_entry.clone(),
             tools,
+            tool_schemas,
             commands,
             agent,
             panels,
             schedules,
             settings,
+            config_schema: p.manifest.config_schema.clone(),
             builder_spec: p.manifest.builder_spec.clone(),
         }
     }
+}
+
+fn sanitize_relative_ui_path(raw: &str) -> Result<PathBuf, String> {
+    let trimmed = raw.trim().trim_start_matches('/');
+    if trimmed.is_empty() || trimmed.contains('\0') || trimmed.contains('\\') {
+        return Err(format!("invalid plugin UI path: '{raw}'"));
+    }
+    let path = Path::new(trimmed);
+    let mut clean = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            Component::Normal(seg) => clean.push(seg),
+            _ => return Err(format!("unsafe plugin UI path: '{raw}'")),
+        }
+    }
+    if clean.as_os_str().is_empty() {
+        return Err(format!("empty plugin UI path: '{raw}'"));
+    }
+    Ok(clean)
+}
+
+fn guess_ui_mime(path: &Path) -> String {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("html" | "htm") => "text/html; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("js" | "mjs") => "application/javascript; charset=utf-8",
+        Some("json") => "application/json; charset=utf-8",
+        Some("svg") => "image/svg+xml",
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("ico") => "image/x-icon",
+        Some("txt" | "md") => "text/plain; charset=utf-8",
+        _ => "application/octet-stream",
+    }
+    .to_string()
 }
 
 /// Bridges a JS/TS plugin tool handler into `harness_core::Tool`.
@@ -653,6 +867,7 @@ mod tests {
             description: "Minimal TS plugin".to_string(),
             entry: "src/index.ts".to_string(),
             compiled: "dist/index.js".to_string(),
+            ui_entry: None,
             enabled: true,
             builtin: false,
             auto_agent: Default::default(),

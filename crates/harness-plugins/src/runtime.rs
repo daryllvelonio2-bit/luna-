@@ -58,6 +58,8 @@ enum ActorCmd {
 pub struct PluginRuntimeHandle {
     pub plugin_id: String,
     pub registrations: PluginRegistrations,
+    live_panels: Arc<Mutex<Vec<PluginUiPanel>>>,
+    live_custom_html: Arc<Mutex<Option<String>>>,
     cmd_tx: mpsc::UnboundedSender<ActorCmd>,
     join_handle: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
@@ -72,13 +74,25 @@ impl PluginRuntimeHandle {
         let (init_tx, init_rx) = std::sync::mpsc::channel::<
             Result<(PluginRegistrations, mpsc::UnboundedSender<ActorCmd>), String>,
         >();
+        let live_panels = Arc::new(Mutex::new(Vec::new()));
+        let live_custom_html = Arc::new(Mutex::new(None));
+        let live_panels_clone = live_panels.clone();
+        let live_custom_html_clone = live_custom_html.clone();
 
         let plugin_id = manifest.id.clone();
         let thread_name = format!("luna-plugin-{}", plugin_id);
         let handle = std::thread::Builder::new()
             .name(thread_name)
             .spawn(move || {
-                run_plugin_actor(manifest, plugin_dir, js_code, tokio_handle, init_tx);
+                run_plugin_actor(
+                    manifest,
+                    plugin_dir,
+                    js_code,
+                    tokio_handle,
+                    live_panels_clone,
+                    live_custom_html_clone,
+                    init_tx,
+                );
             })
             .map_err(|e| format!("failed to spawn plugin thread: {e}"))?;
 
@@ -86,6 +100,8 @@ impl PluginRuntimeHandle {
             Ok(Ok((registrations, cmd_tx))) => Ok(Self {
                 plugin_id,
                 registrations,
+                live_panels,
+                live_custom_html,
                 cmd_tx,
                 join_handle: Mutex::new(Some(handle)),
             }),
@@ -98,6 +114,20 @@ impl PluginRuntimeHandle {
                 Err(format!("plugin actor terminated during startup: {e}"))
             }
         }
+    }
+
+    pub fn live_panels(&self) -> Vec<PluginUiPanel> {
+        self.live_panels
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    pub fn live_custom_html(&self) -> Option<String> {
+        self.live_custom_html
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     pub async fn call_tool(&self, name: &str, args: &serde_json::Value) -> Result<String, String> {
@@ -273,6 +303,18 @@ globalThis.__luna_create_ctx = function(pluginId) {
     ui: {
       registerPanel: function(panel) {
         __luna_host.registerPanel(JSON.stringify(panel));
+      },
+      updatePanel: function(panelId, patch) {
+        __luna_host.updatePanel(String(panelId || ''), JSON.stringify(patch || {}));
+      },
+      removePanel: function(panelId) {
+        __luna_host.removePanel(String(panelId || ''));
+      },
+      getPanels: function() {
+        return JSON.parse(__luna_host.getPanels());
+      },
+      setCustomHtml: function(html) {
+        __luna_host.setCustomHtml(html === null || html === undefined ? '' : String(html));
       }
     },
     effect: function(disposer) {
@@ -323,6 +365,8 @@ fn run_plugin_actor(
     plugin_dir: PathBuf,
     js_code: String,
     tokio_handle: Option<tokio::runtime::Handle>,
+    live_panels: Arc<Mutex<Vec<PluginUiPanel>>>,
+    live_custom_html: Arc<Mutex<Option<String>>>,
     init_tx: std::sync::mpsc::Sender<
         Result<(PluginRegistrations, mpsc::UnboundedSender<ActorCmd>), String>,
     >,
@@ -357,6 +401,8 @@ fn run_plugin_actor(
             &manifest.id,
             &plugin_dir,
             registrations.clone(),
+            live_panels.clone(),
+            live_custom_html.clone(),
             storage.clone(),
             tokio_handle.clone(),
         )
@@ -474,11 +520,30 @@ fn run_plugin_actor(
     }
 }
 
+fn parse_widgets_tolerant(val: &serde_json::Value) -> Vec<PluginWidget> {
+    let Some(arr) = val.as_array() else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter_map(|item| serde_json::from_value::<PluginWidget>(item.clone()).ok())
+        .collect()
+}
+
+fn upsert_panel(panels: &mut Vec<PluginUiPanel>, panel: PluginUiPanel) {
+    if let Some(existing) = panels.iter_mut().find(|p| p.id == panel.id) {
+        *existing = panel;
+    } else {
+        panels.push(panel);
+    }
+}
+
 fn install_host_bindings<'js>(
     ctx: &rquickjs::Ctx<'js>,
     plugin_id: &str,
     plugin_dir: &Path,
     regs: Arc<Mutex<PluginRegistrations>>,
+    live_panels: Arc<Mutex<Vec<PluginUiPanel>>>,
+    live_custom_html: Arc<Mutex<Option<String>>>,
     storage: Arc<PluginStorage>,
     tokio_handle: Option<tokio::runtime::Handle>,
 ) -> rquickjs::Result<()> {
@@ -699,6 +764,7 @@ fn install_host_bindings<'js>(
     {
         let pid = plugin_id.to_string();
         let regs = regs.clone();
+        let live_panels = live_panels.clone();
         host.set(
             "registerPanel",
             Function::new(
@@ -717,24 +783,128 @@ fn install_host_bindings<'js>(
                         .unwrap_or("Panel")
                         .to_string();
                     let icon = val.get("icon").and_then(|v| v.as_str()).map(str::to_string);
-                    let widgets: Vec<PluginWidget> = val
+                    let widgets = val
                         .get("widgets")
-                        .cloned()
-                        .and_then(|w| serde_json::from_value(w).ok())
+                        .map(parse_widgets_tolerant)
                         .unwrap_or_default();
-                    regs.lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .panels
-                        .push(PluginUiPanel {
+                    let panel = PluginUiPanel {
+                        plugin_id: pid.clone(),
+                        id,
+                        title,
+                        icon,
+                        widgets,
+                    };
+                    upsert_panel(
+                        &mut regs.lock().unwrap_or_else(|e| e.into_inner()).panels,
+                        panel.clone(),
+                    );
+                    upsert_panel(
+                        &mut live_panels.lock().unwrap_or_else(|e| e.into_inner()),
+                        panel,
+                    );
+                    Ok(())
+                },
+            )?,
+        )?;
+    }
+
+    // updatePanel
+    {
+        let pid = plugin_id.to_string();
+        let live_panels = live_panels.clone();
+        host.set(
+            "updatePanel",
+            Function::new(
+                ctx.clone(),
+                move |panel_id: String, json_str: String| -> rquickjs::Result<()> {
+                    let val: serde_json::Value =
+                        serde_json::from_str(&json_str).unwrap_or_default();
+                    let target_id = if panel_id.trim().is_empty() {
+                        val.get("id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("panel")
+                            .to_string()
+                    } else {
+                        panel_id
+                    };
+                    let mut guard = live_panels.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some(existing) = guard.iter_mut().find(|p| p.id == target_id) {
+                        if let Some(t) = val.get("title").and_then(|v| v.as_str()) {
+                            existing.title = t.to_string();
+                        }
+                        if let Some(ic) = val.get("icon").and_then(|v| v.as_str()) {
+                            existing.icon = Some(ic.to_string());
+                        }
+                        if let Some(w) = val.get("widgets") {
+                            existing.widgets = parse_widgets_tolerant(w);
+                        }
+                    } else {
+                        let title = val
+                            .get("title")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("Panel")
+                            .to_string();
+                        let icon = val.get("icon").and_then(|v| v.as_str()).map(str::to_string);
+                        let widgets = val
+                            .get("widgets")
+                            .map(parse_widgets_tolerant)
+                            .unwrap_or_default();
+                        guard.push(PluginUiPanel {
                             plugin_id: pid.clone(),
-                            id,
+                            id: target_id,
                             title,
                             icon,
                             widgets,
                         });
+                    }
                     Ok(())
                 },
             )?,
+        )?;
+    }
+
+    // removePanel
+    {
+        let live_panels = live_panels.clone();
+        host.set(
+            "removePanel",
+            Function::new(
+                ctx.clone(),
+                move |panel_id: String| -> rquickjs::Result<()> {
+                    let mut guard = live_panels.lock().unwrap_or_else(|e| e.into_inner());
+                    guard.retain(|p| p.id != panel_id);
+                    Ok(())
+                },
+            )?,
+        )?;
+    }
+
+    // getPanels
+    {
+        let live_panels = live_panels;
+        host.set(
+            "getPanels",
+            Function::new(ctx.clone(), move || -> String {
+                let guard = live_panels.lock().unwrap_or_else(|e| e.into_inner());
+                serde_json::to_string(&*guard).unwrap_or_else(|_| "[]".to_string())
+            })?,
+        )?;
+    }
+
+    // setCustomHtml
+    {
+        let custom_html = live_custom_html;
+        host.set(
+            "setCustomHtml",
+            Function::new(ctx.clone(), move |html: String| -> rquickjs::Result<()> {
+                let mut guard = custom_html.lock().unwrap_or_else(|e| e.into_inner());
+                if html.trim().is_empty() {
+                    *guard = None;
+                } else {
+                    *guard = Some(html);
+                }
+                Ok(())
+            })?,
         )?;
     }
 

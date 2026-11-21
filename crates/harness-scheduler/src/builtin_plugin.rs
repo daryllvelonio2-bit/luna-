@@ -52,6 +52,7 @@ pub fn ensure_scheduler_plugin(manager: &PluginManager) -> Result<(), String> {
         description: "Built-in scheduled reminders & recurring automation tasks.".to_string(),
         entry: "src/index.ts".to_string(),
         compiled: "dist/index.js".to_string(),
+        ui_entry: None,
         enabled: true,
         builtin: true,
         auto_agent: AutoAgentSpec {

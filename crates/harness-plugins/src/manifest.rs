@@ -41,19 +41,45 @@ pub enum PluginWidget {
         id: String,
         label: String,
         value: String,
+        #[serde(default)]
         subtitle: Option<String>,
     },
     Table {
         id: String,
         title: String,
+        #[serde(default)]
         columns: Vec<String>,
+        #[serde(default)]
         rows: Vec<Vec<String>>,
     },
     ActionButton {
         id: String,
         label: String,
         action: String,
+        #[serde(default)]
         variant: Option<String>,
+        #[serde(default)]
+        args: Option<serde_json::Value>,
+    },
+    InputAction {
+        id: String,
+        label: String,
+        #[serde(default)]
+        placeholder: Option<String>,
+        button_label: String,
+        action: String,
+        #[serde(default)]
+        arg_name: Option<String>,
+        #[serde(default)]
+        variant: Option<String>,
+    },
+    Progress {
+        id: String,
+        label: String,
+        value: f64,
+        max: f64,
+        #[serde(default)]
+        subtitle: Option<String>,
     },
     Markdown {
         id: String,
@@ -61,8 +87,22 @@ pub enum PluginWidget {
     },
     KeyValue {
         id: String,
+        #[serde(alias = "entries")]
         items: Vec<(String, String)>,
     },
+    Html {
+        id: String,
+        content: String,
+    },
+}
+
+/// Tool schema metadata exposed in `PluginSummary` for interactive UI runners.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PluginToolDescriptor {
+    pub name: String,
+    pub description: String,
+    pub parameters: serde_json::Value,
+    pub mutating: bool,
 }
 
 /// A UI panel contributed by a plugin (`ctx.ui.registerPanel(...)`).
@@ -144,6 +184,8 @@ pub struct PluginManifest {
     pub entry: String,
     #[serde(default = "default_compiled")]
     pub compiled: String,
+    #[serde(default)]
+    pub ui_entry: Option<String>,
     #[serde(default = "default_true")]
     pub enabled: bool,
     #[serde(default)]
@@ -184,11 +226,17 @@ pub struct PluginSummary {
     pub builtin: bool,
     pub path: PathBuf,
     pub last_error: Option<String>,
+    pub has_custom_ui: bool,
+    pub ui_entry: Option<String>,
     pub tools: Vec<String>,
+    #[serde(default)]
+    pub tool_schemas: Vec<PluginToolDescriptor>,
     pub commands: Vec<PluginCommandSpec>,
     pub agent: Option<PluginAgentEntry>,
     pub panels: Vec<PluginUiPanel>,
     pub schedules: Vec<PluginScheduleDecl>,
     pub settings: BTreeMap<String, serde_json::Value>,
+    #[serde(default)]
+    pub config_schema: Vec<PluginConfigField>,
     pub builder_spec: Option<serde_json::Value>,
 }

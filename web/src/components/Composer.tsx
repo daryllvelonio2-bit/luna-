@@ -89,6 +89,7 @@ interface ComposerProps {
   turnRunning: boolean;
   workers: Record<string, WorkerProfile>;
   skills: SkillSummary[];
+  pluginCommands?: Array<{ pluginId: string; name: string; description: string }>;
   composerPrefill?: string | null;
   onClearComposerPrefill?: () => void;
   onSend: (text: string, images?: string[], sendMode?: 'steer' | 'queue') => void;
@@ -122,6 +123,7 @@ export const Composer: React.FC<ComposerProps> = React.memo(
     turnRunning,
     workers,
     skills,
+    pluginCommands,
     composerPrefill,
     onClearComposerPrefill,
     onSend,
@@ -198,8 +200,18 @@ export const Composer: React.FC<ComposerProps> = React.memo(
           hasArg: true,
         });
       });
+      (pluginCommands || []).forEach((pc) => {
+        if (!items.some((it) => it.cmd === `/${pc.name}`)) {
+          items.push({
+            cmd: `/${pc.name}`,
+            desc: pc.description || `Plugin command (${pc.pluginId})`,
+            category: 'command',
+            hasArg: true,
+          });
+        }
+      });
       return items;
-    }, [workers, skills]);
+    }, [workers, skills, pluginCommands]);
 
     const slashQuery = useMemo(() => {
       if (slashDismissed || !input.startsWith('/') || input.includes('\n')) return null;

@@ -153,6 +153,7 @@ pub fn generate_plugin_files(spec: &PluginBuilderSpec) -> Result<GeneratedPlugin
         description: spec.description.trim().to_string(),
         entry: "src/index.ts".to_string(),
         compiled: "dist/index.js".to_string(),
+        ui_entry: None,
         enabled: true,
         builtin: false,
         auto_agent: AutoAgentSpec {

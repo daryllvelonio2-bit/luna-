@@ -144,6 +144,7 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/memories", get(search_memories))
         .route("/api/notes", get(search_notes))
         .route("/api/notes/{note_id}", get(get_note))
+        .merge(crate::plugin_routes::plugin_router())
         .merge(crate::extra_routes::extra_router())
         // Static assets fallback
         .fallback(static_handler)
@@ -636,6 +637,7 @@ fn spawn_session_turn(
                 query: msg.clone(),
             });
             let started = std::time::Instant::now();
+            let plugin_gen_before = state.plugin_manager.generation();
 
             let (result, provider, model) = {
                 let rt = handle.runtime.lock().await;
@@ -645,6 +647,9 @@ fn spawn_session_turn(
             };
 
             handle.turn_running.store(false, Ordering::SeqCst);
+            if state.plugin_manager.generation() != plugin_gen_before {
+                state.sync_plugins_after_change().await;
+            }
             let elapsed = started.elapsed().as_millis() as u64;
 
             match result {
@@ -1339,7 +1344,7 @@ async fn create_plugin_from_spec(
         .plugin_manager
         .install_from_builder(&payload)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    state.invalidate_idle_sessions().await;
+    state.sync_plugins_after_change().await;
     Ok(StatusCode::OK)
 }
 
@@ -1356,7 +1361,7 @@ async fn toggle_plugin(
         .plugin_manager
         .set_enabled(&plugin_id, enabled)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    state.invalidate_idle_sessions().await;
+    state.sync_plugins_after_change().await;
     Ok(StatusCode::OK)
 }
 
@@ -1376,7 +1381,7 @@ async fn delete_plugin(
         .plugin_manager
         .remove(&plugin_id)
         .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
-    state.invalidate_idle_sessions().await;
+    state.sync_plugins_after_change().await;
     Ok(StatusCode::OK)
 }
 

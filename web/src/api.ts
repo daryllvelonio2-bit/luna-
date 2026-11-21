@@ -11,6 +11,7 @@ import type {
   ModelTarget,
   NoteEntry,
   PluginBuilderSpec,
+  PluginExecResponse,
   PluginSummary,
   ProfileItem,
   ProviderInfo,
@@ -605,6 +606,63 @@ class ApiClient {
 
   public async listPlugins(): Promise<PluginSummary[]> {
     return this.request<PluginSummary[]>('/api/plugins');
+  }
+
+  public async getPlugin(pluginId: string): Promise<PluginSummary> {
+    return this.request<PluginSummary>(`/api/plugins/${encodeURIComponent(pluginId)}`);
+  }
+
+  public async reloadPlugin(pluginId: string): Promise<PluginSummary> {
+    return this.request<PluginSummary>(`/api/plugins/${encodeURIComponent(pluginId)}/reload`, {
+      method: 'POST',
+    });
+  }
+
+  public async runPluginCommand(
+    pluginId: string,
+    commandName: string,
+    args?: Record<string, unknown>
+  ): Promise<PluginExecResponse> {
+    return this.request<PluginExecResponse>(
+      `/api/plugins/${encodeURIComponent(pluginId)}/commands/${encodeURIComponent(commandName)}`,
+      {
+        method: 'POST',
+        body: JSON.stringify(args || {}),
+      }
+    );
+  }
+
+  public async runPluginTool(
+    pluginId: string,
+    toolName: string,
+    args?: Record<string, unknown>
+  ): Promise<PluginExecResponse> {
+    return this.request<PluginExecResponse>(
+      `/api/plugins/${encodeURIComponent(pluginId)}/tools/${encodeURIComponent(toolName)}`,
+      {
+        method: 'POST',
+        body: JSON.stringify(args || {}),
+      }
+    );
+  }
+
+  public async getPluginSettings(pluginId: string): Promise<Record<string, unknown>> {
+    return this.request<Record<string, unknown>>(
+      `/api/plugins/${encodeURIComponent(pluginId)}/settings`
+    );
+  }
+
+  public async updatePluginSettings(
+    pluginId: string,
+    patch: Record<string, unknown>
+  ): Promise<PluginSummary> {
+    return this.request<PluginSummary>(
+      `/api/plugins/${encodeURIComponent(pluginId)}/settings`,
+      {
+        method: 'POST',
+        body: JSON.stringify(patch),
+      }
+    );
   }
 
   public async createPluginFromSpec(spec: PluginBuilderSpec): Promise<void> {

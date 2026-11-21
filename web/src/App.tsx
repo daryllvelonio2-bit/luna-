@@ -98,6 +98,8 @@ export const App: React.FC = () => {
 
   const [schedules, setSchedules] = useState<ScheduleTask[]>([]);
   const [plugins, setPlugins] = useState<PluginSummary[]>([]);
+  const [activeChatPluginId, setActiveChatPluginId] = useState<string | null>(null);
+  const [pluginPanelOpen, setPluginPanelOpen] = useState(false);
 
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>('general');
@@ -350,6 +352,32 @@ export const App: React.FC = () => {
             if (event.name === 'todo_list') {
               api.getTodos(event.session_id).then((r) => setTodos(r.items || [])).catch(() => {});
             }
+            if (
+              event.name === 'plugin_create' ||
+              event.name === 'plugin_reload' ||
+              event.name === 'plugin_remove'
+            ) {
+              api.listPlugins().then(setPlugins).catch(() => {});
+              api
+                .bootstrap(event.session_id)
+                .then((boot) => setSidebarAgents(boot.sidebar_agents || []))
+                .catch(() => {});
+              if (event.name === 'plugin_create' || event.name === 'plugin_reload') {
+                try {
+                  const created = JSON.parse(event.output) as PluginSummary;
+                  if (
+                    created &&
+                    created.id &&
+                    (created.has_custom_ui || (created.panels && created.panels.length > 0))
+                  ) {
+                    setActiveChatPluginId(created.id);
+                    setPluginPanelOpen(true);
+                  }
+                } catch {
+                  // ignore non-JSON outputs
+                }
+              }
+            }
           }
           break;
 
@@ -512,6 +540,7 @@ export const App: React.FC = () => {
       pendingReasoningDeltaRef.current = '';
       liveToolCallsRef.current = [];
       setActiveSessionId(sid);
+      setActiveChatPluginId(null);
       setPendingApproval(null);
       setPendingClarify(null);
       setTurnRunning(false);
@@ -544,6 +573,10 @@ export const App: React.FC = () => {
         const updated = await api.listSessions(150);
         setSessions(updated);
         handleSelectSession(sid);
+        if (agentId) {
+          setActiveChatPluginId(agentId);
+          setPluginPanelOpen(true);
+        }
         setCurrentTab('chat');
       } catch (e) {
         showError(`Failed to create session: ${String(e)}`);
@@ -883,6 +916,28 @@ export const App: React.FC = () => {
         return true;
       }
 
+      // Check plugin-registered slash commands: /<cmd> [arg]
+      const cmdName = cmd.slice(1);
+      for (const p of plugins) {
+        if (!p.enabled || !p.loaded) continue;
+        if (p.commands?.some((c) => c.name === cmdName)) {
+          api
+            .runPluginCommand(p.id, cmdName, arg ? { input: arg, arg } : {})
+            .then((res) => {
+              if (res.summary) {
+                setPlugins((prev) =>
+                  prev.map((item) => (item.id === res.summary!.id ? res.summary! : item))
+                );
+              } else {
+                api.listPlugins().then(setPlugins).catch(() => {});
+              }
+              pushNotice(res.output || `Ran /${cmdName}.`);
+            })
+            .catch((e) => showError(String(e)));
+          return true;
+        }
+      }
+
       // Check configured workers: /<name> <task>
       const workerKey = cmd.slice(1);
       if (workers[workerKey] && sid && arg) {
@@ -901,6 +956,7 @@ export const App: React.FC = () => {
     [
       reasoningEffort,
       sessionMode,
+      plugins,
       workers,
       handleChangeReasoning,
       handleChangeMode,
@@ -1242,7 +1298,59 @@ export const App: React.FC = () => {
     setComposerPrefill('/plugin help me create a ');
   };
 
+  const handlePluginUpdated = useCallback((updated: PluginSummary) => {
+    setPlugins((prev) => {
+      const idx = prev.findIndex((p) => p.id === updated.id);
+      if (idx === -1) return [...prev, updated];
+      const next = [...prev];
+      next[idx] = updated;
+      return next;
+    });
+  }, []);
+
+  const handleChatWithPluginAgent = useCallback(
+    async (agentId: string) => {
+      const matching = plugins.find((p) => p.agent?.id === agentId || p.id === agentId);
+      setActiveChatPluginId(matching ? matching.id : null);
+      setPluginPanelOpen(Boolean(matching?.has_custom_ui || matching?.panels.length));
+      await handleNewSession(agentId);
+      setCurrentTab('chat');
+    },
+    [plugins, handleNewSession]
+  );
+
+  const handleEditPluginWithLuna = useCallback(
+    async (plugin: PluginSummary) => {
+      setActiveChatPluginId(plugin.id);
+      setPluginPanelOpen(Boolean(plugin.has_custom_ui || plugin.panels.length));
+      await handleNewSession(null);
+      setCurrentTab('chat');
+      setComposerPrefill(`/plugin update ${plugin.id} (${plugin.path || ''}) to `);
+    },
+    [handleNewSession]
+  );
+
   const activeSessionItem = sessions.find((s) => s.record.id === activeSessionId);
+  const sessionPluginId = activeSessionItem?.plugin_agent_id
+    ? plugins.find(
+        (p) =>
+          p.agent?.id === activeSessionItem.plugin_agent_id ||
+          p.id === activeSessionItem.plugin_agent_id
+      )?.id || null
+    : null;
+  const resolvedChatPluginId = activeChatPluginId || sessionPluginId;
+  const activeChatPlugin = resolvedChatPluginId
+    ? plugins.find((p) => p.id === resolvedChatPluginId && p.enabled && p.loaded) || null
+    : null;
+  const pluginCommands = plugins
+    .filter((p) => p.enabled && p.loaded)
+    .flatMap((p) =>
+      (p.commands || []).map((c) => ({
+        pluginId: p.id,
+        name: c.name,
+        description: c.description,
+      }))
+    );
   const activeTitle = activeSessionItem
     ? activeSessionItem.record.name ||
       activeSessionItem.record.title ||
@@ -1304,6 +1412,14 @@ export const App: React.FC = () => {
             goal={goal}
             workers={workers}
             skills={skills}
+            pluginCommands={pluginCommands}
+            activePlugin={activeChatPlugin}
+            pluginPanelOpen={pluginPanelOpen}
+            onTogglePluginPanel={() => setPluginPanelOpen((v) => !v)}
+            onPluginUpdated={handlePluginUpdated}
+            onEditPluginWithLuna={handleEditPluginWithLuna}
+            onNotify={pushNotice}
+            theme={theme}
             notices={notices}
             onDismissNotice={(id) => setNotices((prev) => prev.filter((n) => n.id !== id))}
             messages={messages}
@@ -1364,12 +1480,17 @@ export const App: React.FC = () => {
         {currentTab === 'plugins' && (
           <PluginsView
             plugins={plugins}
+            theme={theme}
             sidebarOpen={sidebarOpen}
             onToggleSidebar={() => setSidebarOpen((v) => !v)}
             onTogglePlugin={handleTogglePlugin}
             onDeletePlugin={handleDeletePlugin}
+            onPluginUpdated={handlePluginUpdated}
             onRefresh={() => api.listPlugins().then(setPlugins).catch(() => {})}
             onStartPluginConversation={handleStartPluginConversation}
+            onChatWithAgent={handleChatWithPluginAgent}
+            onEditWithLuna={handleEditPluginWithLuna}
+            onNotify={pushNotice}
           />
         )}
 

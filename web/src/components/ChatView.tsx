@@ -4,6 +4,7 @@ import type {
   ApprovalRequestPayload,
   ClarifyRequestPayload,
   GoalStatus,
+  PluginSummary,
   SkillSummary,
   TodoItem,
   ToolCallItem,
@@ -31,9 +32,11 @@ import {
   Minimize2,
   GitFork,
   Activity,
+  AppWindow,
 } from 'lucide-react';
 import { MarkdownContent } from './MarkdownContent';
 import { Composer } from './Composer';
+import { PluginWorkspace } from './PluginWorkspace';
 import type { ActiveDrawerTab } from './SessionDrawers';
 
 interface ChatViewProps {
@@ -52,6 +55,14 @@ interface ChatViewProps {
   goal: GoalStatus | null;
   workers: Record<string, WorkerProfile>;
   skills: SkillSummary[];
+  pluginCommands?: Array<{ pluginId: string; name: string; description: string }>;
+  activePlugin?: PluginSummary | null;
+  pluginPanelOpen?: boolean;
+  onTogglePluginPanel?: () => void;
+  onPluginUpdated?: (updated: PluginSummary) => void;
+  onEditPluginWithLuna?: (plugin: PluginSummary) => void;
+  onNotify?: (msg: string, kind?: 'info' | 'err') => void;
+  theme?: 'dark' | 'light';
   composerPrefill?: string | null;
   onClearComposerPrefill?: () => void;
   notices: Array<{ id: string; text: string; kind: 'info' | 'err' }>;
@@ -520,6 +531,14 @@ export const ChatView: React.FC<ChatViewProps> = ({
   goal,
   workers,
   skills,
+  pluginCommands,
+  activePlugin,
+  pluginPanelOpen,
+  onTogglePluginPanel,
+  onPluginUpdated,
+  onEditPluginWithLuna,
+  onNotify,
+  theme = 'dark',
   composerPrefill,
   onClearComposerPrefill,
   notices,
@@ -782,6 +801,18 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
           {sessionId && (
             <div className="header-actions-group">
+              {activePlugin && onTogglePluginPanel && (
+                <button
+                  type="button"
+                  className={`header-action-btn ${pluginPanelOpen ? 'active' : ''}`}
+                  onClick={onTogglePluginPanel}
+                  title={`Toggle ${activePlugin.name} UI`}
+                >
+                  <AppWindow size={14} />
+                  <span style={{ fontSize: '12px', marginLeft: '4px' }}>UI</span>
+                </button>
+              )}
+
               <button
                 type="button"
                 className="header-action-btn"
@@ -911,8 +942,10 @@ export const ChatView: React.FC<ChatViewProps> = ({
         </div>
       )}
 
-      <div className="messages-area" ref={messagesAreaRef}>
-        <div className="messages-column">
+      <div className={`chat-split-layout ${activePlugin && pluginPanelOpen ? 'split-open' : ''}`}>
+        <div className="chat-main-pane">
+          <div className="messages-area" ref={messagesAreaRef}>
+            <div className="messages-column">
           {hiddenTurnCount > 0 && (
             <div className="load-earlier-wrap">
               <button
@@ -1276,32 +1309,50 @@ export const ChatView: React.FC<ChatViewProps> = ({
         </div>
       )}
 
-      <Composer
-        sessionId={sessionId}
-        workspaceRoot={workspaceRoot}
-        showWorkspacePicker={!hasUserOrAssistantMessages}
-        provider={provider}
-        model={model}
-        accountLabel={accountLabel}
-        mode={mode}
-        reasoningEffort={reasoningEffort}
-        contextTokens={contextTokens}
-        contextWindow={contextWindow}
-        queuedCount={queuedCount}
-        turnRunning={turnRunning}
-        workers={workers}
-        skills={skills}
-        composerPrefill={composerPrefill}
-        onClearComposerPrefill={onClearComposerPrefill}
-        onSend={onSendMessage}
-        onSlashCommand={onSlashCommand}
-        onInterrupt={onInterrupt}
-        onChangeMode={onChangeMode}
-        onChangeReasoning={onChangeReasoning}
-        onOpenModelPicker={onOpenModelPicker}
-        onOpenWorkspacePicker={onOpenWorkspacePicker}
-        onOpenUsage={() => onOpenDrawer('usage')}
-      />
+          <Composer
+            sessionId={sessionId}
+            workspaceRoot={workspaceRoot}
+            showWorkspacePicker={!hasUserOrAssistantMessages}
+            provider={provider}
+            model={model}
+            accountLabel={accountLabel}
+            mode={mode}
+            reasoningEffort={reasoningEffort}
+            contextTokens={contextTokens}
+            contextWindow={contextWindow}
+            queuedCount={queuedCount}
+            turnRunning={turnRunning}
+            workers={workers}
+            skills={skills}
+            pluginCommands={pluginCommands}
+            composerPrefill={composerPrefill}
+            onClearComposerPrefill={onClearComposerPrefill}
+            onSend={onSendMessage}
+            onSlashCommand={onSlashCommand}
+            onInterrupt={onInterrupt}
+            onChangeMode={onChangeMode}
+            onChangeReasoning={onChangeReasoning}
+            onOpenModelPicker={onOpenModelPicker}
+            onOpenWorkspacePicker={onOpenWorkspacePicker}
+            onOpenUsage={() => onOpenDrawer('usage')}
+          />
+        </div>
+
+        {activePlugin && pluginPanelOpen && (
+          <aside className="chat-plugin-pane">
+            <PluginWorkspace
+              plugin={activePlugin}
+              theme={theme}
+              compact={true}
+              onPluginUpdated={(updated) => onPluginUpdated?.(updated)}
+              onBackOrClose={() => onTogglePluginPanel?.()}
+              onEditWithLuna={onEditPluginWithLuna}
+              onSendToChat={(msg) => onSendMessage(msg)}
+              onNotify={(msg, kind) => onNotify?.(msg, kind)}
+            />
+          </aside>
+        )}
+      </div>
     </div>
   );
 };
