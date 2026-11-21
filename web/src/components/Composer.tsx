@@ -7,9 +7,11 @@ import type {
 import {
   ArrowUp,
   Square,
-  Folder,
   ChevronDown,
-  ImagePlus,
+  Plus,
+  SquarePen,
+  Mic,
+  MicOff,
   X,
   Brain,
   CornerDownRight,
@@ -78,6 +80,7 @@ interface ComposerProps {
   sessionId: string | null;
   workspaceRoot: string;
   showWorkspacePicker: boolean;
+  landingMode?: boolean;
   provider: string;
   model: string;
   accountLabel?: string | null;
@@ -100,6 +103,22 @@ interface ComposerProps {
   onOpenModelPicker: (anchorRect?: DOMRect) => void;
   onOpenWorkspacePicker: () => void;
   onOpenUsage: () => void;
+  onNotify?: (msg: string, kind?: 'info' | 'err') => void;
+}
+
+function shortModelLabel(model: string, provider: string): string {
+  const raw = (model || provider || 'Model').trim();
+  const leaf = raw.includes('/') ? raw.split('/').pop() || raw : raw;
+  const cleaned = leaf.replace(/\s*\([^)]*\)\s*$/g, '').trim();
+  const match = cleaned.match(/^(?:Gemini|Claude|GPT|DeepSeek|Llama|Qwen)\s+[\d.]+\s+(.+)$/i);
+  if (match && match[1]) {
+    return match[1].trim();
+  }
+  const parts = cleaned.split(/\s+/);
+  if (parts.length >= 3 && /^[\d.]+$/.test(parts[1])) {
+    return parts.slice(2).join(' ');
+  }
+  return cleaned || raw;
 }
 
 function formatCompactTokens(n: number): string {
@@ -112,6 +131,7 @@ export const Composer: React.FC<ComposerProps> = React.memo(
     sessionId,
     workspaceRoot,
     showWorkspacePicker,
+    landingMode = false,
     provider,
     model,
     accountLabel,
@@ -134,15 +154,22 @@ export const Composer: React.FC<ComposerProps> = React.memo(
     onOpenModelPicker,
     onOpenWorkspacePicker,
     onOpenUsage,
+    onNotify,
   }) => {
     const [input, setInput] = useState('');
     const [images, setImages] = useState<string[]>([]);
     const [slashIndex, setSlashIndex] = useState(0);
     const [slashDismissed, setSlashDismissed] = useState(false);
     const [thinkingOpen, setThinkingOpen] = useState(false);
+    const [dictating, setDictating] = useState(false);
     const thinkingRef = useRef<HTMLDivElement>(null);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
+    const recognitionRef = useRef<{ stop: () => void } | null>(null);
+    void workspaceRoot;
+    void showWorkspacePicker;
+    void accountLabel;
+    void onOpenWorkspacePicker;
 
     useEffect(() => {
       if (composerPrefill != null) {
@@ -361,36 +388,97 @@ export const Composer: React.FC<ComposerProps> = React.memo(
       }
     };
 
-    const workspaceFolder =
-      workspaceRoot.split('/').filter(Boolean).pop() || workspaceRoot || 'Workspace';
+    useEffect(() => {
+      return () => {
+        recognitionRef.current?.stop();
+      };
+    }, []);
+
+    const toggleDictation = () => {
+      if (dictating) {
+        recognitionRef.current?.stop();
+        recognitionRef.current = null;
+        setDictating(false);
+        return;
+      }
+      const win = window as unknown as {
+        SpeechRecognition?: new () => {
+          continuous: boolean;
+          interimResults: boolean;
+          lang: string;
+          onresult: ((ev: { results: ArrayLike<ArrayLike<{ transcript: string }>> }) => void) | null;
+          onerror: (() => void) | null;
+          onend: (() => void) | null;
+          start: () => void;
+          stop: () => void;
+        };
+        webkitSpeechRecognition?: new () => {
+          continuous: boolean;
+          interimResults: boolean;
+          lang: string;
+          onresult: ((ev: { results: ArrayLike<ArrayLike<{ transcript: string }>> }) => void) | null;
+          onerror: (() => void) | null;
+          onend: (() => void) | null;
+          start: () => void;
+          stop: () => void;
+        };
+      };
+      const SpeechRec = win.SpeechRecognition || win.webkitSpeechRecognition;
+      if (!SpeechRec) {
+        onNotify?.('Browser speech recognition is unavailable here — type or use `luna voice`.', 'info');
+        return;
+      }
+      const rec = new SpeechRec();
+      rec.continuous = false;
+      rec.interimResults = false;
+      rec.lang = 'en-US';
+      rec.onresult = (ev) => {
+        let spoken = '';
+        for (let i = 0; i < ev.results.length; i++) {
+          spoken += ev.results[i]?.[0]?.transcript || '';
+        }
+        const clean = spoken.trim();
+        if (clean) {
+          setInput((prev) => (prev.trim() ? `${prev.trim()} ${clean}` : clean));
+          textareaRef.current?.focus();
+        }
+      };
+      rec.onerror = () => {
+        setDictating(false);
+        recognitionRef.current = null;
+      };
+      rec.onend = () => {
+        setDictating(false);
+        recognitionRef.current = null;
+      };
+      recognitionRef.current = rec;
+      setDictating(true);
+      rec.start();
+    };
+
+    const toggleSlashLauncher = () => {
+      if (input.startsWith('/') && !slashDismissed) {
+        setInput('');
+        setSlashDismissed(false);
+      } else {
+        setInput('/');
+        setSlashDismissed(false);
+      }
+      requestAnimationFrame(() => textareaRef.current?.focus());
+    };
+
     const pct =
       contextWindow > 0 ? Math.min(100, Math.round((contextTokens / contextWindow) * 100)) : 0;
 
     return (
       <div
-        className="composer-region"
+        className={landingMode ? 'composer-region composer-region-landing' : 'composer-region'}
         onDragOver={(e) => e.preventDefault()}
         onDrop={(e) => {
           e.preventDefault();
           attachFiles(e.dataTransfer.files);
         }}
       >
-        {sessionId && showWorkspacePicker && (
-          <div className="composer-workspace-row">
-            <button
-              type="button"
-              className="composer-workspace-btn"
-              onClick={onOpenWorkspacePicker}
-              title={`Workspace: ${workspaceRoot}`}
-            >
-              <Folder size={13} className="composer-workspace-icon" />
-              <span className="composer-workspace-name">{workspaceFolder}</span>
-              <span className="composer-workspace-path">{workspaceRoot}</span>
-              <ChevronDown size={12} className="composer-workspace-chevron" />
-            </button>
-          </div>
-        )}
-
         <div className="composer-anchor">
           {slashMatches.length > 0 && (
             <div className="slash-popover" role="listbox" aria-label="Slash commands">
@@ -439,9 +527,7 @@ export const Composer: React.FC<ComposerProps> = React.memo(
                   ? 'Select or start a conversation first'
                   : turnRunning
                   ? 'Steer this turn, queue next message, or type /…'
-                  : mode === 'plan'
-                  ? 'Plan mode (read-only) — describe what to blueprint, or type /…'
-                  : 'Message Luna, paste an image, or type / for commands…'
+                  : 'Message Luna, paste an image, or type / for commands...'
               }
               disabled={!sessionId}
               value={input}
@@ -456,66 +542,89 @@ export const Composer: React.FC<ComposerProps> = React.memo(
 
             <div className="composer-footer">
               <div className="composer-meta">
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/*"
+                  multiple
+                  hidden
+                  onChange={(e) => {
+                    attachFiles(e.target.files);
+                    e.target.value = '';
+                  }}
+                />
                 <button
                   type="button"
-                  className={`composer-ghost-pill mode-pill-${mode}`}
-                  onClick={cycleMode}
-                  title="Click or press Shift+Tab to switch mode (Build / Auto / Plan)"
+                  className="composer-tool-btn"
+                  disabled={!sessionId}
+                  onClick={() => fileInputRef.current?.click()}
+                  title="Attach image (or paste/drop)"
+                  aria-label="Attach image"
                 >
-                  <span className={`mode-dot mode-dot-${mode}`} />
-                  <span>{mode === 'build' ? 'Build' : mode === 'auto' ? 'Auto' : 'Plan'}</span>
+                  <Plus size={16} />
                 </button>
 
-                <label className="composer-ghost-select" title="Reasoning / thinking effort">
-                  <Brain size={12} />
-                  <div className="composer-thinking-wrap" ref={thinkingRef}>
-                    <button
-                      type="button"
-                      className="composer-thinking-trigger"
-                      disabled={!sessionId}
-                      aria-label="Reasoning effort"
-                      aria-haspopup="listbox"
-                      aria-expanded={thinkingOpen}
-                      onClick={() => setThinkingOpen((open) => !open)}
-                    >
-                      {EFFORTS.find((ef) => ef.value === (reasoningEffort || 'off'))?.label || 'Off'}
-                      <ChevronDown size={12} />
-                    </button>
-                    {thinkingOpen && (
-                      <div className="thinking-menu" role="listbox" aria-label="Thinking effort">
-                        {EFFORTS.map((ef) => (
-                          <button
-                            key={ef.value}
-                            type="button"
-                            role="option"
-                            aria-selected={(reasoningEffort || 'off') === ef.value}
-                            className={`thinking-option ${(reasoningEffort || 'off') === ef.value ? 'selected' : ''}`}
-                            onClick={() => {
-                              onChangeReasoning(ef.value === 'off' ? null : ef.value);
-                              setThinkingOpen(false);
-                            }}
-                          >
-                            {ef.label}
-                          </button>
-                        ))}
-                      </div>
+                <button
+                  type="button"
+                  className="composer-tool-btn"
+                  disabled={!sessionId}
+                  onClick={toggleSlashLauncher}
+                  title="Slash commands & templates (/)"
+                  aria-label="Slash commands"
+                >
+                  <SquarePen size={14} />
+                </button>
+
+                <div className="composer-thinking-wrap" ref={thinkingRef}>
+                  <button
+                    type="button"
+                    className={`composer-tool-btn ${reasoningEffort && reasoningEffort !== 'off' ? 'composer-tool-btn-active' : ''}`}
+                    disabled={!sessionId}
+                    aria-label="Reasoning effort"
+                    aria-haspopup="listbox"
+                    aria-expanded={thinkingOpen}
+                    title={`Thinking effort: ${EFFORTS.find((ef) => ef.value === (reasoningEffort || 'off'))?.label || 'Off'}`}
+                    onClick={() => setThinkingOpen((open) => !open)}
+                  >
+                    <Brain size={14} />
+                    {reasoningEffort && reasoningEffort !== 'off' && (
+                      <span className="composer-effort-label">
+                        {EFFORTS.find((ef) => ef.value === reasoningEffort)?.label}
+                      </span>
                     )}
-                  </div>
-                </label>
-
-                <button
-                  type="button"
-                  className="composer-ghost-pill composer-model-pill"
-                  onClick={(e) => onOpenModelPicker(e.currentTarget.getBoundingClientRect())}
-                  title="Choose provider, account, and model"
-                >
-                  <span className="composer-model-provider">{provider || 'default'}</span>
-                  <span className="model-pill-sep">/</span>
-                  <span className="composer-model-name">{model || 'default'}</span>
-                  {accountLabel && (
-                    <span className="composer-account-badge">@{accountLabel}</span>
+                  </button>
+                  {thinkingOpen && (
+                    <div className="thinking-menu" role="listbox" aria-label="Thinking effort">
+                      {EFFORTS.map((ef) => (
+                        <button
+                          key={ef.value}
+                          type="button"
+                          role="option"
+                          aria-selected={(reasoningEffort || 'off') === ef.value}
+                          className={`thinking-option ${(reasoningEffort || 'off') === ef.value ? 'selected' : ''}`}
+                          onClick={() => {
+                            onChangeReasoning(ef.value === 'off' ? null : ef.value);
+                            setThinkingOpen(false);
+                          }}
+                        >
+                          {ef.label}
+                        </button>
+                      ))}
+                    </div>
                   )}
-                </button>
+                </div>
+
+                {!landingMode && (
+                  <button
+                    type="button"
+                    className={`composer-ghost-pill mode-pill-${mode}`}
+                    onClick={cycleMode}
+                    title="Click or press Shift+Tab to switch mode (Build / Auto / Plan)"
+                  >
+                    <span className={`mode-dot mode-dot-${mode}`} />
+                    <span>{mode === 'build' ? 'Build' : mode === 'auto' ? 'Auto' : 'Chat'}</span>
+                  </button>
+                )}
 
                 {contextWindow > 0 && contextTokens > 0 && (
                   <button
@@ -539,26 +648,25 @@ export const Composer: React.FC<ComposerProps> = React.memo(
               </div>
 
               <div className="composer-actions">
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  accept="image/*"
-                  multiple
-                  hidden
-                  onChange={(e) => {
-                    attachFiles(e.target.files);
-                    e.target.value = '';
-                  }}
-                />
                 <button
                   type="button"
-                  className="icon-btn"
-                  disabled={!sessionId}
-                  onClick={() => fileInputRef.current?.click()}
-                  title="Attach image (or paste/drop)"
-                  aria-label="Attach image"
+                  className="composer-model-pill-btn"
+                  onClick={(e) => onOpenModelPicker(e.currentTarget.getBoundingClientRect())}
+                  title={`${provider || 'default'} / ${model || 'default'} — click to switch model`}
                 >
-                  <ImagePlus size={15} />
+                  <span className="composer-model-name">{shortModelLabel(model, provider)}</span>
+                  <ChevronDown size={13} className="composer-model-chevron" />
+                </button>
+
+                <button
+                  type="button"
+                  className={`composer-tool-btn ${dictating ? 'composer-mic-live' : ''}`}
+                  disabled={!sessionId}
+                  onClick={toggleDictation}
+                  title={dictating ? 'Stop voice dictation' : 'Voice input'}
+                  aria-label={dictating ? 'Stop voice dictation' : 'Voice input'}
+                >
+                  {dictating ? <MicOff size={15} /> : <Mic size={15} />}
                 </button>
 
                 {turnRunning ? (

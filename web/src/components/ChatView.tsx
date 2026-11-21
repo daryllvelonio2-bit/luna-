@@ -33,6 +33,7 @@ import {
   GitFork,
   Activity,
   AppWindow,
+  Laptop,
 } from 'lucide-react';
 import { MarkdownContent } from './MarkdownContent';
 import { Composer } from './Composer';
@@ -267,10 +268,10 @@ function buildRenderTurns(messages: TranscriptMessageDto[]): RenderTurn[] {
   return turns;
 }
 
-const STARTER_PROMPTS = [
-  'Inspect this workspace and summarize its architecture',
-  'Run git status and explain recent changes',
-  'Check failing tests or compiler warnings',
+const STARTER_PROMPTS: Array<{ text: string; kind: 'doc' | 'term' | 'wrench' }> = [
+  { text: 'Inspect this workspace and summarize its architecture', kind: 'doc' },
+  { text: 'Run git status and explain recent changes', kind: 'term' },
+  { text: 'Check failing tests or compiler warnings', kind: 'wrench' },
 ];
 
 function formatActivityLabel(
@@ -721,12 +722,13 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const modelLabel = model || provider || 'default';
   const workspaceFolder =
     workspaceRoot.split('/').filter(Boolean).pop() || workspaceRoot || 'Workspace';
-  const hasUserOrAssistantMessages = messages.length > 0;
+  const isLanding = !sessionId || turns.length === 0;
   const openTodosCount = todos.filter((t) => t.status !== 'done').length;
 
   return (
     <div className="chat-view">
-      <header className="chat-header">
+      {!isLanding ? (
+        <header className="chat-header">
         <div className="chat-header-left">
           {!sidebarOpen && (
             <button
@@ -920,6 +922,21 @@ export const ChatView: React.FC<ChatViewProps> = ({
           )}
         </div>
       </header>
+      ) : (
+        !sidebarOpen && (
+          <div className="landing-floating-bar">
+            <button
+              type="button"
+              className="icon-btn"
+              onClick={onToggleSidebar}
+              title="Open sidebar"
+              aria-label="Open sidebar"
+            >
+              <PanelLeft size={16} />
+            </button>
+          </div>
+        )
+      )}
 
       {notices.length > 0 && (
         <div className="notices-strip">
@@ -959,49 +976,116 @@ export const ChatView: React.FC<ChatViewProps> = ({
           )}
 
           {!sessionId ? (
-            <div className="chat-empty">
-              <div className="chat-empty-mark">
-                <svg width="26" height="26" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                  <path
-                    d="M20.5 14.5A8.5 8.5 0 0 1 9.5 3.5a8.5 8.5 0 1 0 11 11Z"
-                    fill="currentColor"
-                  />
-                </svg>
+            <div className="chat-landing-stage">
+              <div className="chat-landing-hero">
+                <h1 className="chat-empty-title">What can I help with?</h1>
+                <p className="chat-empty-subtitle">
+                  {workspaceFolder} : {provider || 'default'} / {modelLabel}
+                </p>
+                <div style={{ marginTop: '14px' }}>
+                  <button type="button" className="btn btn-primary" onClick={onNewSession}>
+                    <Plus size={15} />
+                    <span>New Chat</span>
+                  </button>
+                </div>
               </div>
-              <h1 className="chat-empty-title">Luna</h1>
-              <p className="chat-empty-subtitle">
-                Start a conversation to write code, inspect files, or run tasks.
-              </p>
-              <button type="button" className="btn btn-primary" onClick={onNewSession}>
-                <Plus size={15} />
-                <span>New chat</span>
-              </button>
             </div>
           ) : turns.length === 0 ? (
-            <div className="chat-empty">
-              <div className="chat-empty-mark">
-                <svg width="26" height="26" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                  <path
-                    d="M20.5 14.5A8.5 8.5 0 0 1 9.5 3.5a8.5 8.5 0 1 0 11 11Z"
-                    fill="currentColor"
-                  />
-                </svg>
-              </div>
-              <h1 className="chat-empty-title">What can I help with?</h1>
-              <p className="chat-empty-subtitle">
-                {workspaceFolder} · {provider || 'default'} / {modelLabel}
-              </p>
-              <div className="starter-grid">
-                {STARTER_PROMPTS.map((prompt) => (
+            <div className="chat-landing-stage">
+              <div className="chat-landing-hero">
+                <h1 className="chat-empty-title">What can I help with?</h1>
+                <p className="chat-empty-subtitle">
                   <button
-                    key={prompt}
                     type="button"
-                    className="starter-chip"
-                    onClick={() => onSendMessage(prompt)}
+                    className="landing-subtitle-btn"
+                    onClick={onOpenWorkspacePicker}
+                    title={`Workspace: ${workspaceRoot}`}
                   >
-                    {prompt}
+                    {workspaceFolder}
                   </button>
-                ))}
+                  {' : '}
+                  <button
+                    type="button"
+                    className="landing-subtitle-btn"
+                    onClick={(e) => onOpenModelPicker(e.currentTarget.getBoundingClientRect())}
+                    title="Switch provider or model"
+                  >
+                    {provider || 'default'} / {modelLabel}
+                  </button>
+                </p>
+
+                <div className="chat-landing-composer-wrap">
+                  <Composer
+                    sessionId={sessionId}
+                    workspaceRoot={workspaceRoot}
+                    showWorkspacePicker={false}
+                    landingMode={true}
+                    provider={provider}
+                    model={model}
+                    accountLabel={accountLabel}
+                    mode={mode}
+                    reasoningEffort={reasoningEffort}
+                    contextTokens={contextTokens}
+                    contextWindow={contextWindow}
+                    queuedCount={queuedCount}
+                    turnRunning={turnRunning}
+                    workers={workers}
+                    skills={skills}
+                    pluginCommands={pluginCommands}
+                    composerPrefill={composerPrefill}
+                    onClearComposerPrefill={onClearComposerPrefill}
+                    onSend={onSendMessage}
+                    onSlashCommand={onSlashCommand}
+                    onInterrupt={onInterrupt}
+                    onChangeMode={onChangeMode}
+                    onChangeReasoning={onChangeReasoning}
+                    onOpenModelPicker={onOpenModelPicker}
+                    onOpenWorkspacePicker={onOpenWorkspacePicker}
+                    onOpenUsage={() => onOpenDrawer('usage')}
+                    onNotify={onNotify}
+                  />
+                </div>
+
+                <div className="landing-mode-toggle" role="group" aria-label="Agent mode">
+                  <button
+                    type="button"
+                    className={`landing-mode-btn ${mode === 'plan' ? 'active' : ''}`}
+                    onClick={() => onChangeMode('plan')}
+                    title="Conversational / read-only chat mode"
+                  >
+                    Chat
+                  </button>
+                  <button
+                    type="button"
+                    className={`landing-mode-btn ${mode !== 'plan' ? 'active' : ''}`}
+                    onClick={() => onChangeMode('build')}
+                    title="Full workspace build & tool execution mode"
+                  >
+                    {mode === 'auto' ? 'Build · Auto' : 'Build'}
+                  </button>
+                </div>
+
+                <div className="starter-stack">
+                  {STARTER_PROMPTS.map((item) => (
+                    <button
+                      key={item.text}
+                      type="button"
+                      className="starter-row"
+                      onClick={() => onSendMessage(item.text)}
+                    >
+                      <span className="starter-row-icon">
+                        {item.kind === 'doc' ? (
+                          <FileText size={15} />
+                        ) : item.kind === 'term' ? (
+                          <Laptop size={15} />
+                        ) : (
+                          <Wrench size={15} />
+                        )}
+                      </span>
+                      <span className="starter-row-text">{item.text}</span>
+                    </button>
+                  ))}
+                </div>
               </div>
             </div>
           ) : (
@@ -1309,33 +1393,37 @@ export const ChatView: React.FC<ChatViewProps> = ({
         </div>
       )}
 
-          <Composer
-            sessionId={sessionId}
-            workspaceRoot={workspaceRoot}
-            showWorkspacePicker={!hasUserOrAssistantMessages}
-            provider={provider}
-            model={model}
-            accountLabel={accountLabel}
-            mode={mode}
-            reasoningEffort={reasoningEffort}
-            contextTokens={contextTokens}
-            contextWindow={contextWindow}
-            queuedCount={queuedCount}
-            turnRunning={turnRunning}
-            workers={workers}
-            skills={skills}
-            pluginCommands={pluginCommands}
-            composerPrefill={composerPrefill}
-            onClearComposerPrefill={onClearComposerPrefill}
-            onSend={onSendMessage}
-            onSlashCommand={onSlashCommand}
-            onInterrupt={onInterrupt}
-            onChangeMode={onChangeMode}
-            onChangeReasoning={onChangeReasoning}
-            onOpenModelPicker={onOpenModelPicker}
-            onOpenWorkspacePicker={onOpenWorkspacePicker}
-            onOpenUsage={() => onOpenDrawer('usage')}
-          />
+          {!isLanding && (
+            <Composer
+              sessionId={sessionId}
+              workspaceRoot={workspaceRoot}
+              showWorkspacePicker={false}
+              landingMode={false}
+              provider={provider}
+              model={model}
+              accountLabel={accountLabel}
+              mode={mode}
+              reasoningEffort={reasoningEffort}
+              contextTokens={contextTokens}
+              contextWindow={contextWindow}
+              queuedCount={queuedCount}
+              turnRunning={turnRunning}
+              workers={workers}
+              skills={skills}
+              pluginCommands={pluginCommands}
+              composerPrefill={composerPrefill}
+              onClearComposerPrefill={onClearComposerPrefill}
+              onSend={onSendMessage}
+              onSlashCommand={onSlashCommand}
+              onInterrupt={onInterrupt}
+              onChangeMode={onChangeMode}
+              onChangeReasoning={onChangeReasoning}
+              onOpenModelPicker={onOpenModelPicker}
+              onOpenWorkspacePicker={onOpenWorkspacePicker}
+              onOpenUsage={() => onOpenDrawer('usage')}
+              onNotify={onNotify}
+            />
+          )}
         </div>
 
         {activePlugin && pluginPanelOpen && (

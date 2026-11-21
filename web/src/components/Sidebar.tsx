@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useRef } from 'react';
 import type { GuiSessionItem, PluginAgentEntry } from '../types';
 import {
   MessageSquare,
@@ -11,13 +11,12 @@ import {
   GitFork,
   Edit2,
   Bot,
-  Sun,
-  Moon,
   PanelLeftClose,
   Check,
   X,
-  Folder,
+  FolderOpen,
   Search,
+  Calendar,
 } from 'lucide-react';
 
 interface SidebarProps {
@@ -65,6 +64,9 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(
     const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
     const [filter, setFilter] = useState('');
     const [visibleLimit, setVisibleLimit] = useState(40);
+    const filterInputRef = useRef<HTMLInputElement>(null);
+    void theme;
+    void onToggleTheme;
 
     const filteredSessions = useMemo(() => {
       const q = filter.trim().toLowerCase();
@@ -112,11 +114,11 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(
             <button
               type="button"
               className="icon-btn"
-              onClick={onToggleTheme}
-              title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}
-              aria-label="Toggle theme"
+              onClick={() => filterInputRef.current?.focus()}
+              title="Search conversations"
+              aria-label="Search conversations"
             >
-              {theme === 'dark' ? <Sun size={15} /> : <Moon size={15} />}
+              <Search size={15} />
             </button>
             <button
               type="button"
@@ -140,29 +142,19 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(
             }}
           >
             <Plus size={15} />
-            <span>New chat</span>
-          </button>
-
-          <button
-            type="button"
-            className="workspace-select-btn"
-            onClick={onOpenWorkspacePicker}
-            title={`Workspace: ${workspaceRoot}`}
-          >
-            <Folder size={14} className="workspace-select-icon" />
-            <span className="workspace-select-name">{workspaceFolderName}</span>
-            <span className="workspace-select-tag">Change</span>
+            <span>New Chat</span>
           </button>
         </div>
 
         <nav className="sidebar-nav" aria-label="Main navigation">
           <button
             type="button"
-            className={`nav-item ${currentTab === 'chat' ? 'active' : ''}`}
-            onClick={() => onSelectTab('chat')}
+            className="nav-item"
+            onClick={onOpenWorkspacePicker}
+            title={`Workspace: ${workspaceRoot}`}
           >
-            <MessageSquare size={15} />
-            <span>Chat</span>
+            <FolderOpen size={15} />
+            <span className="sidebar-nav-truncate">{workspaceFolderName}</span>
           </button>
           <button
             type="button"
@@ -198,7 +190,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(
                 <button
                   key={agent.id}
                   type="button"
-                  className="session-item"
+                  className="session-item sidebar-agent-item"
                   title={agent.description}
                   onClick={() => {
                     onNewSession(agent.id);
@@ -206,7 +198,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(
                   }}
                 >
                   <span className="session-item-agent">
-                    <Bot size={14} />
+                    {agent.id.includes('scheduler') ? <Calendar size={14} /> : <Bot size={14} />}
                     <span className="session-name">{agent.name}</span>
                   </span>
                   <Plus size={13} className="session-agent-plus" />
@@ -219,11 +211,12 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(
         <div className="sidebar-conversations">
           <div className="sidebar-group-label">Conversations</div>
           <div className="sidebar-search-wrap">
-            <Search size={12} className="sidebar-search-icon" />
+            <MessageSquare size={13} className="sidebar-search-icon" />
             <input
+              ref={filterInputRef}
               type="text"
               className="sidebar-search-input"
-              placeholder="Filter chats…"
+              placeholder="Filter chats..."
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
             />
