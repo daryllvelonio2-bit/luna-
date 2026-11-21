@@ -262,7 +262,8 @@ select {
   padding-top: 8px;
 }
 
-.header-sidebar-toggle {
+.icon-btn.header-sidebar-toggle,
+.landing-floating-bar.header-sidebar-toggle {
   display: none;
 }
 
@@ -270,8 +271,11 @@ select {
   .sidebar-rail {
     display: none;
   }
-  .header-sidebar-toggle {
+  .icon-btn.header-sidebar-toggle {
     display: inline-flex;
+  }
+  .landing-floating-bar.header-sidebar-toggle {
+    display: block;
   }
 }
 
