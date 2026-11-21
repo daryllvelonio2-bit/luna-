@@ -70,10 +70,11 @@ pub async fn run_select_action(
                             "voice auto-send on"
                         }
                     }
-                    3 => "voice antigravity",
-                    4 => "voice openai",
-                    5 => "voice groq",
-                    6 => {
+                    3 => "voice gemini",
+                    4 => "voice antigravity",
+                    5 => "voice openai",
+                    6 => "voice groq",
+                    7 => {
                         if env.config.voice.enable_barge_in {
                             "voice barge off"
                         } else {
@@ -985,6 +986,10 @@ pub(crate) fn open_settings_voice_menu(env: &Env<'_>, st: &mut TuiState, selecte
         },
         format!("Voice · [{}]", env.config.voice.voice_name),
         format!("Voice Send Mode · [{send_mode}]"),
+        format!(
+            "Provider: Gemini (Gemini 3.5 Transcribe + Live Voice){}",
+            active_mark("gemini")
+        ),
         format!(
             "Provider: Antigravity (Google Live Voice){}",
             active_mark("antigravity")

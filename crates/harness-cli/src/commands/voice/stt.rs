@@ -101,7 +101,20 @@ pub async fn transcribe_audio_bytes(
 
     match provider.as_str() {
         "antigravity" | "agy" => {
-            transcribe_antigravity_audio(wav_bytes, cred_manager, stt_model).await
+            match transcribe_antigravity_audio(wav_bytes, cred_manager, stt_model).await {
+                Ok(text) => Ok(text),
+                Err(err) => {
+                    let g_keys = resolve_gemini_api_keys(cred_manager).await;
+                    if !g_keys.is_empty() {
+                        tracing::warn!(
+                            "Antigravity STT failed ({err}), falling back to Gemini API keys"
+                        );
+                        transcribe_gemini_audio_with_keys(wav_bytes, &g_keys, stt_model).await
+                    } else {
+                        Err(err)
+                    }
+                }
+            }
         }
         "gemini" => {
             let g_keys = resolve_gemini_api_keys(cred_manager).await;
@@ -160,7 +173,7 @@ pub async fn transcribe_antigravity_audio(
     let chosen_model = if !model.is_empty() {
         model
     } else {
-        "gemini-2.5-flash"
+        "gemini-3.8-flash"
     };
 
     let payload = serde_json::json!({
@@ -321,7 +334,11 @@ pub async fn transcribe_gemini_audio_with_keys(
     let candidates: Vec<&str> = if !model.is_empty() {
         vec![model]
     } else {
-        vec!["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
+        vec![
+            "gemini-3.5-transcribe",
+            "gemini-3.8-flash",
+            "gemini-flash-latest",
+        ]
     };
 
     let payload = serde_json::json!({
@@ -337,7 +354,11 @@ pub async fn transcribe_gemini_audio_with_keys(
                     }
                 }
             ]
-        }]
+        }],
+        "generationConfig": {
+            "temperature": 0.0,
+            "maxOutputTokens": 256
+        }
     });
 
     let mut last_err = String::new();
@@ -378,8 +399,14 @@ pub async fn transcribe_gemini_audio_with_keys(
             let mut transcript = String::new();
             if let Some(parts) = val["candidates"][0]["content"]["parts"].as_array() {
                 for p in parts {
-                    if let Some(t) = p["text"].as_str() {
-                        transcript.push_str(t);
+                    let is_thought = p
+                        .get("thought")
+                        .and_then(|t| t.as_bool())
+                        .unwrap_or(false);
+                    if !is_thought {
+                        if let Some(t) = p["text"].as_str() {
+                            transcript.push_str(t);
+                        }
                     }
                 }
             }

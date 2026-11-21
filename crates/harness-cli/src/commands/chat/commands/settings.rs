@@ -305,6 +305,7 @@ async fn run_voice_wizard(
         format!("Toggle Voice Mode · [{current_status}]"),
         format!("Voice · [{}]", config.voice.voice_name),
         format!("Voice Send Mode · [{send_mode}]"),
+        "Provider: Gemini (Gemini 3.5 Transcribe + Live Voice)".to_string(),
         "Provider: Antigravity (Google Live Voice)".to_string(),
         "Provider: OpenAI (Whisper STT + TTS)".to_string(),
         "Provider: Groq (Whisper STT + Edge TTS)".to_string(),
@@ -362,10 +363,11 @@ async fn run_voice_wizard(
                 apply_voice_sub_setting("auto-send", next, ui, config)?;
             }
         }
-        Some(3) => apply_voice_setting("antigravity", ui, config)?,
-        Some(4) => apply_voice_setting("openai", ui, config)?,
-        Some(5) => apply_voice_setting("groq", ui, config)?,
-        Some(6) => {
+        Some(3) => apply_voice_setting("gemini", ui, config)?,
+        Some(4) => apply_voice_setting("antigravity", ui, config)?,
+        Some(5) => apply_voice_setting("openai", ui, config)?,
+        Some(6) => apply_voice_setting("groq", ui, config)?,
+        Some(7) => {
             let next = if config.voice.enable_barge_in {
                 "off"
             } else {
@@ -387,13 +389,14 @@ pub(crate) fn apply_voice_setting(
     let (enabled, provider) = match val.to_ascii_lowercase().as_str() {
         "off" | "false" | "disable" | "disabled" | "0" | "none" => (false, None),
         "on" | "true" | "enable" | "enabled" | "1" => (true, None),
+        "gemini" => (true, Some("gemini")),
         "antigravity" | "agy" | "google" => (true, Some("antigravity")),
         "openai" | "whisper" => (true, Some("openai")),
         "groq" | "edge" => (true, Some("groq")),
         "custom" => (true, Some("custom")),
         other => {
             return Err(HarnessError::ConfigurationError(format!(
-                "unknown voice option: '{other}'. Expected 'on', 'off', 'antigravity', 'openai', or 'groq'."
+                "unknown voice option: '{other}'. Expected 'on', 'off', 'gemini', 'antigravity', 'openai', or 'groq'."
             )));
         }
     };
