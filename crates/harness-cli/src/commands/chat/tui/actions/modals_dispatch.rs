@@ -138,22 +138,9 @@ pub async fn run_select_action(
                 {
                     env.ui
                         .set_transient_error(Some(format!("Settings failed: {error}")));
-                } else if entry.provider == "antigravity"
-                    && env.config.voice.provider.eq_ignore_ascii_case("openai")
-                {
-                    // Switching from OpenAI to a Gemini/Antigravity voice needs Gemini TTS routing.
-                    let _ = handle_settings_command(
-                        None,
-                        &env.ui,
-                        env.config,
-                        &env.display_settings,
-                        &mut st.process_expanded,
-                        Some("voice antigravity"),
-                    )
-                    .await;
-                    if st.voice_active {
-                        activate_voice(env, st).await;
-                    }
+                } else {
+                    crate::commands::voice::live_tts::drop_live_tts_session();
+                    st.voice_speech_queue.interrupt();
                 }
             }
             open_settings_voice_menu(env, st, 1);
@@ -958,6 +945,9 @@ pub async fn run_input_action(
                 {
                     env.ui
                         .set_transient_error(Some(format!("Settings failed: {error}")));
+                } else {
+                    crate::commands::voice::live_tts::drop_live_tts_session();
+                    st.voice_speech_queue.interrupt();
                 }
             }
             open_settings_voice_menu(env, st, 1);

@@ -305,7 +305,7 @@ fn test_default_player_idle_timeout_is_three_minutes() {
 fn test_live_ws_tts_payloads_and_idle_timeout() {
     use super::live_tts::*;
     assert_eq!(LIVE_WS_IDLE_TIMEOUT, std::time::Duration::from_secs(180));
-    assert_eq!(LIVE_TTS_MODELS[0], "gemini-3.8-live");
+    assert_eq!(LIVE_TTS_MODEL, "gemini-3.8-live");
 
     let setup = build_live_tts_setup("gemini-3.8-live", "Aoede");
     assert_eq!(
@@ -325,6 +325,24 @@ fn test_live_ws_tts_payloads_and_idle_timeout() {
         Some("The build passed.")
     );
     assert_eq!(turn["clientContent"]["turnComplete"].as_bool(), Some(true));
+}
+
+#[test]
+fn test_normalize_gemini_voice_preserves_agy_voices_case_insensitively() {
+    use super::live_tts::normalize_gemini_voice;
+    assert_eq!(normalize_gemini_voice("Despina"), "Despina");
+    assert_eq!(normalize_gemini_voice("despina"), "Despina");
+    assert_eq!(normalize_gemini_voice("DESPINA"), "Despina");
+    assert_eq!(normalize_gemini_voice("Puck"), "Puck");
+    assert_eq!(normalize_gemini_voice("puck"), "Puck");
+    assert_eq!(normalize_gemini_voice("Zephyr"), "Zephyr");
+    assert_eq!(normalize_gemini_voice("zephyr"), "Zephyr");
+    assert_eq!(normalize_gemini_voice("Fenrir"), "Fenrir");
+    assert_eq!(normalize_gemini_voice("fenrir"), "Fenrir");
+    assert_eq!(normalize_gemini_voice("Aoede"), "Aoede");
+    assert_eq!(normalize_gemini_voice("aoede"), "Aoede");
+    assert_eq!(normalize_gemini_voice(""), "Aoede");
+    assert_eq!(normalize_gemini_voice("unknown_voice"), "Aoede");
 }
 
 #[test]

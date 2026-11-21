@@ -166,11 +166,7 @@ pub async fn stream_openai_tts_pcm(
 /// Build the Gemini TTS payload with explicit transcript reading instruction
 /// required by Gemini 2.5 Flash TTS to prevent HTTP 400 "Model tried to generate text" errors.
 pub fn build_gemini_tts_payload(text: &str, voice: &str) -> serde_json::Value {
-    let voice_name = if voice.is_empty() || voice.contains("Neural") {
-        "Aoede"
-    } else {
-        voice
-    };
+    let voice_name = super::live_tts::normalize_gemini_voice(voice);
     let prompt = format!("Please read aloud the following text:\n{}", text.trim());
     serde_json::json!({
         "contents": [{
@@ -209,9 +205,8 @@ pub async fn stream_gemini_tts_sse(
         vec![model]
     } else {
         vec![
-            "gemini-2.5-flash-preview-tts",
             "gemini-3.8-flash-tts",
-            "gemini-3.1-flash-tts-preview",
+            "gemini-2.5-flash-preview-tts",
         ]
     };
 
@@ -323,12 +318,7 @@ pub async fn stream_antigravity_tts(
     let project =
         project_opt.unwrap_or_else(|| harness_providers::antigravity::DEFAULT_PROJECT.to_string());
     let client = voice_http_client();
-
-    let voice_name = if voice.is_empty() || voice.contains("Neural") {
-        "Aoede"
-    } else {
-        voice
-    };
+    let voice_name = super::live_tts::normalize_gemini_voice(voice);
 
     let chosen_model = if !model.is_empty() {
         model

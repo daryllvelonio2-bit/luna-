@@ -473,12 +473,14 @@ pub(crate) fn apply_voice_sub_setting(
                     "voice name cannot be empty".to_string(),
                 ));
             }
-            config.voice.voice_name = trimmed.to_string();
-            let _ = harness_core::config::set_in_file(&layers, "voice.voice_name", trimmed);
+            let canonical = crate::commands::voice::live_tts::normalize_gemini_voice(trimmed);
+            config.voice.voice_name = canonical.to_string();
+            let _ = harness_core::config::set_in_file(&layers, "voice.voice_name", canonical);
+            crate::commands::voice::live_tts::drop_live_tts_session();
             ui.emit_above(&format!(
                 "{} Voice set to: '{}' (saved to config)",
                 "✔".green().bold(),
-                trimmed.bold()
+                canonical.bold()
             ));
         }
         "auto-send" | "autosend" | "auto_send" | "send-mode" => {

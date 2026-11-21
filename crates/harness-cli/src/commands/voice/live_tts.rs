@@ -20,11 +20,10 @@ use super::tts::parse_pcm_rate_from_mime;
 /// Close idle Live WebSocket connections after 3 minutes of inactivity.
 pub const LIVE_WS_IDLE_TIMEOUT: Duration = Duration::from_secs(180);
 
-/// Candidate Live models ordered by measured lowest first-audio latency.
-pub const LIVE_TTS_MODELS: &[&str] = &["gemini-3.8-live", "gemini-3.1-flash-live-preview"];
+/// Primary Live TTS model used across all turns to prevent acoustic drift or voice model swapping.
+pub const LIVE_TTS_MODEL: &str = "gemini-3.8-live";
 
 static LAST_WORKING_LIVE_KEY: AtomicUsize = AtomicUsize::new(0);
-static LAST_WORKING_LIVE_MODEL: AtomicUsize = AtomicUsize::new(0);
 
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -47,14 +46,27 @@ fn live_session_slot() -> &'static Mutex<Option<LiveWsSession>> {
     SLOT.get_or_init(|| Mutex::new(None))
 }
 
-fn normalize_gemini_voice(voice: &str) -> &str {
+/// Normalize any user input voice string (case-insensitively) to the exact canonical Antigravity/Gemini voice name.
+pub fn normalize_gemini_voice(voice: &str) -> &'static str {
     let trimmed = voice.trim();
-    if trimmed.is_empty() || trimmed.contains("Neural") || super::catalog::is_openai_voice(trimmed)
-    {
-        "Aoede"
-    } else {
-        trimmed
+    for entry in super::catalog::available_voices() {
+        if entry.id.eq_ignore_ascii_case(trimmed) {
+            return entry.id;
+        }
     }
+    // Canonical 30 Antigravity voice catalog
+    for v in [
+        "Achernar", "Achird", "Algenib", "Algieba", "Alnilam", "Aoede", "Autonoe",
+        "Callirrhoe", "Charon", "Despina", "Enceladus", "Erinome", "Fenrir", "Gacrux",
+        "Iapetus", "Kore", "Laomedeia", "Leda", "Orus", "Puck", "Pulcherrima",
+        "Rasalgethi", "Sadachbia", "Sadaltager", "Schedar", "Sulafat", "Umbriel",
+        "Vindemiatrix", "Zephyr", "Zubenelgenubi",
+    ] {
+        if v.eq_ignore_ascii_case(trimmed) {
+            return v;
+        }
+    }
+    "Aoede"
 }
 
 /// Build the Gemini Live `setup` JSON payload configured as a strict verbatim TTS reader.
@@ -159,27 +171,22 @@ async fn acquire_or_connect(
         return Err("No Gemini API keys available for Live WS TTS".to_string());
     }
 
-    let start_model = LAST_WORKING_LIVE_MODEL.load(Ordering::Relaxed) % LIVE_TTS_MODELS.len();
     let start_key = LAST_WORKING_LIVE_KEY.load(Ordering::Relaxed) % api_keys.len();
     let mut last_err = String::new();
 
-    for m_off in 0..LIVE_TTS_MODELS.len() {
-        let model_idx = (start_model + m_off) % LIVE_TTS_MODELS.len();
-        let model = LIVE_TTS_MODELS[model_idx];
-        for k_off in 0..api_keys.len() {
-            let key_idx = (start_key + k_off) % api_keys.len();
-            let key = &api_keys[key_idx];
-            match connect_and_setup(key, model, voice_name, key_idx).await {
-                Ok(sess) => {
-                    LAST_WORKING_LIVE_MODEL.store(model_idx, Ordering::Relaxed);
-                    LAST_WORKING_LIVE_KEY.store(key_idx, Ordering::Relaxed);
-                    *slot = Some(sess);
-                    return Ok(());
-                }
-                Err(e) => {
-                    tracing::debug!("Live WS TTS candidate failed: {e}");
-                    last_err = e;
-                }
+    // Stick strictly to LIVE_TTS_MODEL so voice timbre and model never change mid-session
+    for k_off in 0..api_keys.len() {
+        let key_idx = (start_key + k_off) % api_keys.len();
+        let key = &api_keys[key_idx];
+        match connect_and_setup(key, LIVE_TTS_MODEL, voice_name, key_idx).await {
+            Ok(sess) => {
+                LAST_WORKING_LIVE_KEY.store(key_idx, Ordering::Relaxed);
+                *slot = Some(sess);
+                return Ok(());
+            }
+            Err(e) => {
+                tracing::debug!("Live WS TTS candidate failed: {e}");
+                last_err = e;
             }
         }
     }
