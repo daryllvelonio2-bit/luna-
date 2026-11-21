@@ -277,12 +277,14 @@ pub fn clean_user_display_text(raw: &str) -> String {
         }
     }
 
-    // Strip `[PLAN MODE ACTIVE: ...]` prefix (including repeated/nested occurrences).
+    // Strip `[PLAN MODE ACTIVE: ...]`, `[VOICE MODE ACTIVE: ...]`, etc. (including repeated/nested).
     loop {
         let trimmed = text.trim_start();
-        if let Some(rest) = trimmed.strip_prefix("[PLAN MODE ACTIVE:") {
-            if let Some(end) = rest.find(']') {
-                text = rest[end + 1..].trim_start_matches(['\r', '\n', ' ', '\t']);
+        let is_mode_banner = trimmed.starts_with("[PLAN MODE ACTIVE:")
+            || trimmed.starts_with("[VOICE MODE ACTIVE:");
+        if is_mode_banner {
+            if let Some(end) = trimmed.find(']') {
+                text = trimmed[end + 1..].trim_start_matches(['\r', '\n', ' ', '\t']);
                 continue;
             }
         }

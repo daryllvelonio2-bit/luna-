@@ -349,6 +349,37 @@ struct BootstrapQuery {
     session_id: Option<String>,
 }
 
+fn has_internal_title_prefix(title: &str) -> bool {
+    title.starts_with("[PLAN MODE ACTIVE:")
+        || title.starts_with("[VOICE MODE ACTIVE:")
+        || title.starts_with("[OUT-OF-BAND USER MESSAGE")
+        || title.starts_with("Autonomous Goal Mode (iteration 1/")
+        || title.starts_with("[background job finished]")
+}
+
+async fn sanitize_session_record(state: &WebState, mut r: SessionRecord) -> SessionRecord {
+    if has_internal_title_prefix(&r.title) {
+        let cleaned = clean_user_display_text(&r.title);
+        if !cleaned.is_empty() && !has_internal_title_prefix(&cleaned) {
+            r.title = cleaned.chars().take(80).collect();
+        } else if let Ok(outcome) = state.store.replay(&r.id, 20).await {
+            let first_user = outcome
+                .history
+                .into_iter()
+                .filter(|sm| sm.message.role == Role::User)
+                .filter_map(|sm| sm.message.content)
+                .map(|c| clean_user_display_text(&c))
+                .find(|c| !c.is_empty());
+            r.title = first_user
+                .map(|c| c.chars().take(80).collect())
+                .unwrap_or_else(|| "New conversation".to_string());
+        } else {
+            r.title = "New conversation".to_string();
+        }
+    }
+    r
+}
+
 async fn bootstrap(
     State(state): State<Arc<WebState>>,
     Query(query): Query<BootstrapQuery>,
@@ -358,20 +389,23 @@ async fn bootstrap(
         .list()
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let agent_map = state.session_agents.read().await;
+    let agent_map = state.session_agents.read().await.clone();
 
-    let sessions: Vec<GuiSessionItem> = records
-        .into_iter()
-        .filter(|r| r.message_count > 0 || query.session_id.as_deref() == Some(&r.id))
-        .take(120)
-        .map(|r| {
-            let pid = agent_map.get(&r.id).cloned();
-            GuiSessionItem {
-                record: r,
-                plugin_agent_id: pid,
-            }
-        })
-        .collect();
+    let mut sessions = Vec::new();
+    for r in records {
+        if !(r.message_count > 0 || query.session_id.as_deref() == Some(&r.id)) {
+            continue;
+        }
+        let pid = agent_map.get(&r.id).cloned();
+        let record = sanitize_session_record(&state, r).await;
+        sessions.push(GuiSessionItem {
+            record,
+            plugin_agent_id: pid,
+        });
+        if sessions.len() >= 120 {
+            break;
+        }
+    }
 
     let first_sid = query
         .session_id
@@ -493,7 +527,7 @@ async fn list_sessions(
         .list()
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let agent_map = state.session_agents.read().await;
+    let agent_map = state.session_agents.read().await.clone();
     let active_ids: std::collections::HashSet<String> = {
         let active_sessions = state.sessions.lock().await;
         active_sessions.keys().cloned().collect()
@@ -502,36 +536,14 @@ async fn list_sessions(
 
     let mut items = Vec::new();
     let max_items = if limit > 0 { limit } else { usize::MAX };
-    for mut r in records {
+    for r in records {
         if !(r.message_count > 0 || active_ids.contains(&r.id)) {
             continue;
         }
-        if r.title.starts_with("[PLAN MODE ACTIVE:")
-            || r.title.starts_with("[OUT-OF-BAND USER MESSAGE")
-            || r.title.starts_with("Autonomous Goal Mode (iteration 1/")
-            || r.title.starts_with("[background job finished]")
-        {
-            let cleaned = clean_user_display_text(&r.title);
-            if !cleaned.is_empty() && !cleaned.starts_with("[PLAN MODE ACTIVE:") {
-                r.title = cleaned.chars().take(80).collect();
-            } else if let Ok(outcome) = state.store.replay(&r.id, 20).await {
-                let first_user = outcome
-                    .history
-                    .into_iter()
-                    .filter(|sm| sm.message.role == Role::User)
-                    .filter_map(|sm| sm.message.content)
-                    .map(|c| clean_user_display_text(&c))
-                    .find(|c| !c.is_empty());
-                r.title = first_user
-                    .map(|c| c.chars().take(80).collect())
-                    .unwrap_or_else(|| "New conversation".to_string());
-            } else {
-                r.title = "New conversation".to_string();
-            }
-        }
         let pid = agent_map.get(&r.id).cloned();
+        let record = sanitize_session_record(&state, r).await;
         items.push(GuiSessionItem {
-            record: r,
+            record,
             plugin_agent_id: pid,
         });
         if items.len() >= max_items {

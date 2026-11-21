@@ -510,7 +510,10 @@ function stripInternalUserPrefixes(raw: string): string {
   if (oobMatch) {
     text = oobMatch[1].trim();
   }
-  while (text.startsWith('[PLAN MODE ACTIVE:')) {
+  while (
+    text.startsWith('[PLAN MODE ACTIVE:') ||
+    text.startsWith('[VOICE MODE ACTIVE:')
+  ) {
     const closeIdx = text.indexOf(']');
     if (closeIdx === -1) break;
     text = text.slice(closeIdx + 1).trimStart();
