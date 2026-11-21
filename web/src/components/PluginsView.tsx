@@ -18,7 +18,7 @@ interface PluginsViewProps {
   onTogglePlugin: (id: string, enabled: boolean) => void;
   onDeletePlugin: (id: string) => void;
   onRefresh: () => void;
-  onOpenBuilder: () => void;
+  onStartPluginConversation: () => void;
 }
 
 export const PluginsView: React.FC<PluginsViewProps> = ({
@@ -28,7 +28,7 @@ export const PluginsView: React.FC<PluginsViewProps> = ({
   onTogglePlugin,
   onDeletePlugin,
   onRefresh,
-  onOpenBuilder,
+  onStartPluginConversation,
 }) => {
   return (
     <div className="page-view">
@@ -57,7 +57,7 @@ export const PluginsView: React.FC<PluginsViewProps> = ({
           >
             <RefreshCw size={14} />
           </button>
-          <button type="button" className="btn btn-primary" onClick={onOpenBuilder}>
+          <button type="button" className="btn btn-primary" onClick={onStartPluginConversation}>
             <Sparkles size={14} />
             <span>New plugin</span>
           </button>
@@ -82,7 +82,7 @@ export const PluginsView: React.FC<PluginsViewProps> = ({
                 Tell Luna what tools, commands, panels, or sidebar agent to build in natural
                 language.
               </p>
-              <button type="button" className="btn btn-primary" onClick={onOpenBuilder}>
+              <button type="button" className="btn btn-primary" onClick={onStartPluginConversation}>
                 <Sparkles size={14} />
                 <span>Create plugin with Luna</span>
               </button>
