@@ -142,14 +142,16 @@ export const MemoryNotesView: React.FC<MemoryNotesViewProps> = ({
   const performLoad = async (term: string) => {
     setLoading(true);
     try {
-      const [m, n, g] = await Promise.all([
-        onSearchMemories(term),
-        onSearchNotes(term),
-        onGetKnowledgeGraph(term),
-      ]);
-      setMemories(m);
-      setNotes(n);
+      const g = await onGetKnowledgeGraph(term);
       setGraph(g);
+      if (g.memories && g.notes) {
+        setMemories(g.memories);
+        setNotes(g.notes);
+      } else {
+        const [m, n] = await Promise.all([onSearchMemories(term), onSearchNotes(term)]);
+        setMemories(m);
+        setNotes(n);
+      }
     } catch (err) {
       console.error(err);
     } finally {

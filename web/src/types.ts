@@ -312,6 +312,8 @@ export interface KnowledgeGraphResponse {
   edges: KnowledgeEdge[];
   clusters: KnowledgeCluster[];
   stats: KnowledgeStats;
+  memories?: MemoryFact[];
+  notes?: NoteEntry[];
 }
 
 export interface ApprovalRequestPayload {

@@ -7,7 +7,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
-use harness_core::{MemoryEngine, MemoryRecord, Note, NotesEngine};
+use harness_core::{MemoryCategory, MemoryEngine, MemoryRecord, Note, NotesEngine};
 use harness_memory::build_memory_engine;
 use harness_note_graph::{graph_notes, Confidence, NodeKind, Relation};
 use harness_notes::projects::project_from_tags;
@@ -97,6 +97,8 @@ pub struct KnowledgeGraphResponse {
     pub edges: Vec<KnowledgeEdgeDto>,
     pub clusters: Vec<KnowledgeClusterDto>,
     pub stats: KnowledgeStatsDto,
+    pub memories: Vec<serde_json::Value>,
+    pub notes: Vec<serde_json::Value>,
 }
 
 fn memory_to_json(r: &MemoryRecord) -> serde_json::Value {
@@ -149,7 +151,11 @@ async fn search_memories(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let out = records.iter().map(memory_to_json).collect();
+    let out = records
+        .iter()
+        .filter(|r| r.category != MemoryCategory::Transcript)
+        .map(memory_to_json)
+        .collect();
     Ok(Json(out))
 }
 
@@ -210,11 +216,14 @@ async fn get_knowledge_graph(
     let notes_engine = FileNotesEngine::new(cfg.paths.notes_dir.clone(), Some(cfg.paths.notes_db))
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let mem_limit = if q.trim().is_empty() { 120 } else { 80 };
-    let memories = engine
+    let mem_limit = if q.trim().is_empty() { 150 } else { 100 };
+    let memories: Vec<MemoryRecord> = engine
         .retrieve(&q, mem_limit)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .into_iter()
+        .filter(|r| r.category != MemoryCategory::Transcript)
+        .collect();
 
     let notes = if q.trim().is_empty() {
         notes_engine
@@ -814,6 +823,17 @@ pub fn build_unified_knowledge_graph(
     let total_tags = nodes.iter().filter(|n| n.kind == "tag").count();
     let total_concepts = nodes.iter().filter(|n| n.kind == "concept").count();
 
+    let memory_items: Vec<serde_json::Value> = memories
+        .iter()
+        .filter(|r| r.category != MemoryCategory::Transcript)
+        .map(memory_to_json)
+        .collect();
+    let note_items: Vec<serde_json::Value> = notes
+        .iter()
+        .filter(|n| n.parent_id.is_none())
+        .map(|n| note_to_json(n, false))
+        .collect();
+
     KnowledgeGraphResponse {
         stats: KnowledgeStatsDto {
             total_memories,
@@ -827,6 +847,8 @@ pub fn build_unified_knowledge_graph(
         nodes,
         edges,
         clusters,
+        memories: memory_items,
+        notes: note_items,
     }
 }
 

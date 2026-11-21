@@ -5502,7 +5502,7 @@ select {
 }
 
 /* Neuron SVG Canvas */
-.neuron-canvas-wrap {
+.neuron-canvas-card {
   position: relative;
   width: 100%;
   border-radius: 16px;
@@ -5516,31 +5516,23 @@ select {
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
 
-[data-theme='light'] .neuron-canvas-wrap {
+[data-theme='light'] .neuron-canvas-card {
   background:
     radial-gradient(65% 70% at 22% 24%, rgba(56, 88, 233, 0.08), transparent 60%),
     radial-gradient(55% 65% at 78% 76%, rgba(139, 92, 246, 0.06), transparent 60%),
     rgba(248, 250, 252, 0.92);
 }
 
-.neuron-canvas-empty {
+.neuron-empty-state {
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
+  height: 100%;
   gap: 6px;
   padding: 24px;
   text-align: center;
-}
-
-.neuron-empty-title {
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--text-primary);
-}
-
-.neuron-empty-sub {
-  font-size: 12.5px;
+  font-size: 13.5px;
   color: var(--text-muted);
 }
 
@@ -5623,7 +5615,7 @@ select {
 }
 
 /* Floating HUDs on Neuron Canvas */
-.neuron-hud-top {
+.neuron-hud-top-left {
   position: absolute;
   top: 12px;
   left: 12px;
@@ -5633,7 +5625,27 @@ select {
   z-index: 10;
 }
 
-.neuron-hud-btn {
+.neuron-hud-top-right {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  font-size: 11px;
+  color: var(--text-muted);
+  background: rgba(14, 16, 22, 0.65);
+  backdrop-filter: blur(8px);
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  pointer-events: none;
+  z-index: 10;
+}
+
+[data-theme='light'] .neuron-hud-top-right {
+  background: rgba(255, 255, 255, 0.85);
+  border-color: rgba(15, 23, 42, 0.1);
+}
+
+.neuron-hud-chip {
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -5650,17 +5662,17 @@ select {
   transition: border-color 120ms ease, color 120ms ease, background-color 120ms ease;
 }
 
-[data-theme='light'] .neuron-hud-btn {
+[data-theme='light'] .neuron-hud-chip {
   background: rgba(255, 255, 255, 0.88);
   border-color: rgba(15, 23, 42, 0.12);
 }
 
-.neuron-hud-btn:hover {
+.neuron-hud-chip:hover {
   border-color: var(--border-strong);
   color: var(--text-primary);
 }
 
-.neuron-hud-btn.active {
+.neuron-hud-chip.active {
   border-color: rgba(77, 107, 254, 0.5);
   background: rgba(77, 107, 254, 0.18);
   color: var(--text-primary);
@@ -5695,14 +5707,15 @@ select {
   color: var(--text-secondary);
 }
 
-.neuron-legend-dot {
+.neuron-legend-item i {
+  display: inline-block;
   width: 8px;
   height: 8px;
   border-radius: 50%;
   flex-shrink: 0;
 }
 
-.neuron-zoom-hud {
+.neuron-zoom-controls {
   position: absolute;
   right: 12px;
   bottom: 12px;
@@ -5717,7 +5730,7 @@ select {
   z-index: 10;
 }
 
-[data-theme='light'] .neuron-zoom-hud {
+[data-theme='light'] .neuron-zoom-controls {
   background: rgba(255, 255, 255, 0.88);
   border-color: rgba(15, 23, 42, 0.12);
 }
