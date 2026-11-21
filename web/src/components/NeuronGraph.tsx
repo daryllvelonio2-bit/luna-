@@ -115,9 +115,13 @@ function computeDeterministicLayout(
           distSq = 1;
         }
         const dist = Math.sqrt(distSq);
-        const minGap = a.r + b.r + (byId.get(idA)?.kind === 'hub' || byId.get(idB)?.kind === 'hub' ? 42 : 24);
-        const repulse = (2400 / distSq) * (0.55 + alpha * 0.6);
-        const overlapPush = dist < minGap ? (minGap - dist) * 0.32 : 0;
+        const kindA = byId.get(idA)?.kind;
+        const kindB = byId.get(idB)?.kind;
+        const isMajor =
+          kindA === 'hub' || kindB === 'hub' || kindA === 'note' || kindB === 'note';
+        const minGap = a.r + b.r + (isMajor ? 58 : 30);
+        const repulse = (3200 / distSq) * (0.58 + alpha * 0.65);
+        const overlapPush = dist < minGap ? (minGap - dist) * 0.36 : 0;
         const fx = (dx / dist) * (repulse + overlapPush);
         const fy = (dy / dist) * (repulse + overlapPush);
         a.vx -= fx;
@@ -137,10 +141,10 @@ function computeDeterministicLayout(
       const dist = Math.sqrt(dx * dx + dy * dy) || 1;
       const targetLen =
         e.relation === 'belongs_to'
-          ? 86
+          ? 106
           : e.relation === 'tagged' || e.relation === 'mentions'
-          ? 122
-          : 145;
+          ? 146
+          : 165;
       const strength = 0.045 * (0.5 + e.weight * 0.7);
       const force = (dist - targetLen) * strength;
       const fx = (dx / dist) * force;
