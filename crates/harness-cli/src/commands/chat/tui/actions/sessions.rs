@@ -136,6 +136,8 @@ pub(crate) fn park_current_session(env: &Env<'_>, st: &mut TuiState) {
         system_notices: std::mem::take(&mut st.system_notices),
         expanded_thinking: std::mem::take(&mut st.expanded_thinking),
         expanded_tools: std::mem::take(&mut st.expanded_tools),
+        expanded_turns: std::mem::take(&mut st.expanded_turns),
+        collapsed_turns: std::mem::take(&mut st.collapsed_turns),
         expanded_live_thinking: std::mem::take(&mut st.expanded_live_thinking),
         expanded_live_tools: std::mem::take(&mut st.expanded_live_tools),
         live_thinking_view: st.live_thinking_view,
@@ -205,6 +207,8 @@ pub(crate) fn restore_background_session(
     st.prune_stale_notices();
     st.expanded_thinking = slot.expanded_thinking;
     st.expanded_tools = slot.expanded_tools;
+    st.expanded_turns = slot.expanded_turns;
+    st.collapsed_turns = slot.collapsed_turns;
     st.expanded_live_thinking = slot.expanded_live_thinking;
     st.expanded_live_tools = slot.expanded_live_tools;
     st.live_thinking_view = slot.live_thinking_view;
@@ -468,6 +472,8 @@ pub async fn switch_to_session(
     st.system_notices.clear();
     st.expanded_thinking.clear();
     st.expanded_tools.clear();
+    st.expanded_turns.clear();
+    st.collapsed_turns.clear();
     st.expanded_live_thinking.clear();
     st.expanded_live_tools.clear();
     st.live_thinking_view = LiveThinkingView::Tail;
@@ -565,6 +571,8 @@ pub async fn create_new_session(env: &mut Env<'_>, st: &mut TuiState) -> Result<
     st.system_notices.clear();
     st.expanded_thinking.clear();
     st.expanded_tools.clear();
+    st.expanded_turns.clear();
+    st.collapsed_turns.clear();
     st.expanded_live_thinking.clear();
     st.expanded_live_tools.clear();
     st.live_thinking_view = LiveThinkingView::Tail;

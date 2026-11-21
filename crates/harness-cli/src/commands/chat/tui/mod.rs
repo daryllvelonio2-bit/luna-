@@ -747,6 +747,8 @@ async fn init_tui_state(env: &mut Env<'_>) -> Result<TuiState, HarnessError> {
         block_limit: env.config.display.block_limit,
         expanded_thinking: HashSet::new(),
         expanded_tools: HashSet::new(),
+        expanded_turns: HashSet::new(),
+        collapsed_turns: HashSet::new(),
         expanded_live_thinking: HashSet::new(),
         expanded_live_tools: HashSet::new(),
         live_thinking_view: LiveThinkingView::Tail,

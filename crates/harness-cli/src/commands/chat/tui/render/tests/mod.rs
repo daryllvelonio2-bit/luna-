@@ -46,6 +46,8 @@ pub(crate) fn test_dummy_tui_state() -> TuiState {
         block_limit: None,
         expanded_thinking: HashSet::new(),
         expanded_tools: HashSet::new(),
+        expanded_turns: HashSet::new(),
+        collapsed_turns: HashSet::new(),
         expanded_live_thinking: HashSet::new(),
         expanded_live_tools: HashSet::new(),
         live_thinking_view: LiveThinkingView::Tail,

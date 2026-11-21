@@ -1189,6 +1189,8 @@ pub async fn apply_thinking_selection(
 
 pub fn set_all_process_expanded(st: &mut TuiState, expanded: bool) {
     st.process_expanded = expanded;
+    st.expanded_turns.clear();
+    st.collapsed_turns.clear();
     if expanded {
         st.expanded_thinking.clear();
         st.expanded_live_thinking.clear();

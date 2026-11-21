@@ -429,6 +429,15 @@ pub async fn apply_transcript_click(
                 st.expanded_thinking.insert((idx, step_idx));
             }
         }
+        TranscriptClickTarget::ToggleTurnProcess(idx) => {
+            if st.process_expanded {
+                if !st.collapsed_turns.remove(&idx) {
+                    st.collapsed_turns.insert(idx);
+                }
+            } else if !st.expanded_turns.remove(&idx) {
+                st.expanded_turns.insert(idx);
+            }
+        }
         TranscriptClickTarget::ToggleTurnTools(idx, group_idx) => {
             if !st.expanded_tools.remove(&(idx, group_idx)) {
                 st.expanded_tools.insert((idx, group_idx));

@@ -354,9 +354,10 @@ fn compaction_turn_renders_yellow_card_and_compacted_footer() {
     };
     let mut out = Vec::new();
     let mut hits = Vec::new();
-    let empty_set = std::collections::HashSet::new();
+    let empty_set: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
+    let empty_turns: std::collections::HashSet<usize> = std::collections::HashSet::new();
     render_single_settled_turn(
-        &mut out, &mut hits, 0, &turn, None, false, None, &empty_set, &empty_set, "Build",
+        &mut out, &mut hits, 0, &turn, None, false, true, None, &empty_set, &empty_set, &empty_turns, &empty_turns, "Build",
         "gpt-4o", 80, 76,
     );
     let text: Vec<String> = out.iter().map(line_text).collect();
@@ -419,16 +420,20 @@ fn completed_turn_renders_interleaved_thinking_prose_and_tool_cards() {
     expanded_thinking.insert((0, 1));
     expanded_thinking.insert((0, 2));
     let expanded_tools = HashSet::new();
+    let empty_set = HashSet::new();
 
     render_completed_turn_process(
         &mut out,
         &mut hits,
         0,
         &turn,
-        false,
+        true,
+        true,
         None,
         &expanded_thinking,
         &expanded_tools,
+        &empty_set,
+        &empty_set,
         84,
         80,
     );
@@ -481,22 +486,37 @@ fn completed_turn_thinking_collapses_when_process_collapsed() {
     };
     let mut out = Vec::new();
     let mut hits = Vec::new();
-    let empty = HashSet::new();
+    let empty: HashSet<(usize, usize)> = HashSet::new();
+    let empty_turns: HashSet<usize> = HashSet::new();
 
+    // When process_expanded = false (auto-collapse on), the whole process collapses to 1 line
     render_completed_turn_process(
-        &mut out, &mut hits, 0, &turn, false, None, &empty, &empty, 84, 80,
+        &mut out, &mut hits, 0, &turn, false, true, None, &empty, &empty, &empty_turns, &empty_turns, 84, 80,
     );
     let collapsed = out.iter().map(line_text).collect::<Vec<_>>().join("\n");
-    assert!(collapsed.contains("▸ Thought (1 line)"), "{collapsed}");
+    assert!(collapsed.contains("▶ Process"), "{collapsed}");
+    assert!(collapsed.contains("thought for 2.0s"), "{collapsed}");
     assert!(!collapsed.contains("hidden thought body"), "{collapsed}");
 
+    // When process_expanded = true and auto_hide_thinking = true, thinking block is collapsed to ▸ Thought
     out.clear();
     hits.clear();
     render_completed_turn_process(
-        &mut out, &mut hits, 0, &turn, true, None, &empty, &empty, 84, 80,
+        &mut out, &mut hits, 0, &turn, true, true, None, &empty, &empty, &empty_turns, &empty_turns, 84, 80,
     );
     let expanded = out.iter().map(line_text).collect::<Vec<_>>().join("\n");
-    assert!(expanded.contains("hidden thought body"), "{expanded}");
+    assert!(expanded.contains("▼ Process"), "{expanded}");
+    assert!(expanded.contains("▸ Thought (1 line)"), "{expanded}");
+    assert!(!expanded.contains("hidden thought body"), "{expanded}");
+
+    // When process_expanded = true and auto_hide_thinking = false, thinking body is visible
+    out.clear();
+    hits.clear();
+    render_completed_turn_process(
+        &mut out, &mut hits, 0, &turn, true, false, None, &empty, &empty, &empty_turns, &empty_turns, 84, 80,
+    );
+    let fully_open = out.iter().map(line_text).collect::<Vec<_>>().join("\n");
+    assert!(fully_open.contains("hidden thought body"), "{fully_open}");
 }
 
 #[test]
@@ -528,20 +548,24 @@ fn block_limit_caps_thinking_blocks_while_tool_cards_stay_capped_at_ten() {
         reply: "Done.".to_string(),
     };
 
-    let empty = HashSet::new();
+    let empty: HashSet<(usize, usize)> = HashSet::new();
+    let empty_turns: HashSet<usize> = HashSet::new();
     let mut out = Vec::new();
     let mut hits = Vec::new();
-    // With block_limit = Some(3) and process_expanded = true (auto-collapse off):
-    // thinking is capped at 3 lines, while the collapsed tool card stays capped at 10 lines.
+    // With block_limit = Some(3), process_expanded = true (auto-collapse off), auto_hide_thinking = false:
+    // thinking is capped at 3 lines, while the tool card stays capped at 10 lines.
     render_completed_turn_process(
         &mut out,
         &mut hits,
         0,
         &turn,
         true,
+        false,
         Some(3),
         &empty,
         &empty,
+        &empty_turns,
+        &empty_turns,
         84,
         80,
     );
@@ -550,25 +574,27 @@ fn block_limit_caps_thinking_blocks_while_tool_cards_stay_capped_at_ten() {
     assert!(!capped.contains("thought line 15"), "{capped}");
     assert!(capped.contains("more lines)"), "{capped}");
 
-    // When process_expanded = false (auto-collapse on), the tool card is cleanly collapsed.
+    // When process_expanded = false (auto-collapse on), the whole process collapses to 1 line!
     out.clear();
     hits.clear();
     render_completed_turn_process(
-        &mut out, &mut hits, 0, &turn, false, None, &empty, &empty, 84, 80,
+        &mut out, &mut hits, 0, &turn, false, true, None, &empty, &empty, &empty_turns, &empty_turns, 84, 80,
     );
     let tool_collapsed = out.iter().map(line_text).collect::<Vec<_>>().join("\n");
-    assert!(tool_collapsed.contains("Read src/lib.rs"));
-    assert!(tool_collapsed.contains("(20 lines)"));
+    assert!(tool_collapsed.contains("▶ Process"));
+    assert!(tool_collapsed.contains("1 tool: read_file"));
+    assert!(tool_collapsed.contains("thought for 2.0s"));
     assert!(!tool_collapsed.contains("file line 1"));
     assert!(!tool_collapsed.contains("file line 10"));
 
-    // When process_expanded = true and block_limit = Some(10), tool output is capped at 10 lines.
+    // When process_expanded = true, tool output is capped at 10 lines.
     out.clear();
     hits.clear();
     render_completed_turn_process(
-        &mut out, &mut hits, 0, &turn, true, Some(10), &empty, &empty, 84, 80,
+        &mut out, &mut hits, 0, &turn, true, true, None, &empty, &empty, &empty_turns, &empty_turns, 84, 80,
     );
     let tool_capped = out.iter().map(line_text).collect::<Vec<_>>().join("\n");
+    assert!(tool_capped.contains("▼ Process"));
     assert!(tool_capped.contains("file line 10"), "{tool_capped}");
     assert!(!tool_capped.contains("file line 11"), "{tool_capped}");
     assert!(tool_capped.contains("(10 more lines)"), "{tool_capped}");
@@ -669,6 +695,8 @@ fn ensure_settled_transcript_caches_and_appends_incrementally() {
         block_limit: None,
         expanded_thinking: HashSet::new(),
         expanded_tools: HashSet::new(),
+        expanded_turns: HashSet::new(),
+        collapsed_turns: HashSet::new(),
         expanded_live_thinking: HashSet::new(),
         expanded_live_tools: HashSet::new(),
         live_thinking_view: LiveThinkingView::Tail,
@@ -1003,7 +1031,6 @@ fn tool_cards_in_box_truncate_to_ten_lines_and_expand_on_click() {
         &mut hits_closed,
         &item,
         false,
-        None,
         TranscriptClickTarget::ToggleTurnTools(0, 0),
         80,
         76,
@@ -1013,10 +1040,13 @@ fn tool_cards_in_box_truncate_to_ten_lines_and_expand_on_click() {
         .map(line_text)
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(joined_closed.contains("$ cargo check"));
-    assert!(joined_closed.contains("(20 lines)"), "shows collapsed line count badge");
-    assert!(!joined_closed.contains("line 1"), "does not dump output lines when collapsed");
-    assert!(!joined_closed.contains("line 10"), "does not dump output lines when collapsed");
+    assert!(joined_closed.contains("line 1"), "starts from head");
+    assert!(joined_closed.contains("line 10"), "shows 10th line");
+    assert!(!joined_closed.contains("line 11"), "line 11 is truncated");
+    assert!(
+        joined_closed.contains("(10 more lines)"),
+        "shows bottom more lines indicator"
+    );
 
     // When opened (open = true)
     let mut out_opened = Vec::new();
@@ -1026,7 +1056,6 @@ fn tool_cards_in_box_truncate_to_ten_lines_and_expand_on_click() {
         &mut hits_opened,
         &item,
         true,
-        None,
         TranscriptClickTarget::ToggleTurnTools(0, 0),
         80,
         76,
@@ -1045,29 +1074,6 @@ fn tool_cards_in_box_truncate_to_ten_lines_and_expand_on_click() {
         !joined_opened.contains("more lines"),
         "no remaining lines indicator"
     );
-
-    // When opened with block_limit (open = true, block_limit = Some(5))
-    let mut out_capped = Vec::new();
-    let mut hits_capped = Vec::new();
-    push_completed_tool_card(
-        &mut out_capped,
-        &mut hits_capped,
-        &item,
-        true,
-        Some(5),
-        TranscriptClickTarget::ToggleTurnTools(0, 0),
-        80,
-        76,
-    );
-    let joined_capped = out_capped
-        .iter()
-        .map(line_text)
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(joined_capped.contains("line 1"));
-    assert!(joined_capped.contains("line 5"));
-    assert!(!joined_capped.contains("line 6"));
-    assert!(joined_capped.contains("(15 more lines)"));
 }
 
 #[test]
@@ -1132,7 +1138,6 @@ fn tool_output_with_tabs_and_diffs_never_exceeds_width() {
         &mut hits,
         &item,
         true,
-        None,
         TranscriptClickTarget::ToggleTurnTools(0, 0),
         60,
         56,
@@ -1393,9 +1398,10 @@ fn test_turn_footer_renders_additions_and_deletions() {
     };
     let mut out = Vec::new();
     let mut hits = Vec::new();
-    let empty_set = std::collections::HashSet::new();
+    let empty_set: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
+    let empty_turns: std::collections::HashSet<usize> = std::collections::HashSet::new();
     render_single_settled_turn(
-        &mut out, &mut hits, 0, &turn, None, false, None, &empty_set, &empty_set, "Build",
+        &mut out, &mut hits, 0, &turn, None, false, true, None, &empty_set, &empty_set, &empty_turns, &empty_turns, "Build",
         "gemini-3.8-flash", 80, 76,
     );
     let text: Vec<String> = out.iter().map(line_text).collect();
@@ -1420,9 +1426,12 @@ fn test_turn_footer_renders_additions_and_deletions() {
         &no_diff_turn,
         None,
         false,
+        true,
         None,
         &empty_set,
         &empty_set,
+        &empty_turns,
+        &empty_turns,
         "Build",
         "gemini-3.8-flash",
         80,
