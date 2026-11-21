@@ -185,9 +185,26 @@ impl PluginManager {
         manifest: PluginManifest,
         ts_source: &str,
     ) -> Result<PluginSummary, String> {
+        self.install_raw_in_scope(manifest, ts_source, false)
+    }
+
+    /// Install or update a plugin into either the global plugins directory or the workspace `.luna/plugins` directory.
+    pub fn install_raw_in_scope(
+        &self,
+        manifest: PluginManifest,
+        ts_source: &str,
+        workspace_scope: bool,
+    ) -> Result<PluginSummary, String> {
         let js_code = compile_typescript(&manifest.entry, ts_source).map_err(|e| e.to_string())?;
 
-        let dir = self.plugins_dir.join(&manifest.id);
+        let base_dir = if workspace_scope {
+            self.workspace_plugins_dir
+                .as_ref()
+                .ok_or_else(|| "no workspace plugins directory configured".to_string())?
+        } else {
+            &self.plugins_dir
+        };
+        let dir = base_dir.join(&manifest.id);
         let entry_path = dir.join(&manifest.entry);
         let compiled_path = dir.join(&manifest.compiled);
 

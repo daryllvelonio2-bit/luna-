@@ -621,6 +621,12 @@ class ApiClient {
     });
   }
 
+  public async deletePlugin(pluginId: string): Promise<void> {
+    return this.request<void>(`/api/plugins/${encodeURIComponent(pluginId)}`, {
+      method: 'DELETE',
+    });
+  }
+
   public async listSchedules(): Promise<ScheduleTask[]> {
     return this.request<ScheduleTask[]>('/api/schedules');
   }

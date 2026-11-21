@@ -223,6 +223,10 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         details: "Guide and configure persistent scheduled automations (/automation <request>)",
     },
     SlashCommand {
+        name: "/plugin",
+        details: "Design, compile, and register a Luna TypeScript plugin (/plugin <request>)",
+    },
+    SlashCommand {
         name: "/fork",
         details: "Fork current session into a new branch session",
     },

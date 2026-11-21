@@ -36,6 +36,13 @@ const BUILTIN_SLASH_COMMANDS: SlashItem[] = [
     hasArg: true,
     prefill: '/automation guide me with creating an  automation ',
   },
+  {
+    cmd: '/plugin',
+    desc: 'Guide creating and compiling a TypeScript plugin',
+    category: 'command',
+    hasArg: true,
+    prefill: '/plugin guide me with creating a plugin ',
+  },
   { cmd: '/compact', desc: 'Compact conversation history now', category: 'command' },
   { cmd: '/summarize', desc: 'Summarize and start a fresh chat', category: 'command' },
   { cmd: '/usage', desc: 'View session and global token/cost usage', category: 'command' },

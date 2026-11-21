@@ -312,6 +312,11 @@ pub async fn run_slash_command(
                 .set_text(harness_scheduler::AUTOMATION_PREFILL.to_string());
             return Ok(Flow::Continue);
         }
+        "/plugin" | "/plugins" if arg.is_none() => {
+            st.composer
+                .set_text(harness_plugins::PLUGIN_PREFILL.to_string());
+            return Ok(Flow::Continue);
+        }
         "/thinking" | "/think" | "/reasoning" if arg.is_none() => {
             open_thinking_picker(env, st).await;
             return Ok(Flow::Continue);

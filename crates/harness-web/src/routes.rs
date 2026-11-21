@@ -23,9 +23,12 @@ use harness_core::{
 };
 use harness_memory::build_memory_engine;
 use harness_notes::FileNotesEngine;
-use harness_plugins::{PluginAgentEntry, PluginBuilderSpec, PluginSummary, SkillLoader};
+use harness_plugins::{
+    plugin_skill, PluginAgentEntry, PluginBuilderSpec, PluginSummary, SkillLoader,
+    PLUGIN_SKILL_NAME,
+};
 use harness_providers::{get_provider_catalog, GenericProviderClient};
-use harness_scheduler::{DeliveryTarget, ScheduleTask};
+use harness_scheduler::{automation_skill, DeliveryTarget, ScheduleTask, AUTOMATION_SKILL_NAME};
 
 use crate::extra_routes::{accounts_for_provider, AccountDto};
 use crate::state::WebState;
@@ -122,6 +125,7 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/plugins", get(list_plugins))
         .route("/api/plugins/build", post(create_plugin_from_spec))
         .route("/api/plugins/{plugin_id}/toggle", post(toggle_plugin))
+        .route("/api/plugins/{plugin_id}", delete(delete_plugin))
         .route(
             "/api/schedules",
             get(list_schedules).post(create_schedule_task),
@@ -398,6 +402,29 @@ async fn bootstrap(
                 }));
             }
         }
+    }
+    let has_skill = |list: &[serde_json::Value], target: &str| {
+        list.iter().any(|item| {
+            item.get("name")
+                .and_then(|v| v.as_str())
+                .is_some_and(|n| harness_plugins::names_match(n, target))
+        })
+    };
+    if !has_skill(&skills, AUTOMATION_SKILL_NAME) {
+        let s = automation_skill();
+        skills.push(serde_json::json!({
+            "name": s.name,
+            "description": s.description,
+            "source": "builtin",
+        }));
+    }
+    if !has_skill(&skills, PLUGIN_SKILL_NAME) {
+        let s = plugin_skill();
+        skills.push(serde_json::json!({
+            "name": s.name,
+            "description": s.description,
+            "source": "builtin",
+        }));
     }
 
     let mcp_servers: Vec<serde_json::Value> = cfg
@@ -1312,6 +1339,7 @@ async fn create_plugin_from_spec(
         .plugin_manager
         .install_from_builder(&payload)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    state.invalidate_idle_sessions().await;
     Ok(StatusCode::OK)
 }
 
@@ -1328,6 +1356,27 @@ async fn toggle_plugin(
         .plugin_manager
         .set_enabled(&plugin_id, enabled)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    state.invalidate_idle_sessions().await;
+    Ok(StatusCode::OK)
+}
+
+async fn delete_plugin(
+    State(state): State<Arc<WebState>>,
+    Path(plugin_id): Path<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    if let Some(summary) = state.plugin_manager.get_summary(&plugin_id) {
+        if summary.builtin {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("cannot delete built-in plugin '{plugin_id}'"),
+            ));
+        }
+    }
+    state
+        .plugin_manager
+        .remove(&plugin_id)
+        .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
+    state.invalidate_idle_sessions().await;
     Ok(StatusCode::OK)
 }
 

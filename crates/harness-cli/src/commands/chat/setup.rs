@@ -755,6 +755,22 @@ async fn register_tools(
         }
     }
 
+    // Register plugin creation/management tools (`plugin_create`, `plugin_list`, `plugin_reload`, `plugin_remove`).
+    let plugins_dir = config
+        .paths
+        .sessions_db
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .join("plugins");
+    let ws_plugins_dir = config.paths.workspace_root.join(".luna/plugins");
+    let plugin_mgr = Arc::new(harness_plugins::PluginManager::new(
+        plugins_dir,
+        Some(ws_plugins_dir),
+    ));
+    let _ = plugin_mgr.discover_and_load();
+    let reg_dyn: Arc<dyn ToolRegistry> = registry.clone();
+    harness_plugins::register_plugin_tools(&reg_dyn, plugin_mgr).await?;
+
     let (bg_queue, delegate_tool, sudo_rx) =
         register_task_and_core_tools(config, registry, provider, memory, notes, store, todo_scope)
             .await?;
@@ -852,13 +868,19 @@ fn load_skills_and_readout(
             all_skills.extend(skills);
         }
     }
-    // The skills the harness ships with, including the desktop and automation skills.
+    // The skills the harness ships with, including the desktop, automation, and plugin skills.
     all_skills.extend(crate::commands::desktop::builtin_skills());
     if !all_skills
         .iter()
         .any(|s| harness_plugins::names_match(&s.name, harness_scheduler::AUTOMATION_SKILL_NAME))
     {
         all_skills.push(harness_scheduler::automation_skill());
+    }
+    if !all_skills
+        .iter()
+        .any(|s| harness_plugins::names_match(&s.name, harness_plugins::PLUGIN_SKILL_NAME))
+    {
+        all_skills.push(harness_plugins::plugin_skill());
     }
 
     // `/skills` prints a name-only readout: a paragraph per skill is a wall of text on a terminal,

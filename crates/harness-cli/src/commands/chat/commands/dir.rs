@@ -330,13 +330,19 @@ async fn apply_workspace_change(
             all_skills.extend(skills);
         }
     }
-    // The skills the harness ships with, including the desktop skill.
+    // The skills the harness ships with, including the desktop, automation, and plugin skills.
     all_skills.extend(crate::commands::desktop::builtin_skills());
     if !all_skills
         .iter()
         .any(|s| harness_plugins::names_match(&s.name, harness_scheduler::AUTOMATION_SKILL_NAME))
     {
         all_skills.push(harness_scheduler::automation_skill());
+    }
+    if !all_skills
+        .iter()
+        .any(|s| harness_plugins::names_match(&s.name, harness_plugins::PLUGIN_SKILL_NAME))
+    {
+        all_skills.push(harness_plugins::plugin_skill());
     }
     if !all_skills.is_empty() {
         let skills_arc = Arc::new(all_skills);

@@ -13,7 +13,10 @@ use harness_app::session::{create_session as create_store_session, open_store, S
 use harness_core::config::Config;
 use harness_core::session::{SessionStore, SqliteSessionStore};
 use harness_core::{ApprovalDecision, ClarifyResponse, HarnessError, ToolRegistry};
-use harness_plugins::{PluginManager, SkillLoader, SkillViewTool, SkillsListTool};
+use harness_plugins::{
+    plugin_skill, register_plugin_tools, PluginManager, SkillLoader, SkillViewTool, SkillsListTool,
+    PLUGIN_SKILL_NAME,
+};
 use harness_providers::{CredentialManager, ModelDiscovery};
 use harness_scheduler::{
     automation_skill, ensure_scheduler_plugin, register_schedule_tools, DeliveryReceipt,
@@ -155,7 +158,11 @@ impl WebState {
             return Ok(handle.clone());
         }
 
-        let agent_entry = if let Some(agent_id) = &plugin_agent_id {
+        let resolved_agent_id = match &plugin_agent_id {
+            Some(id) => Some(id.clone()),
+            None => self.session_agents.read().await.get(session_id).cloned(),
+        };
+        let agent_entry = if let Some(agent_id) = &resolved_agent_id {
             self.plugin_manager
                 .sidebar_agents()
                 .into_iter()
@@ -168,12 +175,19 @@ impl WebState {
         let skills_dir = cfg_snapshot.paths.skills_dir.clone();
         let ws_skills_dir = cfg_snapshot.paths.workspace_root.join(".harness/skills");
         let sched_store = self.scheduler.store().clone();
+        let plugin_mgr = self.plugin_manager.clone();
         let sid_for_tools = session_id.to_string();
+        let agent_tool_filter: Option<Vec<String>> = agent_entry
+            .as_ref()
+            .filter(|a| !a.registered_tools.is_empty())
+            .map(|a| a.registered_tools.clone());
         let extra_tools: Option<ExtraToolRegistrar> = Some(Arc::new(move |registry| {
             let skills_dir = skills_dir.clone();
             let ws_skills_dir = ws_skills_dir.clone();
             let sched_store = sched_store.clone();
+            let plugin_mgr = plugin_mgr.clone();
             let sid_for_tools = sid_for_tools.clone();
+            let agent_tool_filter = agent_tool_filter.clone();
             Box::pin(async move {
                 let mut all_skills = Vec::new();
                 if let Ok(skills) = SkillLoader::load_skills_from_dir(&skills_dir) {
@@ -190,6 +204,12 @@ impl WebState {
                 {
                     all_skills.push(automation_skill());
                 }
+                if !all_skills
+                    .iter()
+                    .any(|s| harness_plugins::names_match(&s.name, PLUGIN_SKILL_NAME))
+                {
+                    all_skills.push(plugin_skill());
+                }
                 if !all_skills.is_empty() {
                     let skills_arc = Arc::new(all_skills);
                     registry
@@ -201,6 +221,17 @@ impl WebState {
                 }
                 let reg_dyn: Arc<dyn ToolRegistry> = registry.clone();
                 register_schedule_tools(&reg_dyn, sched_store, Some(sid_for_tools), true).await?;
+                register_plugin_tools(&reg_dyn, plugin_mgr.clone()).await?;
+                for tool in plugin_mgr.registered_tools() {
+                    if let Some(allowed) = &agent_tool_filter {
+                        if !allowed.iter().any(|n| n == tool.name()) {
+                            continue;
+                        }
+                    }
+                    if registry.get(tool.name()).await.is_none() {
+                        registry.register(tool).await?;
+                    }
+                }
                 Ok(())
             })
         }));

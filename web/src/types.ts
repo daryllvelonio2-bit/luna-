@@ -88,13 +88,16 @@ export interface PluginSummary {
   name: string;
   version: string;
   description: string;
-  author?: string;
   enabled: boolean;
-  tools_count: number;
-  commands_count: number;
-  agents_count: number;
-  schedules_count: number;
-  source_kind: 'workspace' | 'global' | 'builtin';
+  loaded: boolean;
+  builtin: boolean;
+  path?: string;
+  last_error?: string | null;
+  tools: string[];
+  commands: Array<{ plugin_id: string; name: string; description: string }>;
+  agent?: PluginAgentEntry | null;
+  panels: Array<{ id: string; title: string }>;
+  schedules: Array<{ id: string; name: string; rule: string }>;
 }
 
 export type DeliveryTarget =

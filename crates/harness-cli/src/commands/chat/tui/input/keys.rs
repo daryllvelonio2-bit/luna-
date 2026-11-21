@@ -132,6 +132,9 @@ pub async fn handle_key(
                     if entry.name == "/automation" {
                         st.composer
                             .set_text(harness_scheduler::AUTOMATION_PREFILL.to_string());
+                    } else if entry.name == "/plugin" {
+                        st.composer
+                            .set_text(harness_plugins::PLUGIN_PREFILL.to_string());
                     } else {
                         st.composer.set_text(format!("{} ", entry.name));
                     }
@@ -151,6 +154,12 @@ pub async fn handle_key(
                     if entry.name == "/automation" {
                         st.composer
                             .set_text(harness_scheduler::AUTOMATION_PREFILL.to_string());
+                        sync_slash_popup(env, st);
+                        return Ok(Flow::Continue);
+                    }
+                    if entry.name == "/plugin" {
+                        st.composer
+                            .set_text(harness_plugins::PLUGIN_PREFILL.to_string());
                         sync_slash_popup(env, st);
                         return Ok(Flow::Continue);
                     }

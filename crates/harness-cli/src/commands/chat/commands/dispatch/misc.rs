@@ -211,6 +211,27 @@ impl<'a> SlashContext<'a> {
         Ok(SlashOutcome::Turn { prompt, display })
     }
 
+    pub(super) async fn cmd_plugin(
+        &mut self,
+        arg: Option<&str>,
+    ) -> Result<SlashOutcome, HarnessError> {
+        let Some(request) = arg.map(str::trim).filter(|s| !s.is_empty()) else {
+            self.ui.emit_above(&format!(
+                "{} Usage: {}",
+                "•".cyan(),
+                format!(
+                    "{}<what plugin you want to build>",
+                    harness_plugins::PLUGIN_PREFILL
+                )
+                .yellow()
+            ));
+            return Ok(SlashOutcome::Continue);
+        };
+        let prompt = harness_plugins::build_plugin_turn_prompt(request);
+        let display = format!("/plugin {request}");
+        Ok(SlashOutcome::Turn { prompt, display })
+    }
+
     pub(super) async fn cmd_voice(
         &mut self,
         arg: Option<&str>,

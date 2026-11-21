@@ -13,7 +13,6 @@ import type {
   ModelScope,
   ModelTarget,
   PluginAgentEntry,
-  PluginBuilderSpec,
   PluginSummary,
   ProviderInfo,
   RotationStrategy,
@@ -460,6 +459,11 @@ export const App: React.FC = () => {
           }
           api.listSessions(150).then(setSessions).catch(() => {});
           api.listSchedules().then(setSchedules).catch(() => {});
+          api.listPlugins().then(setPlugins).catch(() => {});
+          api
+            .bootstrap(event.session_id)
+            .then((boot) => setSidebarAgents(boot.sidebar_agents || []))
+            .catch(() => {});
           break;
 
         case 'turn_failed':
@@ -820,6 +824,22 @@ export const App: React.FC = () => {
           `2. Follow those instructions carefully for the user's request below.\n` +
           `3. If critical details (timezone, tools/pipeline, side-effect boundaries, inputs/outputs, etc.) are missing or ambiguous, call \`clarify\` first before creating any schedules.\n` +
           `4. Once requirements are clear, create or update the scheduled automation task(s) using \`schedule_create\` / \`schedule_edit\`.\n\n` +
+          `User request:\n${arg}`;
+        handleSendMessage(prompt, images);
+        return true;
+      }
+      if (cmd === '/plugin' || cmd === '/plugins') {
+        if (!arg) {
+          setCurrentTab('chat');
+          setComposerPrefill('/plugin guide me with creating a plugin ');
+          return true;
+        }
+        const prompt =
+          `Plugin Creation Request:\n` +
+          `1. First call \`skill_view\` with \`name: "plugin"\` to load Luna's plugin architecture, \`@luna/sdk\` API reference, and QuickJS runtime rules.\n` +
+          `2. Follow those instructions carefully for the user's request below.\n` +
+          `3. If critical details (required tools/actions, external APIs or CLI tools, inputs/outputs, sidebar agent behavior, or global vs workspace scope) are missing or ambiguous, call \`clarify\` first before creating the plugin.\n` +
+          `4. Once requirements are clear, implement, compile, and register the plugin using \`plugin_create\` (and verify \`"loaded": true\` with no errors).\n\n` +
           `User request:\n${arg}`;
         handleSendMessage(prompt, images);
         return true;
@@ -1197,20 +1217,94 @@ export const App: React.FC = () => {
   const handleTogglePlugin = async (pluginId: string, enabled: boolean) => {
     try {
       await api.togglePlugin(pluginId, enabled);
-      setPlugins((prev) =>
-        prev.map((p) => (p.id === pluginId ? { ...p, enabled } : p))
-      );
+      const updated = await api.listPlugins();
+      setPlugins(updated);
+      const boot = await api.bootstrap(activeSessionIdRef.current);
+      setSidebarAgents(boot.sidebar_agents || []);
     } catch (e) {
       showError(`Failed to toggle plugin: ${String(e)}`);
     }
   };
 
-  const handleCreatePluginFromSpec = async (spec: PluginBuilderSpec) => {
-    await api.createPluginFromSpec(spec);
-    const updated = await api.listPlugins();
-    setPlugins(updated);
-    const boot = await api.bootstrap();
-    setSidebarAgents(boot.sidebar_agents || []);
+  const handleDeletePlugin = async (pluginId: string) => {
+    try {
+      await api.deletePlugin(pluginId);
+      setPlugins((prev) => prev.filter((p) => p.id !== pluginId));
+      const boot = await api.bootstrap(activeSessionIdRef.current);
+      setSidebarAgents(boot.sidebar_agents || []);
+      pushNotice(`Plugin '${pluginId}' deleted.`);
+    } catch (e) {
+      showError(`Failed to delete plugin: ${String(e)}`);
+    }
+  };
+
+  const handleStartPluginConversation = async (
+    userPrompt: string,
+    options: { scope: 'global' | 'workspace'; autoSend: boolean }
+  ) => {
+    const scopeNote =
+      options.scope === 'workspace'
+        ? 'Install in workspace scope (.luna/plugins).'
+        : 'Install in global scope (~/.luna/plugins).';
+    const trimmed = userPrompt.trim();
+
+    let sid: string | null = null;
+    try {
+      const createdId = await api.createSession();
+      sid = createdId;
+      await api.renameSession(createdId, 'New Plugin');
+      const prevSid = activeSessionIdRef.current;
+      if (
+        prevSid &&
+        prevSid !== createdId &&
+        messagesRef.current.length === 0 &&
+        !turnRunningRef.current
+      ) {
+        api.deleteSession(prevSid).catch(() => {});
+      }
+      pendingContentDeltaRef.current = '';
+      pendingReasoningDeltaRef.current = '';
+      liveToolCallsRef.current = [];
+      activeSessionIdRef.current = createdId;
+      setActiveSessionId(createdId);
+      setPendingApproval(null);
+      setPendingClarify(null);
+      api.listSessions(150).then(setSessions).catch(() => {});
+    } catch {
+      if (!activeSessionIdRef.current) {
+        await handleNewSession(null);
+      }
+      sid = activeSessionIdRef.current;
+    }
+
+    setCurrentTab('chat');
+
+    if (!options.autoSend) {
+      setMessages([]);
+      setTurnRunning(false);
+      setComposerPrefill(
+        trimmed
+          ? `/plugin ${trimmed} (${scopeNote})`
+          : '/plugin guide me with creating a plugin '
+      );
+      return;
+    }
+
+    const fullPrompt =
+      `Plugin Creation Request:\n` +
+      `1. First call \`skill_view\` with \`name: "plugin"\` to load Luna's plugin architecture, \`@luna/sdk\` API reference, and QuickJS runtime rules.\n` +
+      `2. Follow those instructions carefully for the user's request below.\n` +
+      `3. If critical details (required tools/actions, external APIs or CLI tools, inputs/outputs, sidebar agent behavior, or configuration) are missing or ambiguous, call \`clarify\` first before creating the plugin.\n` +
+      `4. Once requirements are clear, implement, compile, and register the plugin using \`plugin_create\` (and verify \`"loaded": true\` with no errors).\n\n` +
+      `Preferred scope: ${scopeNote}\n\n` +
+      `User request:\n${trimmed}`;
+
+    if (sid) {
+      optimisticQueryRef.current = { sid, query: fullPrompt };
+      setTurnRunning(true);
+      setMessages([{ role: 'user', content: fullPrompt, tool_calls: [] }]);
+      await api.sendMessage(sid, fullPrompt);
+    }
   };
 
   const activeSessionItem = sessions.find((s) => s.record.id === activeSessionId);
@@ -1338,6 +1432,8 @@ export const App: React.FC = () => {
             sidebarOpen={sidebarOpen}
             onToggleSidebar={() => setSidebarOpen((v) => !v)}
             onTogglePlugin={handleTogglePlugin}
+            onDeletePlugin={handleDeletePlugin}
+            onRefresh={() => api.listPlugins().then(setPlugins).catch(() => {})}
             onOpenBuilder={() => setIsPluginBuilderOpen(true)}
           />
         )}
@@ -1370,7 +1466,7 @@ export const App: React.FC = () => {
       <PluginBuilderModal
         isOpen={isPluginBuilderOpen}
         onClose={() => setIsPluginBuilderOpen(false)}
-        onSubmit={handleCreatePluginFromSpec}
+        onStartConversation={handleStartPluginConversation}
       />
 
       <ModelPickerModal

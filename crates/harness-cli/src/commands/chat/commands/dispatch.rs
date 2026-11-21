@@ -199,6 +199,7 @@ impl<'a> SlashContext<'a> {
             "/plan" => self.cmd_plan().await,
             "/goal" => self.cmd_goal(arg).await,
             "/automation" => self.cmd_automation(arg).await,
+            "/plugin" | "/plugins" => self.cmd_plugin(arg).await,
             "/tasks" | "/jobs" | "/subagents" => self.cmd_tasks().await,
             "/help" | "/commands" | "/?" => self.cmd_help().await,
             "/profile" | "/profiles" => self.cmd_profile(arg).await,

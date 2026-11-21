@@ -1,220 +1,202 @@
-import React, { useState, useEffect } from 'react';
-import type { PluginBuilderSpec } from '../types';
-import { Hammer, X } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { Sparkles, X, ArrowRight, Globe, Folder } from 'lucide-react';
 
 interface PluginBuilderModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onSubmit: (spec: PluginBuilderSpec) => Promise<void>;
+  onStartConversation: (
+    prompt: string,
+    options: { scope: 'global' | 'workspace'; autoSend: boolean }
+  ) => Promise<void>;
 }
+
+const PLUGIN_STARTERS = [
+  {
+    label: 'API / Webhook connector',
+    prompt:
+      'Create a plugin that wraps a REST API (let me specify the URL and auth) with tools to query and post data, plus a sidebar agent.',
+  },
+  {
+    label: 'Git & repo workflow helper',
+    prompt:
+      'Create a workspace plugin with tools to inspect recent commits, list stale branches, and summarize working tree status.',
+  },
+  {
+    label: 'Persistent KV tracker',
+    prompt:
+      'Create a plugin using ctx.storage to save, search, and manage structured items/bookmarks across sessions with a summary UI panel.',
+  },
+  {
+    label: 'Scheduled digest plugin',
+    prompt:
+      'Create a plugin with a custom tool and a recurring daily schedule that gathers updates and saves a concise report.',
+  },
+];
 
 export const PluginBuilderModal: React.FC<PluginBuilderModalProps> = ({
   isOpen,
   onClose,
-  onSubmit,
+  onStartConversation,
 }) => {
-  const [name, setName] = useState('');
-  const [description, setDescription] = useState('');
-  const [author] = useState('User');
-  const [version, setVersion] = useState('0.1.0');
-
-  const [toolName, setToolName] = useState('my_custom_tool');
-  const [toolDescription, setToolDescription] = useState('Executes custom TypeScript logic');
-  const [handlerCode, setHandlerCode] = useState(
-    `export default async function handle(args) {\n  return "Processed with " + JSON.stringify(args);\n}`
-  );
-
-  const [includeAgent, setIncludeAgent] = useState(true);
-  const [agentName, setAgentName] = useState('Specialist Agent');
-  const [systemPrompt, setSystemPrompt] = useState('You are an expert specialist plugin agent.');
-
+  const [prompt, setPrompt] = useState('');
+  const [scope, setScope] = useState<'global' | 'workspace'>('global');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     if (!isOpen) return;
+    setErrorMsg(null);
+    const focusTimer = window.setTimeout(() => {
+      textareaRef.current?.focus();
+    }, 30);
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose();
     };
     window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    return () => {
+      window.clearTimeout(focusTimer);
+      window.removeEventListener('keydown', onKey);
+    };
   }, [isOpen, onClose]);
 
   if (!isOpen) return null;
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!name.trim()) return;
-
-    const spec: PluginBuilderSpec = {
-      name: name.trim(),
-      description: description.trim(),
-      author: author.trim(),
-      version: version.trim(),
-      tools: [
-        {
-          name: toolName.trim(),
-          description: toolDescription.trim(),
-          parameters_schema: {
-            type: 'object',
-            properties: {
-              input: { type: 'string', description: 'Input parameter' },
-            },
-          },
-          handler_code: handlerCode,
-        },
-      ],
-      agents: includeAgent
-        ? [
-            {
-              name: agentName.trim(),
-              description: description.trim(),
-              system_prompt: systemPrompt.trim(),
-              tools: [toolName.trim()],
-            },
-          ]
-        : [],
-      schedules: [],
-    };
-
-    setIsSubmitting(true);
+  const submitPrompt = async (autoSend: boolean) => {
+    const trimmed = prompt.trim();
+    if (!trimmed && autoSend) return;
     setErrorMsg(null);
+    setIsSubmitting(true);
     try {
-      await onSubmit(spec);
+      await onStartConversation(trimmed, { scope, autoSend });
+      setPrompt('');
       onClose();
-    } catch (err) {
-      setErrorMsg(`Failed to build plugin: ${String(err)}`);
+    } catch (e) {
+      setErrorMsg(String(e));
     } finally {
       setIsSubmitting(false);
+    }
+  };
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    void submitPrompt(true);
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      if (prompt.trim() && !isSubmitting) {
+        void submitPrompt(true);
+      }
     }
   };
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <form
-        className="modal-card modal-card-wide"
+        className="modal-dialog modal-lg"
         onSubmit={handleSubmit}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="modal-header">
           <div className="modal-title-group">
-            <Hammer size={16} className="text-accent" />
-            <span className="modal-title">Plugin builder</span>
+            <Sparkles size={17} />
+            <span className="modal-title">Create plugin with Luna</span>
           </div>
-          <button type="button" className="icon-btn" onClick={onClose} aria-label="Close">
+          <button
+            type="button"
+            className="icon-btn"
+            onClick={onClose}
+            aria-label="Close"
+          >
             <X size={16} />
           </button>
         </div>
 
         <div className="modal-body">
-          {errorMsg && <div className="inline-banner inline-banner-err">{errorMsg}</div>}
+          {errorMsg && <div className="error-banner">{errorMsg}</div>}
 
-          <div className="two-col-fields">
-            <div className="form-group">
-              <label className="form-label">Plugin name</label>
-              <input
-                type="text"
-                className="form-input"
-                required
-                placeholder="e.g. data-analyzer"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-              />
-            </div>
-            <div className="form-group">
-              <label className="form-label">Version</label>
-              <input
-                type="text"
-                className="form-input"
-                value={version}
-                onChange={(e) => setVersion(e.target.value)}
-              />
-            </div>
-          </div>
+          <p className="text-muted" style={{ fontSize: '13px', margin: 0, lineHeight: 1.5 }}>
+            Describe what you want your plugin to do in plain language. Luna will load the
+            built-in plugin architecture skill, ask any clarifying questions if needed, and
+            write, compile, and register the TypeScript plugin automatically.
+          </p>
 
           <div className="form-group">
-            <label className="form-label">Description</label>
-            <input
-              type="text"
+            <label className="form-label" htmlFor="plugin-prompt-input">
+              What plugin should Luna create?
+            </label>
+            <textarea
+              id="plugin-prompt-input"
+              ref={textareaRef}
               className="form-input"
-              placeholder="What this plugin does…"
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
+              rows={5}
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              onKeyDown={handleKeyDown}
+              placeholder="Example: Create a GitHub PR helper plugin with tools to list open pull requests, fetch diffs for a PR number, and register a Code Reviewer sidebar agent."
             />
           </div>
 
-          <div className="settings-divider" />
-
-          <div className="settings-section">
-            <div className="settings-section-title">
-              <span>Custom tool</span>
-            </div>
-            <div className="two-col-fields">
-              <div className="form-group">
-                <label className="form-label">Tool name</label>
-                <input
-                  type="text"
-                  className="form-input"
-                  value={toolName}
-                  onChange={(e) => setToolName(e.target.value)}
-                />
-              </div>
-              <div className="form-group">
-                <label className="form-label">Tool description</label>
-                <input
-                  type="text"
-                  className="form-input"
-                  value={toolDescription}
-                  onChange={(e) => setToolDescription(e.target.value)}
-                />
-              </div>
-            </div>
-
-            <div className="form-group">
-              <label className="form-label">TypeScript handler</label>
-              <textarea
-                className="form-input mono-textarea"
-                rows={4}
-                value={handlerCode}
-                onChange={(e) => setHandlerCode(e.target.value)}
-              />
+          <div className="form-group">
+            <span className="form-label">Install scope</span>
+            <div className="auto-cadence-tabs" style={{ marginBottom: 0 }}>
+              <button
+                type="button"
+                className={`auto-starter-chip ${scope === 'global' ? 'is-selected' : ''}`}
+                style={
+                  scope === 'global'
+                    ? {
+                        borderColor: 'var(--accent)',
+                        backgroundColor: 'var(--accent-soft)',
+                        color: 'var(--text-primary)',
+                      }
+                    : undefined
+                }
+                onClick={() => setScope('global')}
+              >
+                <Globe size={12} />
+                <span>Global (~/.luna/plugins)</span>
+              </button>
+              <button
+                type="button"
+                className={`auto-starter-chip ${scope === 'workspace' ? 'is-selected' : ''}`}
+                style={
+                  scope === 'workspace'
+                    ? {
+                        borderColor: 'var(--accent)',
+                        backgroundColor: 'var(--accent-soft)',
+                        color: 'var(--text-primary)',
+                      }
+                    : undefined
+                }
+                onClick={() => setScope('workspace')}
+              >
+                <Folder size={12} />
+                <span>Workspace (.luna/plugins)</span>
+              </button>
             </div>
           </div>
 
-          <div className="settings-divider" />
-
-          <div className="settings-section">
-            <label className="radio-row">
-              <input
-                type="checkbox"
-                checked={includeAgent}
-                onChange={(e) => setIncludeAgent(e.target.checked)}
-              />
-              <span>Expose dedicated sidebar agent</span>
-            </label>
-
-            {includeAgent && (
-              <div className="settings-section">
-                <div className="form-group">
-                  <label className="form-label">Agent name</label>
-                  <input
-                    type="text"
-                    className="form-input"
-                    value={agentName}
-                    onChange={(e) => setAgentName(e.target.value)}
-                  />
-                </div>
-                <div className="form-group">
-                  <label className="form-label">System prompt</label>
-                  <textarea
-                    className="form-input"
-                    rows={2}
-                    value={systemPrompt}
-                    onChange={(e) => setSystemPrompt(e.target.value)}
-                  />
-                </div>
-              </div>
-            )}
+          <div className="auto-starters">
+            <div className="auto-starters-label">Starter ideas</div>
+            <div className="auto-starter-chips">
+              {PLUGIN_STARTERS.map((starter) => (
+                <button
+                  key={starter.label}
+                  type="button"
+                  className="auto-starter-chip"
+                  onClick={() => {
+                    setPrompt(starter.prompt);
+                    textareaRef.current?.focus();
+                  }}
+                >
+                  <span>{starter.label}</span>
+                  <ArrowRight size={11} />
+                </button>
+              ))}
+            </div>
           </div>
         </div>
 
@@ -223,11 +205,20 @@ export const PluginBuilderModal: React.FC<PluginBuilderModalProps> = ({
             Cancel
           </button>
           <button
+            type="button"
+            className="btn btn-secondary"
+            disabled={isSubmitting}
+            onClick={() => void submitPrompt(false)}
+          >
+            Prefill in chat
+          </button>
+          <button
             type="submit"
             className="btn btn-primary"
-            disabled={isSubmitting || !name.trim()}
+            disabled={isSubmitting || !prompt.trim()}
           >
-            {isSubmitting ? 'Building…' : 'Build & register'}
+            <Sparkles size={14} />
+            <span>{isSubmitting ? 'Starting…' : 'Create with Luna'}</span>
           </button>
         </div>
       </form>
