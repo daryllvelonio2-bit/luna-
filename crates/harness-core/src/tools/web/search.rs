@@ -701,8 +701,7 @@ fn parse_exa_response(body: &str) -> Result<Vec<SearchHit>, WebError> {
         .lines()
         .filter_map(|line| line.strip_prefix("data:"))
         .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .next_back()
+        .rfind(|line| !line.is_empty())
         .unwrap_or_else(|| body.trim());
     let msg: serde_json::Value = serde_json::from_str(json_line)
         .map_err(|error| WebError::Transport(format!("exa MCP returned invalid JSON: {error}")))?;
