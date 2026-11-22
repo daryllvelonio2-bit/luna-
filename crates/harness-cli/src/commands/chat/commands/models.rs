@@ -163,6 +163,7 @@ async fn pick_reasoning_effort(
 }
 
 /// Rebind the live agent to the chosen provider, model and effort.
+#[allow(clippy::too_many_arguments)]
 async fn apply_model_switch(
     agent: &Arc<tokio::sync::Mutex<ChatAgent>>,
     config: &Config,
@@ -776,6 +777,7 @@ async fn pick_compaction_scope(
 }
 
 /// Rebind compaction to the chosen provider and model.
+#[allow(clippy::too_many_arguments)]
 async fn apply_compaction_model(
     agent: &Arc<tokio::sync::Mutex<ChatAgent>>,
     config: &Config,
