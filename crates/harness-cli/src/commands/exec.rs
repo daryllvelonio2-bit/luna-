@@ -233,6 +233,7 @@ async fn register_exec_core_tools(
         todo_scope,
     )
     .await?;
+    harness_core::tools::register_profile_tools(&reg_dyn, config, true).await?;
 
     // Same undo net as the chat: a headless edit is still an edit.
     let checkpoints = Arc::new(harness_core::CheckpointController::new(

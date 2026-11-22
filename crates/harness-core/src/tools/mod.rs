@@ -2,8 +2,10 @@ pub mod delegate;
 pub mod fs;
 pub mod netguard;
 pub mod process;
+pub mod profiles;
 pub mod sandbox;
 pub mod shell;
+pub mod sleep;
 pub mod todo;
 pub mod web;
 
@@ -13,10 +15,15 @@ pub use fs::{
     ViewImageTool, WriteFileTool,
 };
 pub use process::ProcessTool;
+pub use profiles::{
+    register_profile_tools, ProfileCreateTool, ProfileDeleteTool, ProfileEditTool, ProfileListTool,
+    ProfileToolContext, ProfileViewTool,
+};
 pub use shell::{
     check_sudo_nopasswd, contains_sudo, is_sudo_auth_failure, rewrite_sudo_command, SudoPrompter,
     TerminalTool,
 };
+pub use sleep::SleepTool;
 use std::sync::{Arc, Mutex};
 pub use todo::{read_snapshot, TodoItem, TodoListTool, TodoScope, TodoSnapshot, TodoStatus};
 pub use web::{WebFetchTool, WebSearchTool};
@@ -169,6 +176,9 @@ pub async fn register_core_tools_shared_queue(
                 registry
                     .register(Arc::new(ProcessTool::new(bg_queue.clone())))
                     .await?;
+            }
+            "sleep" => {
+                registry.register(Arc::new(SleepTool)).await?;
             }
             _ => {}
         }

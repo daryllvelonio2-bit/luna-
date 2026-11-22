@@ -1,4 +1,4 @@
-//! Persistent scheduled reminders and automation tasks for Luna.
+//! Persistent scheduled reminders and flexible automation tasks for Luna.
 
 pub mod builtin_plugin;
 pub mod model;
@@ -8,14 +8,18 @@ pub mod store;
 pub mod tools;
 
 pub use builtin_plugin::{ensure_scheduler_plugin, SCHEDULER_PLUGIN_ID};
-pub use model::{compute_next_run, validate_rule, DeliveryReceipt, DeliveryTarget, ScheduleTask};
-pub use service::{ScheduleDeliveryHandler, SchedulerService};
+pub use model::{
+    compute_effective_next_run, compute_next_run, is_within_active_window,
+    next_active_window_start, validate_active_window, validate_rule, DeliveryReceipt,
+    DeliveryTarget, ExecutionMode, ScheduleTask,
+};
+pub use service::{CancellableDeliveryHandler, ScheduleDeliveryHandler, SchedulerService};
 pub use skill::{
     automation_skill, build_automation_turn_prompt, AUTOMATION_PREFILL,
     AUTOMATION_SKILL_DESCRIPTION, AUTOMATION_SKILL_INSTRUCTIONS, AUTOMATION_SKILL_NAME,
 };
-pub use store::ScheduleStore;
-pub use tools::register_schedule_tools;
+pub use store::{ScheduleCreateOptions, ScheduleStore, ScheduleUpdateOptions};
+pub use tools::{register_schedule_tools, register_schedule_tools_with_service};
 
 #[cfg(test)]
 mod tests {
@@ -31,7 +35,12 @@ mod tests {
         let now = Utc::now();
         assert!(compute_next_run("every:60", now).unwrap().is_some());
         assert!(compute_next_run("daily:14:30", now).unwrap().is_some());
+        assert!(compute_next_run("daily-local:14:30", now).unwrap().is_some());
         assert!(compute_next_run("0 9 * * *", now).unwrap().is_some());
+        assert!(compute_next_run("local-cron:0 9 * * *", now)
+            .unwrap()
+            .is_some());
+        assert!(compute_next_run("continuous", now).unwrap().is_some());
         let future = (now + chrono::Duration::hours(2)).to_rfc3339();
         assert!(compute_next_run(&format!("once:{future}"), now)
             .unwrap()
@@ -44,18 +53,19 @@ mod tests {
         let service = SchedulerService::new(store.clone());
 
         let task = store
-            .create(
-                None,
-                "Morning Brief".to_string(),
-                "Summarize open tasks".to_string(),
-                "every:60".to_string(),
-                DeliveryTarget::NewSessionEachRun,
-                None,
-            )
+            .create_with_options(ScheduleCreateOptions {
+                name: "Morning Brief".to_string(),
+                instruction: "Summarize open tasks".to_string(),
+                rule: "every:60".to_string(),
+                delivery_target: DeliveryTarget::NewSessionEachRun,
+                profile: Some("briefing-analyst".to_string()),
+                execution_mode: ExecutionMode::Scheduled,
+                active_window: Some("00:00-24:00 UTC".to_string()),
+                trigger_logic: Some("Skip if no new activity".to_string()),
+                ..Default::default()
+            })
             .unwrap();
-        assert!(!task.paused);
-        assert!(!task.require_approval);
-        assert!(task.next_run_at.is_some());
+        assert_eq!(task.profile.as_deref(), Some("briefing-analyst"));
 
         let handler: ScheduleDeliveryHandler = Arc::new(|t| {
             Box::pin(async move {
@@ -77,6 +87,41 @@ mod tests {
             .unwrap();
         assert!(paused.paused);
         assert!(paused.require_approval);
+    }
+
+    #[tokio::test]
+    async fn trigger_command_gates_execution() {
+        let store = Arc::new(ScheduleStore::open(None).unwrap());
+        let service = SchedulerService::new(store.clone());
+
+        let task = store
+            .create_with_options(ScheduleCreateOptions {
+                name: "Condition Gated".to_string(),
+                instruction: "Run only when gate passes".to_string(),
+                rule: "continuous:10".to_string(),
+                delivery_target: DeliveryTarget::NewSessionEachRun,
+                execution_mode: ExecutionMode::Continuous,
+                trigger_command: Some("false".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+
+        let handler: ScheduleDeliveryHandler = Arc::new(|t| {
+            Box::pin(async move {
+                Ok(DeliveryReceipt {
+                    delivered_at: Utc::now(),
+                    session_id: "s_never".to_string(),
+                    status: "delivered".to_string(),
+                    summary: t.name,
+                })
+            })
+        });
+
+        let results = service.tick_once(&handler).await;
+        assert!(results.is_empty(), "false trigger_command must skip run");
+        let after = store.get(&task.id).unwrap();
+        assert!(after.history.is_empty());
+        assert!(after.next_run_at.is_some());
     }
 
     #[tokio::test]

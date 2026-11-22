@@ -437,6 +437,54 @@ pub fn apply_to_config(config: &mut Config, profile: &Profile) -> Result<(), Har
     Ok(())
 }
 
+/// Apply a profile's prompt (`persona` + `behavior`) and optional `config.yaml` model/agent
+/// overrides onto `config` WITHOUT changing `paths.sessions_db` or `paths.credentials`.
+///
+/// Used by `harness-web` automation and profiled sessions so the Web UI retains visibility into
+/// the session transcript and credentials while the agent runs with the profile's full mindset
+/// and model configuration.
+pub fn apply_profile_prompt_and_overrides(
+    config: &mut Config,
+    profile: &Profile,
+) -> Result<(), HarnessError> {
+    config.agent.profile_persona = Some(profile.persona.clone());
+    config.agent.profile_behavior = Some(profile.behavior.clone());
+
+    if let Some(dir) = &profile.dir {
+        let yaml_path = dir.join("config.yaml");
+        if let Ok(raw) = std::fs::read_to_string(&yaml_path) {
+            if let Ok(parsed) = serde_yaml::from_str::<serde_yaml::Value>(&raw) {
+                if let Some(provider) = parsed
+                    .get("model")
+                    .and_then(|m| m.get("provider"))
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    config.model.provider = provider.to_string();
+                }
+                if let Some(model) = parsed
+                    .get("model")
+                    .and_then(|m| m.get("default"))
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    config.model.default = model.to_string();
+                }
+                if let Some(max_fail) = parsed
+                    .get("agent")
+                    .and_then(|a| a.get("max_consecutive_failures"))
+                    .and_then(|v| v.as_u64())
+                {
+                    config.agent.max_consecutive_failures = (max_fail as usize).max(1);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Render a profile back to the on-disk `# Summary` / `# Persona` / `# Behavior` shape.
 pub fn render(profile: &Profile) -> String {
     format!(

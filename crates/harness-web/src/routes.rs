@@ -27,7 +27,10 @@ use harness_plugins::{
     PLUGIN_SKILL_NAME,
 };
 use harness_providers::{get_provider_catalog, GenericProviderClient};
-use harness_scheduler::{automation_skill, DeliveryTarget, ScheduleTask, AUTOMATION_SKILL_NAME};
+use harness_scheduler::{
+    automation_skill, DeliveryTarget, ExecutionMode, ScheduleCreateOptions, ScheduleTask,
+    ScheduleUpdateOptions, AUTOMATION_SKILL_NAME,
+};
 
 use crate::extra_routes::{accounts_for_provider, AccountDto};
 use crate::state::WebState;
@@ -1501,6 +1504,11 @@ struct CreateScheduleReq {
     target: Option<String>,
     session_id: Option<String>,
     require_approval: Option<bool>,
+    profile: Option<String>,
+    execution_mode: Option<String>,
+    active_window: Option<String>,
+    trigger_command: Option<String>,
+    trigger_logic: Option<String>,
 }
 
 async fn create_schedule_task(
@@ -1526,8 +1534,16 @@ async fn create_schedule_task(
         ));
     }
 
+    let execution_mode = match payload.execution_mode.as_deref() {
+        Some(raw) => ExecutionMode::from_str_lossy(raw)
+            .map_err(|e| (StatusCode::BAD_REQUEST, e))?,
+        None => ExecutionMode::Scheduled,
+    };
+
     let rule = if let Some(r) = payload.rule.filter(|s| !s.trim().is_empty()) {
         r.trim().to_string()
+    } else if execution_mode == ExecutionMode::Continuous {
+        "continuous".to_string()
     } else if payload.schedule_type.as_deref() == Some("interval") {
         format!("every:{}", payload.interval_secs.unwrap_or(3600))
     } else {
@@ -1543,15 +1559,20 @@ async fn create_schedule_task(
     let task = state
         .scheduler
         .store()
-        .create_with_approval(
-            None,
+        .create_with_options(ScheduleCreateOptions {
+            id: None,
             name,
             instruction,
             rule,
-            target,
-            None,
+            delivery_target: target,
+            plugin_id: None,
             require_approval,
-        )
+            profile: payload.profile,
+            execution_mode,
+            active_window: payload.active_window,
+            trigger_command: payload.trigger_command,
+            trigger_logic: payload.trigger_logic,
+        })
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
     Ok(Json(task))
@@ -1566,6 +1587,11 @@ struct UpdateScheduleReq {
     target: Option<String>,
     session_id: Option<String>,
     require_approval: Option<bool>,
+    profile: Option<String>,
+    execution_mode: Option<String>,
+    active_window: Option<String>,
+    trigger_command: Option<String>,
+    trigger_logic: Option<String>,
 }
 
 async fn update_schedule_task(
@@ -1578,17 +1604,35 @@ async fn update_schedule_task(
         .as_deref()
         .map(|t| parse_delivery_target(Some(t), payload.session_id.as_deref()));
 
+    let execution_mode = match payload.execution_mode.as_deref() {
+        Some(raw) => Some(
+            ExecutionMode::from_str_lossy(raw).map_err(|e| (StatusCode::BAD_REQUEST, e))?,
+        ),
+        None => None,
+    };
+
+    if payload.paused == Some(true) {
+        state.scheduler.cancel_task(&task_id);
+    }
+
     let updated = state
         .scheduler
         .store()
-        .update_with_approval(
+        .update_with_options(
             &task_id,
-            payload.name,
-            payload.instruction,
-            payload.rule,
-            delivery_target,
-            payload.paused,
-            payload.require_approval,
+            ScheduleUpdateOptions {
+                name: payload.name,
+                instruction: payload.instruction,
+                rule: payload.rule,
+                delivery_target,
+                paused: payload.paused,
+                require_approval: payload.require_approval,
+                profile: payload.profile.map(Some),
+                execution_mode,
+                active_window: payload.active_window.map(Some),
+                trigger_command: payload.trigger_command.map(Some),
+                trigger_logic: payload.trigger_logic.map(Some),
+            },
         )
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
@@ -1655,6 +1699,9 @@ async fn toggle_schedule_task(
             .and_then(|v| v.as_bool())
             .unwrap_or(true)
     };
+    if paused {
+        state.scheduler.cancel_task(&task_id);
+    }
     let updated = state
         .scheduler
         .store()
@@ -1667,6 +1714,7 @@ async fn delete_schedule_task(
     State(state): State<Arc<WebState>>,
     Path(task_id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    state.scheduler.cancel_task(&task_id);
     state
         .scheduler
         .store()

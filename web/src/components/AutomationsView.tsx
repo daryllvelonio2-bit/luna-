@@ -1,5 +1,6 @@
-import React, { useMemo, useState } from 'react';
-import type { DeliveryReceipt, DeliveryTarget, ScheduleTask } from '../types';
+import React, { useEffect, useMemo, useState } from 'react';
+import { api } from '../api';
+import type { DeliveryReceipt, DeliveryTarget, ExecutionMode, ProfileItem, ScheduleTask } from '../types';
 import {
   Clock,
   Plus,
@@ -23,6 +24,9 @@ import {
   Repeat,
   ShieldCheck,
   ShieldOff,
+  UserCog,
+  Infinity as InfinityIcon,
+  Zap,
 } from 'lucide-react';
 
 interface AutomationsViewProps {
@@ -36,6 +40,11 @@ interface AutomationsViewProps {
     target?: 'new_session_each_run' | 'single_new_session' | 'existing_session';
     session_id?: string;
     require_approval?: boolean;
+    profile?: string;
+    execution_mode?: ExecutionMode;
+    active_window?: string;
+    trigger_command?: string;
+    trigger_logic?: string;
   }) => Promise<void> | void;
   onUpdateTask: (
     id: string,
@@ -46,6 +55,11 @@ interface AutomationsViewProps {
       paused?: boolean;
       target?: 'new_session_each_run' | 'single_new_session' | 'existing_session';
       require_approval?: boolean;
+      profile?: string;
+      execution_mode?: ExecutionMode;
+      active_window?: string;
+      trigger_command?: string;
+      trigger_logic?: string;
     }
   ) => Promise<void> | void;
   onToggleTask: (id: string, paused: boolean) => Promise<void> | void;
@@ -57,7 +71,7 @@ interface AutomationsViewProps {
 }
 
 type FilterTab = 'all' | 'active' | 'paused' | 'history';
-type CadenceKind = 'daily' | 'interval' | 'cron' | 'once';
+type CadenceKind = 'daily-local' | 'daily' | 'interval' | 'cron' | 'local-cron' | 'once' | 'continuous';
 
 const GUIDED_STARTERS = [
   {
@@ -84,6 +98,23 @@ const GUIDED_STARTERS = [
 
 function humanizeRule(rule: string): string {
   const trimmed = rule.trim();
+  if (trimmed === 'continuous') {
+    return 'Continuous (never-stop loop)';
+  }
+  if (trimmed.startsWith('continuous:')) {
+    const secs = Number(trimmed.slice(11).trim());
+    return !Number.isNaN(secs) && secs > 0
+      ? `Continuous (${secs}s cooldown)`
+      : 'Continuous (never-stop loop)';
+  }
+  if (trimmed.startsWith('daily-local:')) {
+    const hm = trimmed.slice(12).trim();
+    return `Daily at ${hm} (local)`;
+  }
+  if (trimmed.startsWith('local-cron:')) {
+    const expr = trimmed.slice(11).trim();
+    return `Local Cron · ${expr}`;
+  }
   if (trimmed.startsWith('daily:')) {
     const hm = trimmed.slice(6).trim();
     return `Daily at ${hm} UTC`;
@@ -178,8 +209,43 @@ function parseRuleToEditor(rule: string): {
   intervalUnit: 'minutes' | 'hours' | 'seconds';
   cronExpr: string;
   onceValue: string;
+  continuousCooldown: number;
 } {
   const trimmed = rule.trim();
+  if (trimmed === 'continuous' || trimmed.startsWith('continuous:')) {
+    const secs = trimmed.startsWith('continuous:') ? Number(trimmed.slice(11).trim()) || 10 : 10;
+    return {
+      kind: 'continuous',
+      dailyTime: '09:00',
+      intervalValue: 60,
+      intervalUnit: 'minutes',
+      cronExpr: '0 9 * * 1-5',
+      onceValue: '',
+      continuousCooldown: secs,
+    };
+  }
+  if (trimmed.startsWith('daily-local:')) {
+    return {
+      kind: 'daily-local',
+      dailyTime: trimmed.slice(12).trim() || '09:00',
+      intervalValue: 60,
+      intervalUnit: 'minutes',
+      cronExpr: '0 9 * * 1-5',
+      onceValue: '',
+      continuousCooldown: 10,
+    };
+  }
+  if (trimmed.startsWith('local-cron:')) {
+    return {
+      kind: 'local-cron',
+      dailyTime: '09:00',
+      intervalValue: 60,
+      intervalUnit: 'minutes',
+      cronExpr: trimmed.slice(11).trim() || '0 9 * * 1-5',
+      onceValue: '',
+      continuousCooldown: 10,
+    };
+  }
   if (trimmed.startsWith('daily:')) {
     return {
       kind: 'daily',
@@ -188,6 +254,7 @@ function parseRuleToEditor(rule: string): {
       intervalUnit: 'minutes',
       cronExpr: '0 9 * * 1-5',
       onceValue: '',
+      continuousCooldown: 10,
     };
   }
   if (trimmed.startsWith('every:')) {
@@ -200,6 +267,7 @@ function parseRuleToEditor(rule: string): {
         intervalUnit: 'hours',
         cronExpr: '0 9 * * 1-5',
         onceValue: '',
+        continuousCooldown: 10,
       };
     }
     if (secs % 60 === 0) {
@@ -210,6 +278,7 @@ function parseRuleToEditor(rule: string): {
         intervalUnit: 'minutes',
         cronExpr: '0 9 * * 1-5',
         onceValue: '',
+        continuousCooldown: 10,
       };
     }
     return {
@@ -219,6 +288,7 @@ function parseRuleToEditor(rule: string): {
       intervalUnit: 'seconds',
       cronExpr: '0 9 * * 1-5',
       onceValue: '',
+      continuousCooldown: 10,
     };
   }
   if (trimmed.startsWith('once:')) {
@@ -234,6 +304,7 @@ function parseRuleToEditor(rule: string): {
       intervalUnit: 'minutes',
       cronExpr: '0 9 * * 1-5',
       onceValue: localIso,
+      continuousCooldown: 10,
     };
   }
   return {
@@ -243,6 +314,7 @@ function parseRuleToEditor(rule: string): {
     intervalUnit: 'minutes',
     cronExpr: trimmed || '0 9 * * 1-5',
     onceValue: '',
+    continuousCooldown: 10,
   };
 }
 
@@ -272,17 +344,31 @@ export const AutomationsView: React.FC<AutomationsViewProps> = ({
   const [editingTask, setEditingTask] = useState<ScheduleTask | null>(null);
   const [name, setName] = useState('');
   const [instruction, setInstruction] = useState('');
-  const [cadenceKind, setCadenceKind] = useState<CadenceKind>('daily');
+  const [cadenceKind, setCadenceKind] = useState<CadenceKind>('daily-local');
   const [dailyTime, setDailyTime] = useState('19:00');
   const [intervalValue, setIntervalValue] = useState(1);
   const [intervalUnit, setIntervalUnit] = useState<'minutes' | 'hours' | 'seconds'>('hours');
   const [cronExpr, setCronExpr] = useState('0 9 * * 1-5');
   const [onceValue, setOnceValue] = useState('');
+  const [continuousCooldown, setContinuousCooldown] = useState(10);
   const [targetKind, setTargetKind] = useState<'new_session_each_run' | 'single_new_session'>(
     'new_session_each_run'
   );
   const [requireApproval, setRequireApproval] = useState(false);
+  const [profileName, setProfileName] = useState('');
+  const [executionMode, setExecutionMode] = useState<ExecutionMode>('scheduled');
+  const [activeWindow, setActiveWindow] = useState('');
+  const [triggerCommand, setTriggerCommand] = useState('');
+  const [triggerLogic, setTriggerLogic] = useState('');
+  const [profiles, setProfiles] = useState<ProfileItem[]>([]);
   const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    api
+      .listProfiles()
+      .then((res) => setProfiles(res.profiles || []))
+      .catch(() => {});
+  }, [showEditorModal]);
 
   const counts = useMemo(() => {
     let active = 0;
@@ -333,7 +419,13 @@ export const AutomationsView: React.FC<AutomationsViewProps> = ({
   }, [tasks, search]);
 
   const computedRule = useMemo(() => {
+    if (cadenceKind === 'continuous') {
+      const cd = Math.max(1, Math.round(Number(continuousCooldown) || 10));
+      return cd === 10 ? 'continuous' : `continuous:${cd}`;
+    }
+    if (cadenceKind === 'daily-local') return `daily-local:${dailyTime || '09:00'}`;
     if (cadenceKind === 'daily') return `daily:${dailyTime || '09:00'}`;
+    if (cadenceKind === 'local-cron') return `local-cron:${cronExpr.trim() || '0 9 * * 1-5'}`;
     if (cadenceKind === 'interval') {
       const mult = intervalUnit === 'hours' ? 3600 : intervalUnit === 'minutes' ? 60 : 1;
       const secs = Math.max(10, Math.round((Number(intervalValue) || 1) * mult));
@@ -345,7 +437,15 @@ export const AutomationsView: React.FC<AutomationsViewProps> = ({
       return Number.isNaN(dt.getTime()) ? `once:${onceValue}` : `once:${dt.toISOString()}`;
     }
     return cronExpr.trim() || '0 9 * * 1-5';
-  }, [cadenceKind, dailyTime, intervalValue, intervalUnit, cronExpr, onceValue]);
+  }, [
+    cadenceKind,
+    dailyTime,
+    intervalValue,
+    intervalUnit,
+    cronExpr,
+    onceValue,
+    continuousCooldown,
+  ]);
 
   const openCreateModal = () => {
     onStartAutomationConversation();
@@ -362,12 +462,22 @@ export const AutomationsView: React.FC<AutomationsViewProps> = ({
     setIntervalUnit(parsed.intervalUnit);
     setCronExpr(parsed.cronExpr);
     setOnceValue(parsed.onceValue);
+    setContinuousCooldown(parsed.continuousCooldown);
     setTargetKind(
       task.delivery_target?.kind === 'single_new_session'
         ? 'single_new_session'
         : 'new_session_each_run'
     );
     setRequireApproval(Boolean(task.require_approval));
+    setProfileName(task.profile || '');
+    setExecutionMode(
+      task.execution_mode === 'continuous' || parsed.kind === 'continuous'
+        ? 'continuous'
+        : 'scheduled'
+    );
+    setActiveWindow(task.active_window || '');
+    setTriggerCommand(task.trigger_command || '');
+    setTriggerLogic(task.trigger_logic || '');
     setShowEditorModal(true);
   };
 
@@ -376,22 +486,22 @@ export const AutomationsView: React.FC<AutomationsViewProps> = ({
     if (!name.trim() || !instruction.trim()) return;
     setSaving(true);
     try {
+      const payload = {
+        name: name.trim(),
+        instruction: instruction.trim(),
+        rule: computedRule,
+        target: targetKind,
+        require_approval: requireApproval,
+        profile: profileName.trim(),
+        execution_mode: (cadenceKind === 'continuous' ? 'continuous' : executionMode) as ExecutionMode,
+        active_window: activeWindow.trim(),
+        trigger_command: triggerCommand.trim(),
+        trigger_logic: triggerLogic.trim(),
+      };
       if (editingTask) {
-        await onUpdateTask(editingTask.id, {
-          name: name.trim(),
-          instruction: instruction.trim(),
-          rule: computedRule,
-          target: targetKind,
-          require_approval: requireApproval,
-        });
+        await onUpdateTask(editingTask.id, payload);
       } else {
-        await onCreateTask({
-          name: name.trim(),
-          instruction: instruction.trim(),
-          rule: computedRule,
-          target: targetKind,
-          require_approval: requireApproval,
-        });
+        await onCreateTask(payload);
       }
       setShowEditorModal(false);
     } finally {
@@ -810,6 +920,35 @@ export const AutomationsView: React.FC<AutomationsViewProps> = ({
                             : formatRelativeTime(task.next_run_at, true)}
                         </span>
                       </div>
+                      {task.profile && (
+                        <div className="auto-meta-item" title={`Profile: ${task.profile}`}>
+                          <UserCog size={12} />
+                          <span className="auto-meta-value">{task.profile}</span>
+                        </div>
+                      )}
+                      {task.execution_mode === 'continuous' && (
+                        <div className="auto-meta-item" title="Continuous never-stop worker using sleep">
+                          <InfinityIcon size={12} />
+                          <span className="auto-meta-value">Continuous</span>
+                        </div>
+                      )}
+                      {task.active_window && (
+                        <div className="auto-meta-item" title={`Working window: ${task.active_window}`}>
+                          <CalendarClock size={12} />
+                          <span className="auto-meta-value">{task.active_window}</span>
+                        </div>
+                      )}
+                      {(task.trigger_command || task.trigger_logic) && (
+                        <div
+                          className="auto-meta-item"
+                          title={task.trigger_command || task.trigger_logic || 'Conditional trigger'}
+                        >
+                          <Zap size={12} />
+                          <span className="auto-meta-value">
+                            {task.trigger_command ? 'Trigger gate' : 'Trigger logic'}
+                          </span>
+                        </div>
+                      )}
                       <div className="auto-meta-item">
                         <Layers size={12} />
                         <span className="auto-meta-value">
@@ -969,26 +1108,45 @@ export const AutomationsView: React.FC<AutomationsViewProps> = ({
 
               <div className="form-group">
                 <label className="form-label">Schedule cadence</label>
-                <div className="auto-cadence-tabs">
-                  {(['daily', 'interval', 'cron', 'once'] as CadenceKind[]).map((k) => (
+                <div className="auto-cadence-tabs" style={{ flexWrap: 'wrap' }}>
+                  {(
+                    [
+                      'daily-local',
+                      'daily',
+                      'interval',
+                      'local-cron',
+                      'cron',
+                      'continuous',
+                      'once',
+                    ] as CadenceKind[]
+                  ).map((k) => (
                     <button
                       key={k}
                       type="button"
                       className={`auto-cadence-tab ${cadenceKind === k ? 'active' : ''}`}
-                      onClick={() => setCadenceKind(k)}
+                      onClick={() => {
+                        setCadenceKind(k);
+                        if (k === 'continuous') setExecutionMode('continuous');
+                      }}
                     >
-                      {k === 'daily'
-                        ? 'Daily (UTC)'
-                        : k === 'interval'
-                          ? 'Interval'
-                          : k === 'cron'
-                            ? 'Cron'
-                            : 'One-shot'}
+                      {k === 'daily-local'
+                        ? 'Daily (Local)'
+                        : k === 'daily'
+                          ? 'Daily (UTC)'
+                          : k === 'interval'
+                            ? 'Interval'
+                            : k === 'local-cron'
+                              ? 'Cron (Local)'
+                              : k === 'cron'
+                                ? 'Cron (UTC)'
+                                : k === 'continuous'
+                                  ? 'Continuous'
+                                  : 'One-shot'}
                     </button>
                   ))}
                 </div>
 
-                {cadenceKind === 'daily' && (
+                {(cadenceKind === 'daily' || cadenceKind === 'daily-local') && (
                   <div className="auto-cadence-field">
                     <input
                       type="time"
@@ -996,7 +1154,24 @@ export const AutomationsView: React.FC<AutomationsViewProps> = ({
                       value={dailyTime}
                       onChange={(e) => setDailyTime(e.target.value)}
                     />
-                    <span className="auto-field-hint">24-hour UTC time</span>
+                    <span className="auto-field-hint">
+                      {cadenceKind === 'daily-local' ? 'Device local time' : '24-hour UTC time'}
+                    </span>
+                  </div>
+                )}
+
+                {cadenceKind === 'continuous' && (
+                  <div className="auto-cadence-field">
+                    <input
+                      type="number"
+                      min={1}
+                      className="form-input"
+                      value={continuousCooldown}
+                      onChange={(e) => setContinuousCooldown(Number(e.target.value))}
+                    />
+                    <span className="auto-field-hint">
+                      Cooldown seconds between cycles (uses sleep tool inside runs)
+                    </span>
                   </div>
                 )}
 
@@ -1023,7 +1198,7 @@ export const AutomationsView: React.FC<AutomationsViewProps> = ({
                   </div>
                 )}
 
-                {cadenceKind === 'cron' && (
+                {(cadenceKind === 'cron' || cadenceKind === 'local-cron') && (
                   <div className="auto-cadence-field">
                     <input
                       type="text"
@@ -1032,7 +1207,11 @@ export const AutomationsView: React.FC<AutomationsViewProps> = ({
                       onChange={(e) => setCronExpr(e.target.value)}
                       placeholder="0 9 * * 1-5"
                     />
-                    <span className="auto-field-hint">5-field UTC cron (min hour dom mon dow)</span>
+                    <span className="auto-field-hint">
+                      {cadenceKind === 'local-cron'
+                        ? '5-field local time cron (min hour dom mon dow)'
+                        : '5-field UTC cron (min hour dom mon dow)'}
+                    </span>
                   </div>
                 )}
 
@@ -1052,6 +1231,77 @@ export const AutomationsView: React.FC<AutomationsViewProps> = ({
                   <code>{computedRule}</code>
                   <span className="auto-rule-preview-human">· {humanizeRule(computedRule)}</span>
                 </div>
+              </div>
+
+              <div className="form-group">
+                <label className="form-label">Profile & mindset</label>
+                <select
+                  className="form-input"
+                  value={profileName}
+                  onChange={(e) => setProfileName(e.target.value)}
+                >
+                  <option value="">Default profile</option>
+                  {profiles
+                    .filter((p) => p.name !== 'default')
+                    .map((p) => (
+                      <option key={p.name} value={p.name}>
+                        {p.name} — {p.summary}
+                      </option>
+                    ))}
+                </select>
+              </div>
+
+              <div className="form-group">
+                <label className="form-label">Execution mode</label>
+                <div className="auto-cadence-tabs">
+                  <button
+                    type="button"
+                    className={`auto-cadence-tab ${executionMode === 'scheduled' ? 'active' : ''}`}
+                    onClick={() => setExecutionMode('scheduled')}
+                  >
+                    Scheduled
+                  </button>
+                  <button
+                    type="button"
+                    className={`auto-cadence-tab ${executionMode === 'continuous' ? 'active' : ''}`}
+                    onClick={() => setExecutionMode('continuous')}
+                  >
+                    Continuous (never-stop + sleep)
+                  </button>
+                </div>
+              </div>
+
+              <div className="form-group">
+                <label className="form-label">Targeted working time (active window)</label>
+                <input
+                  type="text"
+                  className="form-input"
+                  placeholder="Optional, e.g. Mon-Fri 09:00-17:00 or 22:00-06:00 or weekdays 08:30-18:00 UTC"
+                  value={activeWindow}
+                  onChange={(e) => setActiveWindow(e.target.value)}
+                />
+              </div>
+
+              <div className="form-group">
+                <label className="form-label">Trigger gate command (optional shell pre-check)</label>
+                <input
+                  type="text"
+                  className="form-input"
+                  placeholder="Optional shell command (exit 0 runs agent; non-zero skips tick)"
+                  value={triggerCommand}
+                  onChange={(e) => setTriggerCommand(e.target.value)}
+                />
+              </div>
+
+              <div className="form-group">
+                <label className="form-label">Trigger & stopping logic</label>
+                <input
+                  type="text"
+                  className="form-input"
+                  placeholder="Optional conditional logic / escalation / self-pause criteria"
+                  value={triggerLogic}
+                  onChange={(e) => setTriggerLogic(e.target.value)}
+                />
               </div>
 
               <div className="form-group">

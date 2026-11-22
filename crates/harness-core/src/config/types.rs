@@ -548,6 +548,7 @@ impl Default for ToolsSettings {
                 "list_files".to_string(),
                 "todo_list".to_string(),
                 "terminal".to_string(),
+                "sleep".to_string(),
                 "web_search".to_string(),
                 "web_fetch".to_string(),
             ],

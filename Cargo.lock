@@ -1844,6 +1844,7 @@ dependencies = [
  "harness-app",
  "harness-core",
  "harness-memory",
+ "harness-note-graph",
  "harness-notes",
  "harness-plugins",
  "harness-providers",

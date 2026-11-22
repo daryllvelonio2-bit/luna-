@@ -7,18 +7,59 @@ use async_trait::async_trait;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
+use harness_core::tools::SleepTool;
 use harness_core::{HarnessError, Tool, ToolRegistry, ToolResult};
 
-use crate::model::DeliveryTarget;
-use crate::store::ScheduleStore;
+use crate::model::{DeliveryTarget, ExecutionMode};
+use crate::service::SchedulerService;
+use crate::store::{ScheduleCreateOptions, ScheduleStore, ScheduleUpdateOptions};
 
-/// Register the four schedule tools onto `registry`.
+/// Register the four schedule tools onto `registry` (plus `sleep` if absent).
 pub async fn register_schedule_tools(
     registry: &Arc<dyn ToolRegistry>,
     store: Arc<ScheduleStore>,
     current_session_id: Option<String>,
     allow_mutation: bool,
 ) -> Result<(), HarnessError> {
+    register_schedule_tools_inner(registry, store, None, current_session_id, allow_mutation).await
+}
+
+/// Register schedule tools wired to a live [`SchedulerService`] so pausing/deleting
+/// immediately cancels in-flight/sleeping tasks.
+pub async fn register_schedule_tools_with_service(
+    registry: &Arc<dyn ToolRegistry>,
+    service: Arc<SchedulerService>,
+    current_session_id: Option<String>,
+    allow_mutation: bool,
+) -> Result<(), HarnessError> {
+    let store = service.store().clone();
+    register_schedule_tools_inner(
+        registry,
+        store,
+        Some(service),
+        current_session_id,
+        allow_mutation,
+    )
+    .await
+}
+
+async fn register_schedule_tools_inner(
+    registry: &Arc<dyn ToolRegistry>,
+    store: Arc<ScheduleStore>,
+    service: Option<Arc<SchedulerService>>,
+    current_session_id: Option<String>,
+    allow_mutation: bool,
+) -> Result<(), HarnessError> {
+    if allow_mutation {
+        let has_sleep = registry
+            .list_tools()
+            .await
+            .map(|list| list.iter().any(|t| t.name == "sleep"))
+            .unwrap_or(false);
+        if !has_sleep {
+            registry.register(Arc::new(SleepTool)).await?;
+        }
+    }
     registry
         .register(Arc::new(ScheduleCreateTool {
             store: store.clone(),
@@ -41,6 +82,7 @@ pub async fn register_schedule_tools(
     registry
         .register(Arc::new(ScheduleEditTool {
             store,
+            service,
             current_session_id,
             allow_mutation,
         }))
@@ -80,7 +122,7 @@ impl Tool for ScheduleCreateTool {
     }
 
     fn description(&self) -> &str {
-        "Create a scheduled reminder or recurring automation task. Rules accept 'once:<RFC3339>', 'every:<seconds>', 'daily:<HH:MM>', or 5-field UTC cron ('min hour dom mon dow')."
+        "Create a scheduled reminder or flexible recurring/continuous automation task. Supports profiles, targeted working-time windows, trigger commands/logic, continuous never-stop mode (with sleep), and local/UTC rules."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -88,17 +130,41 @@ impl Tool for ScheduleCreateTool {
             "type": "object",
             "properties": {
                 "name": { "type": "string", "description": "Short task name" },
-                "instruction": { "type": "string", "description": "Prompt/instruction delivered to the agent when due" },
-                "rule": { "type": "string", "description": "Recurrence rule: once:<RFC3339>, every:<secs>, daily:<HH:MM>, or 5-field cron" },
+                "instruction": { "type": "string", "description": "Self-contained prompt/instruction delivered to the agent when triggered" },
+                "rule": {
+                    "type": "string",
+                    "description": "Recurrence rule: 'daily-local:<HH:MM>', 'local-cron:<5-field>', 'daily:<HH:MM>' (UTC), 'every:<seconds>', 'once:<RFC3339>', 'continuous[:<cooldown_secs>]', or 5-field UTC cron ('min hour dom mon dow')."
+                },
                 "target": {
                     "type": "string",
                     "enum": ["existing_session", "single_new_session", "new_session_each_run"],
                     "description": "Where each run delivers its instruction"
                 },
-                "session_id": { "type": "string", "description": "Optional explicit session id for existing_session" },
+                "session_id": { "type": "string", "description": "Optional explicit session id for existing_session or single_new_session" },
                 "require_approval": {
                     "type": "boolean",
-                    "description": "Whether tool calls during scheduled runs ask for permission (default: false — automations run without needing permissions unless changed)"
+                    "description": "Whether tool calls during scheduled runs ask for permission (default: false — automations run autonomously)"
+                },
+                "profile": {
+                    "type": "string",
+                    "description": "Optional Luna profile name (created via profile_create) whose persona, mindset/behavior, and model overrides govern each run."
+                },
+                "execution_mode": {
+                    "type": "string",
+                    "enum": ["scheduled", "continuous"],
+                    "description": "'scheduled' (default) runs on each cadence tick; 'continuous' runs persistently as a never-stop worker loop using the sleep tool."
+                },
+                "active_window": {
+                    "type": "string",
+                    "description": "Optional targeted working-time window (local time by default, or add 'UTC'), e.g. 'Mon-Fri 09:00-17:00', '22:00-06:00', 'weekdays 08:30-18:00'."
+                },
+                "trigger_command": {
+                    "type": "string",
+                    "description": "Optional lightweight shell gate ('sh -c <cmd>'). Exit 0 triggers the full agent run; non-zero skips this tick cheaply without burning tokens."
+                },
+                "trigger_logic": {
+                    "type": "string",
+                    "description": "Optional description of conditional trigger/escalation/stop criteria injected into the agent's context."
                 }
             },
             "required": ["name", "instruction", "rule"]
@@ -125,20 +191,36 @@ impl Tool for ScheduleCreateTool {
         let instruction = args["instruction"].as_str().unwrap_or_default().to_string();
         let rule = args["rule"].as_str().unwrap_or_default().to_string();
         let require_approval = args["require_approval"].as_bool().unwrap_or(false);
+        let profile = args["profile"].as_str().map(str::to_string);
+        let execution_mode = match args["execution_mode"].as_str() {
+            Some(raw) => match ExecutionMode::from_str_lossy(raw) {
+                Ok(m) => m,
+                Err(e) => return Ok(ToolResult::error(call_id, e)),
+            },
+            None => ExecutionMode::Scheduled,
+        };
+        let active_window = args["active_window"].as_str().map(str::to_string);
+        let trigger_command = args["trigger_command"].as_str().map(str::to_string);
+        let trigger_logic = args["trigger_logic"].as_str().map(str::to_string);
         let target = parse_target(
             args["target"].as_str(),
             args["session_id"].as_str(),
             self.current_session_id.as_deref(),
         );
-        match self.store.create_with_approval(
-            None,
+        match self.store.create_with_options(ScheduleCreateOptions {
+            id: None,
             name,
             instruction,
             rule,
-            target,
-            None,
+            delivery_target: target,
+            plugin_id: None,
             require_approval,
-        ) {
+            profile,
+            execution_mode,
+            active_window,
+            trigger_command,
+            trigger_logic,
+        }) {
             Ok(task) => Ok(ToolResult::success(
                 call_id,
                 serde_json::to_string_pretty(&task).unwrap_or_default(),
@@ -205,7 +287,7 @@ impl Tool for ScheduleViewTool {
     }
 
     fn description(&self) -> &str {
-        "Inspect one scheduled task by id, including its recent delivery history."
+        "Inspect one scheduled task by id, including its profile, active_window, trigger logic, and recent delivery history."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -247,6 +329,7 @@ impl Tool for ScheduleViewTool {
 
 pub struct ScheduleEditTool {
     store: Arc<ScheduleStore>,
+    service: Option<Arc<SchedulerService>>,
     current_session_id: Option<String>,
     allow_mutation: bool,
 }
@@ -258,7 +341,7 @@ impl Tool for ScheduleEditTool {
     }
 
     fn description(&self) -> &str {
-        "Edit, pause, resume, or delete a scheduled task by id."
+        "Edit, pause, resume, or delete a scheduled task by id (including profile, execution_mode, active_window, trigger_command, and trigger_logic)."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -272,7 +355,12 @@ impl Tool for ScheduleEditTool {
                 "rule": { "type": "string" },
                 "target": { "type": "string", "enum": ["existing_session", "single_new_session", "new_session_each_run"] },
                 "session_id": { "type": "string" },
-                "require_approval": { "type": "boolean", "description": "Toggle whether scheduled runs require interactive approval (default false)" }
+                "require_approval": { "type": "boolean", "description": "Toggle whether scheduled runs require interactive approval (default false)" },
+                "profile": { "type": "string", "description": "Assign/change Luna profile name (empty string clears to default)." },
+                "execution_mode": { "type": "string", "enum": ["scheduled", "continuous"] },
+                "active_window": { "type": "string", "description": "Set/change targeted working-time window (empty string clears to 24/7)." },
+                "trigger_command": { "type": "string", "description": "Set/change lightweight shell gate command (empty string clears)." },
+                "trigger_logic": { "type": "string", "description": "Set/change conditional trigger/stop logic description (empty string clears)." }
             },
             "required": ["id"]
         })
@@ -297,24 +385,28 @@ impl Tool for ScheduleEditTool {
         let id = args["id"].as_str().unwrap_or_default();
         let action = args["action"].as_str().unwrap_or("update");
         match action {
-            "delete" => match self.store.delete(id) {
-                Ok(true) => Ok(ToolResult::success(
-                    call_id,
-                    format!("deleted schedule {id}"),
-                )),
-                Ok(false) => Ok(ToolResult::error(
-                    call_id,
-                    format!("schedule '{id}' not found"),
-                )),
-                Err(e) => Ok(ToolResult::error(call_id, e)),
-            },
-            "pause" => match self.store.update(id, None, None, None, None, Some(true)) {
-                Ok(t) => Ok(ToolResult::success(
-                    call_id,
-                    serde_json::to_string_pretty(&t).unwrap_or_default(),
-                )),
-                Err(e) => Ok(ToolResult::error(call_id, e)),
-            },
+            "delete" => {
+                if let Some(svc) = &self.service {
+                    svc.cancel_task(id);
+                }
+                match self.store.delete(id) {
+                    Ok(true) => Ok(ToolResult::success(call_id, format!("Deleted schedule {id}"))),
+                    Ok(false) => Ok(ToolResult::error(call_id, format!("Schedule {id} not found"))),
+                    Err(e) => Ok(ToolResult::error(call_id, e)),
+                }
+            }
+            "pause" => {
+                if let Some(svc) = &self.service {
+                    svc.cancel_task(id);
+                }
+                match self.store.update(id, None, None, None, None, Some(true)) {
+                    Ok(t) => Ok(ToolResult::success(
+                        call_id,
+                        serde_json::to_string_pretty(&t).unwrap_or_default(),
+                    )),
+                    Err(e) => Ok(ToolResult::error(call_id, e)),
+                }
+            }
             "resume" => match self.store.update(id, None, None, None, None, Some(false)) {
                 Ok(t) => Ok(ToolResult::success(
                     call_id,
@@ -334,14 +426,57 @@ impl Tool for ScheduleEditTool {
                         self.current_session_id.as_deref(),
                     )
                 });
-                match self.store.update_with_approval(
+                let profile = args.get("profile").and_then(|v| {
+                    if v.is_null() {
+                        Some(None)
+                    } else {
+                        v.as_str().map(|s| Some(s.to_string()))
+                    }
+                });
+                let execution_mode = match args["execution_mode"].as_str() {
+                    Some(raw) => match ExecutionMode::from_str_lossy(raw) {
+                        Ok(m) => Some(m),
+                        Err(e) => return Ok(ToolResult::error(call_id, e)),
+                    },
+                    None => None,
+                };
+                let active_window = args.get("active_window").and_then(|v| {
+                    if v.is_null() {
+                        Some(None)
+                    } else {
+                        v.as_str().map(|s| Some(s.to_string()))
+                    }
+                });
+                let trigger_command = args.get("trigger_command").and_then(|v| {
+                    if v.is_null() {
+                        Some(None)
+                    } else {
+                        v.as_str().map(|s| Some(s.to_string()))
+                    }
+                });
+                let trigger_logic = args.get("trigger_logic").and_then(|v| {
+                    if v.is_null() {
+                        Some(None)
+                    } else {
+                        v.as_str().map(|s| Some(s.to_string()))
+                    }
+                });
+
+                match self.store.update_with_options(
                     id,
-                    name,
-                    instruction,
-                    rule,
-                    target,
-                    None,
-                    require_approval,
+                    ScheduleUpdateOptions {
+                        name,
+                        instruction,
+                        rule,
+                        delivery_target: target,
+                        paused: None,
+                        require_approval,
+                        profile,
+                        execution_mode,
+                        active_window,
+                        trigger_command,
+                        trigger_logic,
+                    },
                 ) {
                     Ok(t) => Ok(ToolResult::success(
                         call_id,

@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
@@ -96,7 +96,7 @@ pub fn extra_router() -> Router<Arc<WebState>> {
         .route("/api/workers", post(upsert_worker))
         .route("/api/workers/{name}", delete(delete_worker))
         .route("/api/profiles", get(list_profiles).post(create_profile))
-        .route("/api/profiles/{name}", delete(delete_profile))
+        .route("/api/profiles/{name}", put(update_profile).delete(delete_profile))
         .route("/api/heartbeat", get(get_heartbeat))
 }
 
@@ -1494,7 +1494,10 @@ async fn create_profile(
 ) -> Result<StatusCode, (StatusCode, String)> {
     let name = payload.name.trim().to_ascii_lowercase();
     validate_profile_name(&name).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let profiles_dir = state.config.read().await.paths.profiles_dir.clone();
+    let (profiles_dir, creds_src) = {
+        let cfg = state.config.read().await;
+        (cfg.paths.profiles_dir.clone(), cfg.paths.credentials.clone())
+    };
     let dir = profile_dir(&profiles_dir, &name);
     if dir.exists() {
         return Err((
@@ -1528,6 +1531,51 @@ async fn create_profile(
         .unwrap_or(&def.behavior);
 
     let md = format!("# Summary\n{summary}\n\n# Persona\n{persona}\n\n# Behavior\n{behavior}\n");
+    std::fs::write(dir.join(PROFILE_FILE), md)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if creds_src.exists() {
+        let _ = std::fs::copy(&creds_src, &paths.credentials);
+    }
+    Ok(StatusCode::OK)
+}
+
+#[derive(Deserialize)]
+struct UpdateProfileReq {
+    summary: Option<String>,
+    persona: Option<String>,
+    behavior: Option<String>,
+}
+
+async fn update_profile(
+    State(state): State<Arc<WebState>>,
+    Path(name): Path<String>,
+    Json(payload): Json<UpdateProfileReq>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    if name == DEFAULT_PROFILE {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Cannot modify the built-in default profile".into(),
+        ));
+    }
+    let profiles_dir = state.config.read().await.paths.profiles_dir.clone();
+    let mut prof = load_profile(&name, &profiles_dir)
+        .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
+    let dir = profile_dir(&profiles_dir, &name);
+
+    if let Some(s) = payload.summary.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        prof.summary = s.to_string();
+    }
+    if let Some(p) = payload.persona.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        prof.persona = p.to_string();
+    }
+    if let Some(b) = payload.behavior.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        prof.behavior = b.to_string();
+    }
+
+    let md = format!(
+        "# Summary\n{}\n\n# Persona\n{}\n\n# Behavior\n{}\n",
+        prof.summary, prof.persona, prof.behavior
+    );
     std::fs::write(dir.join(PROFILE_FILE), md)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(StatusCode::OK)

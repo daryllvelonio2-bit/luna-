@@ -704,6 +704,11 @@ class ApiClient {
     target?: 'new_session_each_run' | 'single_new_session' | 'existing_session';
     session_id?: string;
     require_approval?: boolean;
+    profile?: string;
+    execution_mode?: 'scheduled' | 'continuous';
+    active_window?: string;
+    trigger_command?: string;
+    trigger_logic?: string;
   }): Promise<ScheduleTask> {
     return this.request<ScheduleTask>('/api/schedules', {
       method: 'POST',
@@ -721,6 +726,11 @@ class ApiClient {
       target?: 'new_session_each_run' | 'single_new_session' | 'existing_session';
       session_id?: string;
       require_approval?: boolean;
+      profile?: string;
+      execution_mode?: 'scheduled' | 'continuous';
+      active_window?: string;
+      trigger_command?: string;
+      trigger_logic?: string;
     }
   ): Promise<ScheduleTask> {
     return this.request<ScheduleTask>(`/api/schedules/${encodeURIComponent(taskId)}`, {

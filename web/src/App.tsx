@@ -859,10 +859,10 @@ export const App: React.FC = () => {
         }
         const prompt =
           `Automation Workflow Request:\n` +
-          `1. First call \`skill_view\` with \`name: "automation"\` to load the global automation workflow instructions.\n` +
+          `1. First call \`skill_view\` with \`name: "automation"\` to load the global automation workflow instructions (covering dedicated profiles/mindsets, targeted working windows, trigger logic, continuous \`sleep\` loops, and scheduling).\n` +
           `2. Follow those instructions carefully for the user's request below.\n` +
-          `3. If critical details (timezone, tools/pipeline, side-effect boundaries, inputs/outputs, etc.) are missing or ambiguous, call \`clarify\` first before creating any schedules.\n` +
-          `4. Once requirements are clear, create or update the scheduled automation task(s) using \`schedule_create\` / \`schedule_edit\`.\n\n` +
+          `3. If critical details (dedicated profile/mindset, targeted working time/timezone, cadence vs continuous sleep loop, trigger logic/stopping rules, tools/pipeline, or side-effect boundaries) are missing or ambiguous, call \`clarify\` first before creating profiles or schedules.\n` +
+          `4. Once requirements are clear, create or tune any needed profiles (\`profile_create\` / \`profile_edit\`) and create or update the automation task(s) (\`schedule_create\` / \`schedule_edit\`).\n\n` +
           `User request:\n${arg}`;
         handleSendMessage(prompt, images);
         return true;
@@ -1193,6 +1193,11 @@ export const App: React.FC = () => {
     target?: 'new_session_each_run' | 'single_new_session' | 'existing_session';
     session_id?: string;
     require_approval?: boolean;
+    profile?: string;
+    execution_mode?: 'scheduled' | 'continuous';
+    active_window?: string;
+    trigger_command?: string;
+    trigger_logic?: string;
   }) => {
     try {
       await api.createSchedule(payload);
@@ -1213,6 +1218,11 @@ export const App: React.FC = () => {
       paused?: boolean;
       target?: 'new_session_each_run' | 'single_new_session' | 'existing_session';
       require_approval?: boolean;
+      profile?: string;
+      execution_mode?: 'scheduled' | 'continuous';
+      active_window?: string;
+      trigger_command?: string;
+      trigger_logic?: string;
     }
   ) => {
     try {

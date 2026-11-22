@@ -214,6 +214,8 @@ export interface DeliveryReceipt {
   summary: string;
 }
 
+export type ExecutionMode = 'scheduled' | 'continuous';
+
 export interface ScheduleTask {
   id: string;
   name: string;
@@ -222,6 +224,11 @@ export interface ScheduleTask {
   delivery_target: DeliveryTarget;
   plugin_id?: string | null;
   require_approval?: boolean;
+  profile?: string | null;
+  execution_mode?: ExecutionMode;
+  active_window?: string | null;
+  trigger_command?: string | null;
+  trigger_logic?: string | null;
   paused: boolean;
   completed: boolean;
   last_run_at?: string | null;

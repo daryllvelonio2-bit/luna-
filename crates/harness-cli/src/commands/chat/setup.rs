@@ -770,6 +770,7 @@ async fn register_tools(
     let _ = plugin_mgr.discover_and_load();
     let reg_dyn: Arc<dyn ToolRegistry> = registry.clone();
     harness_plugins::register_plugin_tools(&reg_dyn, plugin_mgr).await?;
+    harness_core::tools::register_profile_tools(&reg_dyn, config, true).await?;
 
     let (bg_queue, delegate_tool, sudo_rx) =
         register_task_and_core_tools(config, registry, provider, memory, notes, store, todo_scope)

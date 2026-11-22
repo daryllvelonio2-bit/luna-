@@ -11,7 +11,9 @@ use harness_app::events::{from_agent_event, from_subagent_event, AppEvent};
 use harness_app::runtime::{AppRuntime, AppSessionOptions, ExtraToolRegistrar};
 use harness_app::session::{create_session as create_store_session, open_store, SessionSelection};
 use harness_core::config::Config;
+use harness_core::profiles::{apply_profile_prompt_and_overrides, load as load_profile, DEFAULT_PROFILE};
 use harness_core::session::{SessionStore, SqliteSessionStore};
+use harness_core::tools::register_profile_tools;
 use harness_core::{ApprovalDecision, ClarifyResponse, HarnessError, ToolRegistry};
 use harness_plugins::{
     plugin_skill, register_plugin_tools, PluginManager, SkillLoader, SkillViewTool, SkillsListTool,
@@ -19,8 +21,9 @@ use harness_plugins::{
 };
 use harness_providers::{CredentialManager, ModelDiscovery};
 use harness_scheduler::{
-    automation_skill, ensure_scheduler_plugin, register_schedule_tools, DeliveryReceipt,
-    DeliveryTarget, ScheduleDeliveryHandler, ScheduleStore, ScheduleTask, SchedulerService,
+    automation_skill, ensure_scheduler_plugin, register_schedule_tools_with_service,
+    CancellableDeliveryHandler, DeliveryReceipt, DeliveryTarget, ExecutionMode,
+    ScheduleDeliveryHandler, ScheduleStore, ScheduleTask, SchedulerService,
     AUTOMATION_SKILL_NAME,
 };
 
@@ -60,6 +63,7 @@ pub struct WebState {
     pub auth: Arc<WebAuthState>,
     pub sessions: Mutex<HashMap<String, Arc<ActiveSessionHandle>>>,
     pub session_agents: RwLock<BTreeMap<String, String>>,
+    pub session_profiles: RwLock<BTreeMap<String, String>>,
     pub event_tx: broadcast::Sender<AppEvent>,
     pub shutdown_token: CancellationToken,
 }
@@ -104,6 +108,7 @@ impl WebState {
                 .map_err(|e| HarnessError::Io(format!("failed to open schedules store: {}", e)))?,
         );
         let scheduler = Arc::new(SchedulerService::new(sched_store));
+        scheduler.set_workspace_root(config.paths.workspace_root.clone());
         if let Err(err) =
             scheduler.sync_plugin_declarations(&plugin_manager.schedule_declarations())
         {
@@ -124,6 +129,7 @@ impl WebState {
             auth: Arc::new(WebAuthState::new(bound_host, trusted_hosts, static_token)),
             sessions: Mutex::new(HashMap::new()),
             session_agents: RwLock::new(BTreeMap::new()),
+            session_profiles: RwLock::new(BTreeMap::new()),
             event_tx,
             shutdown_token: CancellationToken::new(),
         }))
@@ -198,11 +204,36 @@ impl WebState {
             None
         };
 
-        let cfg_snapshot = self.config.read().await.clone();
+        let mut cfg_snapshot = self.config.read().await.clone();
+        let mut explicit_model = false;
+        let active_profile_name = self.session_profiles.read().await.get(session_id).cloned();
+        if let Some(ref pname) = active_profile_name {
+            if pname != DEFAULT_PROFILE {
+                let prev_provider = cfg_snapshot.model.provider.clone();
+                let prev_model = cfg_snapshot.model.default.clone();
+                match load_profile(pname, &cfg_snapshot.paths.profiles_dir) {
+                    Ok(prof) => {
+                        if let Err(err) = apply_profile_prompt_and_overrides(&mut cfg_snapshot, &prof)
+                        {
+                            tracing::warn!("failed to apply profile '{}': {}", pname, err);
+                        } else if cfg_snapshot.model.provider != prev_provider
+                            || cfg_snapshot.model.default != prev_model
+                        {
+                            explicit_model = true;
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!("automation profile '{}' not found: {}", pname, err);
+                    }
+                }
+            }
+        }
+
         let skills_dir = cfg_snapshot.paths.skills_dir.clone();
         let ws_skills_dir = cfg_snapshot.paths.workspace_root.join(".harness/skills");
-        let sched_store = self.scheduler.store().clone();
+        let scheduler_svc = self.scheduler.clone();
         let plugin_mgr = self.plugin_manager.clone();
+        let cfg_for_profiles = cfg_snapshot.clone();
         let sid_for_tools = session_id.to_string();
         let agent_tool_filter: Option<Vec<String>> = agent_entry
             .as_ref()
@@ -211,8 +242,9 @@ impl WebState {
         let extra_tools: Option<ExtraToolRegistrar> = Some(Arc::new(move |registry| {
             let skills_dir = skills_dir.clone();
             let ws_skills_dir = ws_skills_dir.clone();
-            let sched_store = sched_store.clone();
+            let scheduler_svc = scheduler_svc.clone();
             let plugin_mgr = plugin_mgr.clone();
+            let cfg_for_profiles = cfg_for_profiles.clone();
             let sid_for_tools = sid_for_tools.clone();
             let agent_tool_filter = agent_tool_filter.clone();
             Box::pin(async move {
@@ -247,7 +279,14 @@ impl WebState {
                         .await?;
                 }
                 let reg_dyn: Arc<dyn ToolRegistry> = registry.clone();
-                register_schedule_tools(&reg_dyn, sched_store, Some(sid_for_tools), true).await?;
+                register_schedule_tools_with_service(
+                    &reg_dyn,
+                    scheduler_svc,
+                    Some(sid_for_tools),
+                    true,
+                )
+                .await?;
+                register_profile_tools(&reg_dyn, &cfg_for_profiles, true).await?;
                 register_plugin_tools(&reg_dyn, plugin_mgr.clone()).await?;
                 for tool in plugin_mgr.registered_tools() {
                     if let Some(allowed) = &agent_tool_filter {
@@ -265,7 +304,7 @@ impl WebState {
 
         let options = AppSessionOptions {
             interactive: true,
-            explicit_model: false,
+            explicit_model,
             system_prompt_prefix: agent_entry.as_ref().map(|a| a.system_prompt.clone()),
             extra_tools,
             approval_mode_override,
@@ -438,6 +477,28 @@ impl WebState {
         task: &ScheduleTask,
         session_id: String,
     ) -> Result<DeliveryReceipt, String> {
+        self.execute_schedule_in_session_cancellable(task, session_id, CancellationToken::new())
+            .await
+    }
+
+    /// Execute a single scheduled task inside `session_id` with an external cancellation token
+    /// (allowing pause/delete actions to wake sleeping continuous automations immediately).
+    pub async fn execute_schedule_in_session_cancellable(
+        self: &Arc<Self>,
+        task: &ScheduleTask,
+        session_id: String,
+        cancel: CancellationToken,
+    ) -> Result<DeliveryReceipt, String> {
+        if let Some(ref prof) = task.profile {
+            let mut map = self.session_profiles.write().await;
+            let changed = map.get(&session_id).map(|s| s != prof).unwrap_or(true);
+            map.insert(session_id.clone(), prof.clone());
+            drop(map);
+            if changed {
+                self.drop_session_if_idle(&session_id).await;
+            }
+        }
+
         let desired_approval = if task.require_approval {
             harness_core::ApprovalMode::Ask
         } else {
@@ -448,16 +509,17 @@ impl WebState {
             .await
             .map_err(|e| format!("failed to open automation session: {e}"))?;
 
-        let cancel = CancellationToken::new();
         *handle
             .active_cancel
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = Some(cancel.clone());
         handle.turn_running.store(true, Ordering::SeqCst);
 
+        let effective_prompt = build_schedule_execution_prompt(task);
+
         self.emit_event(AppEvent::TurnStarted {
             session_id: session_id.clone(),
-            query: task.instruction.clone(),
+            query: effective_prompt.clone(),
         });
         let started = std::time::Instant::now();
         let plugin_gen_before = self.plugin_manager.generation();
@@ -470,7 +532,7 @@ impl WebState {
                 .allow_all_session
                 .swap(!task.require_approval, Ordering::SeqCst);
             let ag = rt.agent.lock().await;
-            let res = ag.run_turn(&task.instruction, cancel).await;
+            let res = ag.run_turn(&effective_prompt, cancel).await;
             if is_existing_target {
                 rt.allow_all_session.store(prev_allow_all, Ordering::SeqCst);
             }
@@ -539,4 +601,54 @@ impl WebState {
             })
         })
     }
+
+    /// Build the cancellable background delivery handler consumed by `SchedulerService::spawn_loop_cancellable`.
+    pub fn cancellable_schedule_delivery_handler(
+        self: &Arc<Self>,
+    ) -> CancellableDeliveryHandler {
+        let state = Arc::clone(self);
+        Arc::new(move |task: ScheduleTask, cancel: CancellationToken| {
+            let state = Arc::clone(&state);
+            Box::pin(async move {
+                let session_id = state.resolve_schedule_session(&task).await?;
+                state
+                    .execute_schedule_in_session_cancellable(&task, session_id, cancel)
+                    .await
+            })
+        })
+    }
+}
+
+fn build_schedule_execution_prompt(task: &ScheduleTask) -> String {
+    let has_meta = task.execution_mode == ExecutionMode::Continuous
+        || task.profile.is_some()
+        || task.active_window.is_some()
+        || task.trigger_logic.is_some();
+    if !has_meta {
+        return task.instruction.clone();
+    }
+
+    let mut lines = vec![format!(
+        "[Automation Context: '{}' (id: {})]",
+        task.name, task.id
+    )];
+    if let Some(ref prof) = task.profile {
+        lines.push(format!("- Profile: {prof}"));
+    }
+    if task.execution_mode == ExecutionMode::Continuous {
+        lines.push(
+            "- Execution Mode: CONTINUOUS (never-stop worker). You may loop across work cycles and call `sleep(seconds, reason)` between checks/cooldowns instead of ending the turn. If you finish a cycle and yield, the scheduler will automatically resume you after the cooldown unless paused or outside active_window. You may also call `schedule_edit` to pause or tune this task if stopping criteria are met.".to_string(),
+        );
+    }
+    if let Some(ref win) = task.active_window {
+        lines.push(format!(
+            "- Targeted Working Window: {win} (local device time unless UTC is specified). Do not perform new work cycles outside this window."
+        ));
+    }
+    if let Some(ref logic) = task.trigger_logic {
+        lines.push(format!("- Trigger & Stop Logic: {logic}"));
+    }
+    lines.push(String::new());
+    lines.push(task.instruction.clone());
+    lines.join("\n")
 }

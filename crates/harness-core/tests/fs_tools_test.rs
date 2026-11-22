@@ -609,7 +609,7 @@ async fn the_registry_registers_every_default_tool() {
     // Everything `tools.enabled` names by default, plus nothing else: the opt-in `process` stays
     // out. The web pair and `view_image` are in that set: a registry that quietly dropped them is
     // a registry whose model reaches for `curl` or a terminal previewer instead.
-    assert_eq!(tool_names.len(), 10, "{tool_names:?}");
+    assert_eq!(tool_names.len(), 11, "{tool_names:?}");
     for expected in [
         "read_file",
         "view_image",
@@ -619,6 +619,7 @@ async fn the_registry_registers_every_default_tool() {
         "list_files",
         "todo_list",
         "terminal",
+        "sleep",
         "web_search",
         "web_fetch",
     ] {
