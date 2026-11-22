@@ -121,7 +121,7 @@ jobs:
         run: |
           TAG="${{ github.event.inputs.tag_name || github.ref_name }}"
           if [[ "$TAG" != v* ]]; then
-            TAG="v0.1.11"
+            TAG="v0.1.12"
           fi
           gh release create "$TAG" release-assets/* \
             --title "$TAG" \

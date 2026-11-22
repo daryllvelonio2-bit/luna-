@@ -763,7 +763,8 @@ async fn init_tui_state(env: &mut Env<'_>) -> Result<TuiState, HarnessError> {
     let (voice_tx, voice_rx) = tokio::sync::mpsc::unbounded_channel();
     let voice_speech_queue = crate::commands::voice::VoiceSpeechQueue::new();
     let voice_is_playing = voice_speech_queue.is_playing();
-    let voice_active = env.config.voice.enabled;
+    // Voice mode defaults as turned off on startup and is only activated when explicitly triggered by the user.
+    let voice_active = false;
     let mut st = TuiState {
         turns,
         turn_meta,

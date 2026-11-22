@@ -59,6 +59,7 @@ pub(crate) async fn handle_model_switch(
         config,
         cred_manager,
         discovery,
+        session_id,
         &chosen_provider,
         &chosen_model,
         chosen_effort,
@@ -80,6 +81,7 @@ pub(crate) async fn handle_model_switch(
             config,
             cred_manager,
             discovery,
+            session_id,
             &chosen_provider,
             &chosen_model,
         )
@@ -166,17 +168,21 @@ async fn apply_model_switch(
     config: &Config,
     cred_manager: &Arc<CredentialManager>,
     discovery: &Arc<ModelDiscovery>,
+    session_id: &str,
     chosen_provider: &str,
     chosen_model: &str,
     chosen_effort: Option<ReasoningEffort>,
 ) -> Result<(), HarnessError> {
-    let new_provider = Arc::new(GenericProviderClient::new(
-        chosen_provider.to_string(),
-        chosen_model.to_string(),
-        cred_manager.clone(),
-        discovery.clone(),
-        config.providers.get(chosen_provider),
-    )?);
+    let new_provider = Arc::new(
+        GenericProviderClient::new(
+            chosen_provider.to_string(),
+            chosen_model.to_string(),
+            cred_manager.clone(),
+            discovery.clone(),
+            config.providers.get(chosen_provider),
+        )?
+        .with_session_id(session_id),
+    );
 
     {
         let mut ag = agent.lock().await;
@@ -215,6 +221,7 @@ async fn set_default_compaction(
     config: &Config,
     cred_manager: &Arc<CredentialManager>,
     discovery: &Arc<ModelDiscovery>,
+    session_id: &str,
     chosen_provider: &str,
     chosen_model: &str,
 ) {
@@ -229,7 +236,7 @@ async fn set_default_compaction(
             .lock()
             .await
             .set_compaction(Some(harness_core::CompactionSetup {
-                provider: Arc::new(comp_client),
+                provider: Arc::new(comp_client.with_session_id(session_id)),
                 model: chosen_model.to_string(),
             }));
     }
@@ -660,6 +667,7 @@ pub(crate) async fn handle_compact_model_switch(
         config,
         cred_manager,
         discovery,
+        session_id,
         &chosen_provider,
         &chosen_model,
     )
@@ -708,7 +716,8 @@ async fn reset_compaction_model(
         cred_manager.clone(),
         discovery.clone(),
         config.providers.get(current_provider),
-    )?;
+    )?
+    .with_session_id(session_id);
     agent
         .lock()
         .await
@@ -772,6 +781,7 @@ async fn apply_compaction_model(
     config: &Config,
     cred_manager: &Arc<CredentialManager>,
     discovery: &Arc<ModelDiscovery>,
+    session_id: &str,
     chosen_provider: &str,
     chosen_model: &str,
 ) -> Result<(), HarnessError> {
@@ -781,7 +791,8 @@ async fn apply_compaction_model(
         cred_manager.clone(),
         discovery.clone(),
         config.providers.get(chosen_provider),
-    )?;
+    )?
+    .with_session_id(session_id);
 
     agent
         .lock()
@@ -876,13 +887,16 @@ pub(crate) async fn apply_default_model_choice(
         None
     };
 
-    let new_provider = Arc::new(GenericProviderClient::new(
-        chosen_provider.clone(),
-        chosen_model.clone(),
-        cred_manager.clone(),
-        discovery.clone(),
-        config.providers.get(&chosen_provider),
-    )?);
+    let new_provider = Arc::new(
+        GenericProviderClient::new(
+            chosen_provider.clone(),
+            chosen_model.clone(),
+            cred_manager.clone(),
+            discovery.clone(),
+            config.providers.get(&chosen_provider),
+        )?
+        .with_session_id(session_id),
+    );
 
     {
         let mut ag = agent.lock().await;
@@ -969,6 +983,7 @@ pub(crate) async fn apply_compact_model_choice(
         config,
         cred_manager,
         discovery,
+        session_id,
         &chosen_provider,
         &chosen_model,
     )

@@ -687,10 +687,18 @@ impl CredentialManager {
             .session_priorities
             .write()
             .unwrap_or_else(|e| e.into_inner());
+        let canonical = crate::catalog::canonicalize_provider_id(provider).to_lowercase();
+        let raw = provider.to_lowercase();
         priorities.insert(
-            (session_id.to_string(), provider.to_lowercase()),
+            (session_id.to_string(), canonical.clone()),
             label_or_id.to_string(),
         );
+        if raw != canonical {
+            priorities.insert(
+                (session_id.to_string(), raw),
+                label_or_id.to_string(),
+            );
+        }
     }
 
     /// Retrieve the session-specific priority credential for a provider if configured.
@@ -703,8 +711,11 @@ impl CredentialManager {
             .session_priorities
             .read()
             .unwrap_or_else(|e| e.into_inner());
+        let canonical = crate::catalog::canonicalize_provider_id(provider).to_lowercase();
+        let raw = provider.to_lowercase();
         priorities
-            .get(&(session_id.to_string(), provider.to_lowercase()))
+            .get(&(session_id.to_string(), canonical))
+            .or_else(|| priorities.get(&(session_id.to_string(), raw)))
             .cloned()
     }
 
@@ -714,9 +725,15 @@ impl CredentialManager {
             .session_priorities
             .write()
             .unwrap_or_else(|e| e.into_inner());
-        priorities
-            .remove(&(session_id.to_string(), provider.to_lowercase()))
-            .is_some()
+        let canonical = crate::catalog::canonicalize_provider_id(provider).to_lowercase();
+        let raw = provider.to_lowercase();
+        let r1 = priorities
+            .remove(&(session_id.to_string(), canonical))
+            .is_some();
+        let r2 = priorities
+            .remove(&(session_id.to_string(), raw))
+            .is_some();
+        r1 || r2
     }
 
     /// Atomically updates a credential's secret (used for OAuth token rotation).
@@ -874,24 +891,22 @@ impl CredentialManager {
         }
 
         let selected_index = if let Some(ref target) = session_override {
-            if let Some(pos) = active_credentials.iter().copied().find(|&i| {
-                let c = &provider_state.credentials[i];
-                &c.id == target || &c.label == target
+            if let Some(idx) = provider_state.credentials.iter().position(|c| {
+                &c.id == target
+                    || &c.label == target
+                    || c.id.eq_ignore_ascii_case(target)
+                    || c.label.eq_ignore_ascii_case(target)
             }) {
-                pos
-            } else if provider_state.strategy == RotationStrategy::Never {
-                if let Some(idx) = provider_state
-                    .credentials
-                    .iter()
-                    .position(|c| &c.id == target || &c.label == target)
-                {
-                    provider_state.credentials[idx].is_temporarily_disabled = false;
-                    idx
-                } else {
-                    select_credential_index(provider_state, &active_credentials)
-                }
+                provider_state.credentials[idx].is_temporarily_disabled = false;
+                idx
             } else {
-                select_credential_index(provider_state, &active_credentials)
+                return Err(HarnessError::AuthenticationFailed {
+                    provider: provider.to_string(),
+                    message: format!(
+                        "Session priority account '{target}' for provider '{provider}' was not found. \
+                         Refusing fallback to protect other accounts from unintended use."
+                    ),
+                });
             }
         } else {
             select_credential_index(provider_state, &active_credentials)

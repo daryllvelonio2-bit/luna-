@@ -559,8 +559,17 @@ fn read_session(conn: &Connection, id: &str) -> Result<SessionRecord, HarnessErr
         )
         .map_err(|error| session_error(&format!("session '{}' not found", id), error))?;
 
-    let parsed_priorities: std::collections::HashMap<String, String> =
+    let mut parsed_priorities: std::collections::HashMap<String, String> =
         serde_json::from_str(&credential_priorities).unwrap_or_default();
+    if let Some(agy_val) = parsed_priorities.get("agy").cloned() {
+        parsed_priorities
+            .entry("antigravity".to_string())
+            .or_insert(agy_val);
+    } else if let Some(antigravity_val) = parsed_priorities.get("antigravity").cloned() {
+        parsed_priorities
+            .entry("agy".to_string())
+            .or_insert(antigravity_val);
+    }
     let parsed_pinned_skills: Vec<String> =
         serde_json::from_str(&pinned_skills).unwrap_or_default();
 
@@ -738,7 +747,12 @@ impl SessionStore for SqliteSessionStore {
                 .as_deref()
                 .and_then(|raw| serde_json::from_str(raw).ok())
                 .unwrap_or_default();
-            map.insert(provider, credential_id);
+            if provider == "agy" || provider == "antigravity" {
+                map.insert("agy".to_string(), credential_id.clone());
+                map.insert("antigravity".to_string(), credential_id);
+            } else {
+                map.insert(provider, credential_id);
+            }
             let serialized = serde_json::to_string(&map).unwrap_or_default();
 
             let updated = conn
@@ -782,7 +796,12 @@ impl SessionStore for SqliteSessionStore {
                 .as_deref()
                 .and_then(|raw| serde_json::from_str(raw).ok())
                 .unwrap_or_default();
-            map.remove(&provider);
+            if provider == "agy" || provider == "antigravity" {
+                map.remove("agy");
+                map.remove("antigravity");
+            } else {
+                map.remove(&provider);
+            }
             let serialized = if map.is_empty() {
                 String::new()
             } else {

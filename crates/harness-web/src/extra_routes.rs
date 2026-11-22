@@ -198,11 +198,28 @@ pub async fn accounts_for_provider(
 ) -> (String, Vec<AccountDto>) {
     let entries = state.cred_manager.get_credentials(provider_id).await;
     let strategy = state.cred_manager.get_rotation_strategy(provider_id).await;
-    let session_prio = session_id.and_then(|sid| {
-        state
-            .cred_manager
-            .get_session_priority_credential(sid, provider_id)
-    });
+    let session_prio = match session_id {
+        Some(sid) => {
+            if let Some(prio) = state
+                .cred_manager
+                .get_session_priority_credential(sid, provider_id)
+            {
+                Some(prio)
+            } else if let Ok(record) = state.store.get(sid).await {
+                if let Some(prio) = record.credential_priorities.get(provider_id) {
+                    state
+                        .cred_manager
+                        .set_session_priority_credential(sid, provider_id, prio);
+                    Some(prio.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }
+        None => None,
+    };
 
     let accounts = entries
         .into_iter()

@@ -395,6 +395,14 @@ async fn bootstrap(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let agent_map = state.session_agents.read().await.clone();
 
+    for r in &records {
+        for (prov, cred_id) in &r.credential_priorities {
+            state
+                .cred_manager
+                .set_session_priority_credential(&r.id, prov, cred_id);
+        }
+    }
+
     let mut sessions = Vec::new();
     for r in records {
         if !(r.message_count > 0 || query.session_id.as_deref() == Some(&r.id)) {

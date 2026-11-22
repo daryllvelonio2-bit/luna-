@@ -336,13 +336,16 @@ pub async fn apply_model_selection(
         ));
         return Ok(());
     }
-    let client = Arc::new(GenericProviderClient::new(
-        provider.to_string(),
-        model.to_string(),
-        env.cred_manager.clone(),
-        env.discovery.clone(),
-        env.config.providers.get(provider),
-    )?);
+    let client = Arc::new(
+        GenericProviderClient::new(
+            provider.to_string(),
+            model.to_string(),
+            env.cred_manager.clone(),
+            env.discovery.clone(),
+            env.config.providers.get(provider),
+        )?
+        .with_session_id(env.session_id.as_str()),
+    );
     let ctx_max = context_window(env.config, env.discovery.as_ref(), provider, model);
     let Ok(mut ag) = env.agent.try_lock() else {
         env.ui.set_transient_error(Some(
@@ -361,7 +364,7 @@ pub async fn apply_model_selection(
             env.config.providers.get(provider),
         ) {
             ag.set_compaction(Some(CompactionSetup {
-                provider: Arc::new(comp_client),
+                provider: Arc::new(comp_client.with_session_id(env.session_id.as_str())),
                 model: model.to_string(),
             }));
         }

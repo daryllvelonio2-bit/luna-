@@ -21,6 +21,7 @@ impl<'a> SlashContext<'a> {
             self.ui,
             self.cred_manager,
             Some(self.session_id),
+            Some(self.store),
         )
         .await
         {

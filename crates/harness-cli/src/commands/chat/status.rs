@@ -146,9 +146,12 @@ async fn primary_credential(
     };
     let creds = cred_manager.get_credentials("antigravity").await;
     let primary = if let Some(ref target) = session_override {
-        creds
-            .iter()
-            .find(|c| (&c.id == target || &c.label == target) && !c.is_temporarily_disabled)
+        creds.iter().find(|c| {
+            &c.id == target
+                || &c.label == target
+                || c.id.eq_ignore_ascii_case(target)
+                || c.label.eq_ignore_ascii_case(target)
+        })
     } else {
         None
     }

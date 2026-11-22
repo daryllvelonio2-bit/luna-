@@ -500,6 +500,23 @@ impl GenericProviderClient {
         secret: &SecretString,
         attempts: usize,
     ) -> bool {
+        // If this session is pinned to a priority credential, refuse automatic failover
+        // to other credentials to avoid draining other accounts.
+        if let Some(ref sid) = self.session_id {
+            if self
+                .cred_manager
+                .get_session_priority_credential(sid, &self.provider_id)
+                .is_some()
+            {
+                debug!(
+                    provider = %self.provider_id,
+                    session = %sid,
+                    "Session is pinned to a priority credential; refusing automatic failover to other pool accounts"
+                );
+                return false;
+            }
+        }
+
         // The key is retired either way: a rejected key must not be handed out again.
         let retired = self.retire_failed_credential(secret).await;
         if attempts >= MAX_CREDENTIAL_FAILOVER_ATTEMPTS {

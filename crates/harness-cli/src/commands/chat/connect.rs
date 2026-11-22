@@ -13,7 +13,8 @@ use std::sync::Arc;
 
 use colored::Colorize;
 
-use harness_core::HarnessError;
+use harness_core::session::SqliteSessionStore;
+use harness_core::{HarnessError, SessionStore};
 use harness_providers::{get_provider_catalog, CredentialManager, RotationStrategy};
 
 use super::super::chat::AppKey;
@@ -60,6 +61,7 @@ pub(crate) async fn handle_connect_command(
     ui: &ChatUi,
     cred_manager: &Arc<CredentialManager>,
     session_id: Option<&str>,
+    store: Option<&Arc<SqliteSessionStore>>,
 ) -> Result<(), HarnessError> {
     // The chat's own keys are read from this channel, so anything already queued belongs to the
     // command line the user just typed, not to this menu.
@@ -76,7 +78,9 @@ pub(crate) async fn handle_connect_command(
         let outcome = match action {
             ConnectAction::AddKey => add_key(key_rx, ui, cred_manager).await,
             ConnectAction::ListKeys => list_keys(ui, cred_manager).await,
-            ConnectAction::SetPriority => set_priority(key_rx, ui, cred_manager, session_id).await,
+            ConnectAction::SetPriority => {
+                set_priority(key_rx, ui, cred_manager, session_id, store).await
+            }
             ConnectAction::RemoveKey => remove_key(key_rx, ui, cred_manager).await,
             ConnectAction::ImportAntigravity => import_antigravity(ui, cred_manager).await,
             ConnectAction::ImportOpencode => import_opencode(ui, cred_manager).await,
@@ -501,6 +505,7 @@ async fn set_priority(
     ui: &ChatUi,
     cred_manager: &Arc<CredentialManager>,
     session_id: Option<&str>,
+    store: Option<&Arc<SqliteSessionStore>>,
 ) -> Result<(), HarnessError> {
     let mut connected: Vec<String> = Vec::new();
     for provider in get_provider_catalog() {
@@ -615,6 +620,9 @@ async fn set_priority(
             1 => Some(false),
             _ => {
                 cred_manager.clear_session_priority_credential(sid, &provider);
+                if let Some(store) = store {
+                    let _ = store.clear_credential_priority(sid, &provider).await;
+                }
                 ui.emit_above(&format!(
                     "{} Cleared session priority override for {} (following global default)",
                     "✔".green().bold(),
@@ -629,6 +637,9 @@ async fn set_priority(
 
     if let (Some(true), Some(sid)) = (is_session, session_id) {
         cred_manager.set_session_priority_credential(sid, &provider, &target.id);
+        if let Some(store) = store {
+            let _ = store.set_credential_priority(sid, &provider, &target.id).await;
+        }
         let current_strat = cred_manager.get_rotation_strategy(&provider).await;
         if current_strat != RotationStrategy::FillFirst && current_strat != RotationStrategy::Never
         {
@@ -645,6 +656,9 @@ async fn set_priority(
     } else {
         if let Some(sid) = session_id {
             cred_manager.clear_session_priority_credential(sid, &provider);
+            if let Some(store) = store {
+                let _ = store.clear_credential_priority(sid, &provider).await;
+            }
         }
         let updated = cred_manager
             .set_priority_credential(&provider, &target.id)
