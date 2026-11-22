@@ -638,7 +638,9 @@ async fn set_priority(
     if let (Some(true), Some(sid)) = (is_session, session_id) {
         cred_manager.set_session_priority_credential(sid, &provider, &target.id);
         if let Some(store) = store {
-            let _ = store.set_credential_priority(sid, &provider, &target.id).await;
+            let _ = store
+                .set_credential_priority(sid, &provider, &target.id)
+                .await;
         }
         let current_strat = cred_manager.get_rotation_strategy(&provider).await;
         if current_strat != RotationStrategy::FillFirst && current_strat != RotationStrategy::Never

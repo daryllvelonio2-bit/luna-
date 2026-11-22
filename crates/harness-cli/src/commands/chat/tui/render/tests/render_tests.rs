@@ -1671,8 +1671,14 @@ fn diff_counter_never_resets_down_to_low_value() {
 
     // Simulate in-flight tool being taken (empty in-flight during await before turns.extend)
     st.update_diff_counter(None);
-    assert_eq!(st.diff_anim_target_added, 2, "counter must not reset to 0 during transition");
-    assert_eq!(st.diff_anim_target_deleted, 1, "counter must not reset to 0 during transition");
+    assert_eq!(
+        st.diff_anim_target_added, 2,
+        "counter must not reset to 0 during transition"
+    );
+    assert_eq!(
+        st.diff_anim_target_deleted, 1,
+        "counter must not reset to 0 during transition"
+    );
 
     // Simulate turn appended
     st.turns.push(TurnRecord {
