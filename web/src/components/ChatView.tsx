@@ -332,7 +332,7 @@ const AssistantTurnRow: React.FC<AssistantTurnRowProps> = React.memo(
           <div className="activity-group">
             <button
               type="button"
-              className="activity-summary-btn"
+              className={`activity-summary-btn ${isLive ? 'is-live' : ''}`}
               onClick={() => onToggleActivity(turn.key, isLive)}
             >
               {isLive ? (

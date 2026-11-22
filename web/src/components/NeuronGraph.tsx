@@ -508,6 +508,7 @@ export const NeuronGraph: React.FC<NeuronGraphProps> = ({
                   >
                     {/* Outer neural halo */}
                     <circle
+                      className={node.kind === 'hub' ? 'neuron-hub-halo' : undefined}
                       r={p.radius + (isSelected || isHovered ? 9 : node.kind === 'hub' ? 6 : 4)}
                       fill={color}
                       fillOpacity={isSelected ? 0.24 : isHovered ? 0.2 : node.kind === 'hub' ? 0.14 : 0.08}

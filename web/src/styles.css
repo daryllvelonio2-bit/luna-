@@ -6349,6 +6349,491 @@ select {
   margin-left: auto;
 }
 
+/* ============================================================================
+   Motion & Living Atmosphere System
+   ============================================================================ */
+
+@keyframes luna-aurora-drift {
+  0% {
+    transform: translate3d(-4%, -3%, 0) scale(1) rotate(0deg);
+  }
+  50% {
+    transform: translate3d(3%, 2%, 0) scale(1.06) rotate(4deg);
+  }
+  100% {
+    transform: translate3d(-2%, 4%, 0) scale(1.02) rotate(-3deg);
+  }
+}
+
+@keyframes luna-hero-rise {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, 14px, 0) scale(0.985);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+@keyframes luna-msg-enter-right {
+  0% {
+    opacity: 0;
+    transform: translate3d(10px, 8px, 0) scale(0.98);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+@keyframes luna-msg-enter-left {
+  0% {
+    opacity: 0;
+    transform: translate3d(-8px, 8px, 0);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@keyframes luna-page-enter {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, 8px, 0);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@keyframes luna-sidebar-in {
+  0% {
+    opacity: 0;
+    transform: translate3d(-12px, 0, 0);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@keyframes luna-rail-in {
+  0% {
+    opacity: 0;
+    transform: translate3d(-8px, 0, 0);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@keyframes luna-backdrop-in {
+  0% {
+    opacity: 0;
+  }
+  100% {
+    opacity: 1;
+  }
+}
+
+@keyframes luna-modal-spring {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, 12px, 0) scale(0.96);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+@keyframes luna-menu-pop {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, 6px, 0) scale(0.97);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+@keyframes luna-thinking-menu-pop {
+  0% {
+    opacity: 0;
+    transform: translateX(-50%) translateY(6px) scale(0.97);
+  }
+  100% {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0) scale(1);
+  }
+}
+
+@keyframes luna-expand-fade {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, -4px, 0);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@keyframes luna-toast-slide {
+  0% {
+    opacity: 0;
+    transform: translate3d(14px, -6px, 0) scale(0.97);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+@keyframes luna-shimmer-sweep {
+  0% {
+    background-position: 200% 50%;
+  }
+  100% {
+    background-position: -200% 50%;
+  }
+}
+
+@keyframes luna-stop-ring {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(236, 238, 242, 0.25);
+  }
+  50% {
+    box-shadow: 0 0 0 6px rgba(236, 238, 242, 0);
+  }
+}
+
+@keyframes luna-hub-breathe {
+  0%, 100% {
+    transform: scale(1);
+    opacity: 0.9;
+  }
+  50% {
+    transform: scale(1.09);
+    opacity: 1;
+  }
+}
+
+/* Living atmospheric gradient backdrop inside main content */
+.main-content {
+  isolation: isolate;
+}
+
+.main-content::before {
+  content: '';
+  position: absolute;
+  inset: -24%;
+  z-index: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(46% 40% at 32% 30%, rgba(76, 110, 245, 0.16) 0%, transparent 72%),
+    radial-gradient(44% 38% at 74% 36%, rgba(139, 92, 246, 0.11) 0%, transparent 74%),
+    radial-gradient(48% 42% at 62% 80%, rgba(45, 212, 191, 0.1) 0%, transparent 72%);
+  filter: blur(28px);
+  will-change: transform;
+  animation: luna-aurora-drift 22s ease-in-out infinite alternate;
+}
+
+[data-theme='light'] .main-content::before {
+  background:
+    radial-gradient(46% 40% at 32% 30%, rgba(76, 110, 245, 0.11) 0%, transparent 72%),
+    radial-gradient(44% 38% at 74% 36%, rgba(168, 85, 247, 0.08) 0%, transparent 74%),
+    radial-gradient(48% 42% at 62% 80%, rgba(20, 184, 166, 0.085) 0%, transparent 72%);
+}
+
+.main-content > * {
+  position: relative;
+  z-index: 1;
+}
+
+/* Sidebar & Rail glide */
+.sidebar {
+  animation: luna-sidebar-in 210ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.sidebar-rail {
+  animation: luna-rail-in 190ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.sidebar-rail-logo-btn:hover {
+  transform: scale(1.07) rotate(-8deg);
+}
+
+.sidebar-rail-btn,
+.nav-item,
+.session-item,
+.icon-btn,
+.btn,
+.new-chat-btn,
+.composer-tool-btn,
+.composer-model-pill-btn,
+.landing-mode-btn,
+.know-switch-btn,
+.know-filter-pill {
+  transition:
+    background-color 150ms ease,
+    border-color 150ms ease,
+    color 150ms ease,
+    transform 140ms cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 160ms ease;
+}
+
+.sidebar-rail-btn:active,
+.nav-item:active,
+.icon-btn:active,
+.btn:active,
+.new-chat-btn:active,
+.composer-tool-btn:active,
+.composer-model-pill-btn:active,
+.landing-mode-btn:active {
+  transform: scale(0.96);
+}
+
+/* Landing Hero staggered spring entrance */
+.chat-landing-hero .chat-empty-title {
+  animation: luna-hero-rise 360ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.chat-landing-hero .chat-empty-subtitle {
+  animation: luna-hero-rise 360ms cubic-bezier(0.22, 1, 0.36, 1) 55ms both;
+}
+
+.chat-landing-hero .chat-landing-composer-wrap {
+  animation: luna-hero-rise 400ms cubic-bezier(0.22, 1, 0.36, 1) 110ms both;
+}
+
+.chat-landing-hero .landing-mode-toggle {
+  animation: luna-hero-rise 380ms cubic-bezier(0.22, 1, 0.36, 1) 165ms both;
+}
+
+.chat-landing-hero .starter-stack .starter-row {
+  animation: luna-hero-rise 380ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  transition:
+    background-color 160ms ease,
+    border-color 160ms ease,
+    color 160ms ease,
+    transform 180ms cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 180ms ease;
+}
+
+.chat-landing-hero .starter-stack .starter-row:nth-child(1) { animation-delay: 210ms; }
+.chat-landing-hero .starter-stack .starter-row:nth-child(2) { animation-delay: 260ms; }
+.chat-landing-hero .starter-stack .starter-row:nth-child(3) { animation-delay: 310ms; }
+
+.starter-row:hover {
+  transform: translate3d(4px, 0, 0);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+}
+
+.starter-row-icon {
+  transition: transform 180ms cubic-bezier(0.22, 1, 0.36, 1), color 150ms ease;
+}
+
+.starter-row:hover .starter-row-icon {
+  transform: scale(1.12);
+  color: var(--accent);
+}
+
+/* Composer focus lift & send button physics */
+.composer-shell {
+  transition:
+    border-color 180ms ease,
+    box-shadow 220ms ease,
+    transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.composer-shell:focus-within {
+  box-shadow:
+    0 14px 40px rgba(0, 0, 0, 0.34),
+    0 0 0 1px rgba(76, 110, 245, 0.28);
+}
+
+[data-theme='light'] .composer-shell:focus-within {
+  box-shadow:
+    0 14px 34px rgba(15, 23, 42, 0.11),
+    0 0 0 1px rgba(59, 91, 219, 0.25);
+}
+
+.send-circle {
+  transition:
+    background-color 150ms ease,
+    opacity 150ms ease,
+    transform 150ms cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 180ms ease;
+}
+
+.send-circle:hover:not(:disabled) {
+  transform: translate3d(0, -1px, 0) scale(1.06);
+  box-shadow: 0 4px 16px rgba(76, 110, 245, 0.45);
+}
+
+.send-circle:active:not(:disabled) {
+  transform: scale(0.92);
+}
+
+.send-circle-stop {
+  animation: luna-stop-ring 1.7s ease-in-out infinite;
+}
+
+/* Conversation turn entrances & live activity shimmer */
+.turn-user {
+  animation: luna-msg-enter-right 230ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.turn-assistant {
+  animation: luna-msg-enter-left 260ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.activity-summary-btn {
+  transition:
+    background-color 150ms ease,
+    color 150ms ease,
+    border-color 150ms ease,
+    transform 140ms ease;
+}
+
+.activity-summary-btn:active {
+  transform: scale(0.98);
+}
+
+.activity-summary-btn.is-live {
+  background-image: linear-gradient(
+    110deg,
+    var(--bg-elevated) 25%,
+    rgba(76, 110, 245, 0.2) 50%,
+    var(--bg-elevated) 75%
+  );
+  background-size: 250% 100%;
+  animation: luna-shimmer-sweep 2.2s linear infinite;
+  color: var(--text-primary);
+  box-shadow: 0 0 0 1px rgba(76, 110, 245, 0.25);
+}
+
+.activity-trace,
+.thinking-body,
+.tool-step-drawer {
+  animation: luna-expand-fade 180ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.tool-status-running {
+  animation: pulse 1.3s ease-in-out infinite;
+}
+
+/* Popover, slash menu, and dropdown entrances */
+.slash-menu,
+.header-dropdown {
+  animation: luna-menu-pop 160ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.thinking-menu {
+  animation: luna-thinking-menu-pop 160ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* Modals, drawers, toasts, and page transitions */
+.modal-backdrop {
+  animation: luna-backdrop-in 160ms ease both;
+}
+
+.modal-card,
+.picker-modal,
+.drawer-panel,
+.settings-shell,
+.model-popover {
+  animation: luna-modal-spring 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.toast-error,
+.notice-pill {
+  animation: luna-toast-slide 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.page-view {
+  animation: luna-page-enter 230ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* Cards hover lift across Automations, Plugins, Memory & Notes */
+.auto-card,
+.plugin-card,
+.know-item-card,
+.know-conn-row,
+.know-hub-jump {
+  transition:
+    border-color 150ms ease,
+    background-color 150ms ease,
+    transform 170ms cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 170ms ease;
+}
+
+.auto-card:hover,
+.plugin-card:hover,
+.know-item-card:hover {
+  transform: translate3d(0, -2px, 0);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+}
+
+.know-conn-row:hover {
+  transform: translate3d(2px, 0, 0);
+}
+
+.know-inspector-card {
+  animation: luna-page-enter 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.neuron-synapse-pulse {
+  stroke-dasharray: 6 10;
+  animation: neuron-pulse-dash 1.3s linear infinite;
+}
+
+.neuron-hub-halo {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: luna-hub-breathe 4.2s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .main-content::before,
+  .sidebar,
+  .sidebar-rail,
+  .chat-landing-hero *,
+  .turn-user,
+  .turn-assistant,
+  .activity-summary-btn.is-live,
+  .activity-trace,
+  .thinking-body,
+  .tool-step-drawer,
+  .slash-menu,
+  .header-dropdown,
+  .thinking-menu,
+  .modal-backdrop,
+  .modal-card,
+  .picker-modal,
+  .drawer-panel,
+  .settings-shell,
+  .model-popover,
+  .toast-error,
+  .notice-pill,
+  .page-view,
+  .know-inspector-card,
+  .send-circle-stop,
+  .neuron-synapse-pulse,
+  .neuron-hub-halo,
+  .pulse-dot,
+  .tool-status-running {
+    animation: none !important;
+    transition: none !important;
+  }
+}
+
 
 
 
