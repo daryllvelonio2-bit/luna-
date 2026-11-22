@@ -79,12 +79,17 @@ impl HarnessError {
     /// response, so the turn loop retried it until the budget ran out. Naming the condition is what
     /// makes the second attempt unnecessary: the same request with the same cap will do it again.
     pub fn output_limit_exhausted(provider: &str, max_tokens: Option<u32>) -> Self {
+        let advice = if max_tokens.is_some() {
+            "raise max_tokens or lower the reasoning effort"
+        } else {
+            "lower the reasoning effort or split large outputs into smaller steps"
+        };
         Self::ProviderError {
             provider: provider.to_string(),
             message: format!(
                 "The model hit its output-token limit before writing an answer{}. Thinking counts \
                  against the same budget on this route, so retrying the same request will do it \
-                 again: raise max_tokens or lower the reasoning effort.",
+                 again: {advice}.",
                 max_tokens
                     .map(|tokens| format!(" (max_tokens={tokens})"))
                     .unwrap_or_default()

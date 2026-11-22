@@ -306,7 +306,7 @@ impl Default for CompletionOptions {
         Self {
             model: None,
             temperature: Some(0.7),
-            max_tokens: Some(4096),
+            max_tokens: None,
             top_p: Some(1.0),
             stop: vec![],
             reasoning_effort: None,

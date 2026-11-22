@@ -907,6 +907,29 @@ fn a_non_thinking_model_keeps_the_plain_output_cap() {
     assert_eq!(generation["maxOutputTokens"], json!(4096));
 }
 
+/// Default completion options impose no artificial `max_tokens` cap, so high-effort tool-heavy
+/// turns can use the model's full native output limit.
+#[test]
+fn default_options_do_not_cap_output_tokens() {
+    let options = CompletionOptions {
+        reasoning_effort: Some(ReasoningEffort::High),
+        ..CompletionOptions::default()
+    };
+    assert_eq!(options.max_tokens, None);
+    let payload = build_antigravity_payload(
+        &[Message::user("create a full plugin with ui")],
+        &[],
+        &options,
+        "gemini-3.8-flash",
+    );
+    let generation = &payload["request"]["generationConfig"];
+    assert_eq!(generation["thinkingConfig"]["thinkingBudget"], json!(16384));
+    assert!(
+        generation.get("maxOutputTokens").is_none(),
+        "default options must not emit an artificial maxOutputTokens cap: {generation:?}"
+    );
+}
+
 /// A cache read is *inside* the prompt, not beside it.
 ///
 /// Live Code Assist: the same 8,718-token prompt reported no cache on the first turn, then
