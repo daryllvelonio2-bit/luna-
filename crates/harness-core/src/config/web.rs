@@ -28,7 +28,7 @@ pub const DEFAULT_WEB_USER_AGENT: &str =
     "LunaHarness/0.1 (+https://github.com/luna-ai/rust-agent-harness)";
 
 /// Every accepted spelling of a search backend, in the order the setup flow offers them.
-pub const SEARCH_BACKENDS: [&str; 4] = ["duckduckgo", "brave", "tavily", "none"];
+pub const SEARCH_BACKENDS: [&str; 5] = ["duckduckgo", "agent-reach", "brave", "tavily", "none"];
 
 /// Longest `fetch_max_chars` the config may ask for: a tool result larger than this is a transcript
 /// the user pays for on every subsequent turn of the session.
@@ -95,6 +95,8 @@ pub enum SearchBackend {
     /// change without notice. The default because it works on a fresh install.
     #[default]
     DuckDuckGo,
+    /// Agent Reach (`agent-reach web search` / Exa semantic search): free, no API key required.
+    AgentReach,
     /// Brave Search API. Needs a key, and publishes one.
     Brave,
     /// Tavily Search API. Needs a key; returns extracted page text alongside each result.
@@ -109,6 +111,7 @@ impl SearchBackend {
     pub fn parse(raw: &str) -> Result<Self, String> {
         match raw.trim().to_ascii_lowercase().as_str() {
             "duckduckgo" | "ddg" | "ddg_lite" => Ok(Self::DuckDuckGo),
+            "agent-reach" | "agent_reach" | "agentreach" | "exa" | "reach" => Ok(Self::AgentReach),
             "brave" | "brave_search" => Ok(Self::Brave),
             "tavily" => Ok(Self::Tavily),
             "none" | "off" | "disabled" | "false" => Ok(Self::Disabled),
@@ -123,6 +126,7 @@ impl SearchBackend {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::DuckDuckGo => "duckduckgo",
+            Self::AgentReach => "agent-reach",
             Self::Brave => "brave",
             Self::Tavily => "tavily",
             Self::Disabled => "none",
@@ -142,7 +146,7 @@ impl SearchBackend {
             Self::Tavily => "TAVILY_API_KEY",
             // Keyless and disabled backends have no variable to name; the empty string keeps
             // `search_api_key_env` a plain `String` instead of an `Option` nobody reads.
-            Self::DuckDuckGo | Self::Disabled => "",
+            Self::DuckDuckGo | Self::AgentReach | Self::Disabled => "",
         }
     }
 
@@ -156,6 +160,7 @@ impl SearchBackend {
     pub fn label(self) -> &'static str {
         match self {
             Self::DuckDuckGo => "DuckDuckGo",
+            Self::AgentReach => "Agent Reach (Exa)",
             Self::Brave => "Brave Search API",
             Self::Tavily => "Tavily Search API",
             Self::Disabled => "Disabled",
@@ -387,13 +392,24 @@ mod tests {
             SearchBackend::parse(" DDG ").unwrap(),
             SearchBackend::DuckDuckGo
         );
+        assert_eq!(
+            SearchBackend::parse("agent-reach").unwrap(),
+            SearchBackend::AgentReach
+        );
+        assert_eq!(
+            SearchBackend::parse("exa").unwrap(),
+            SearchBackend::AgentReach
+        );
         assert_eq!(SearchBackend::parse("Brave").unwrap(), SearchBackend::Brave);
         assert_eq!(
             SearchBackend::parse("off").unwrap(),
             SearchBackend::Disabled
         );
         let error = SearchBackend::parse("google").unwrap_err();
-        assert!(error.contains("duckduckgo, brave, tavily, none"), "{error}");
+        assert!(
+            error.contains("duckduckgo, agent-reach, brave, tavily, none"),
+            "{error}"
+        );
     }
 
     #[test]

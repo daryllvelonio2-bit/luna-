@@ -1288,6 +1288,13 @@ fn setup_web(
                 backend: harness_core::config::SearchBackend::DuckDuckGo,
                 api_key_env: None,
             },
+            "agent-reach" | "agent_reach" | "agentreach" | "exa" | "reach" => {
+                harness_onboarding::WebSelection {
+                    enabled: true,
+                    backend: harness_core::config::SearchBackend::AgentReach,
+                    api_key_env: None,
+                }
+            }
             "brave" => harness_onboarding::WebSelection {
                 enabled: true,
                 backend: harness_core::config::SearchBackend::Brave,
@@ -1300,7 +1307,7 @@ fn setup_web(
             },
             _ => {
                 return Err(harness_core::HarnessError::ConfigurationError(format!(
-                    "unknown web option: '{val}'. Expected 'off', 'duckduckgo', 'brave', or 'tavily'."
+                    "unknown web option: '{val}'. Expected 'off', 'duckduckgo', 'agent-reach', 'brave', or 'tavily'."
                 )));
             }
         };

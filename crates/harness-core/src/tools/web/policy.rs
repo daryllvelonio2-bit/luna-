@@ -119,6 +119,8 @@ pub struct Request {
     pub headers: Vec<(String, String)>,
     /// `(content type, body)` for a POST.
     pub body: Option<(String, String)>,
+    /// Allow `text/event-stream` responses (e.g. MCP JSON-RPC endpoints over SSE).
+    pub allow_event_stream: bool,
 }
 
 impl Request {
@@ -128,6 +130,7 @@ impl Request {
             method: Method::GET,
             headers: Vec::new(),
             body: None,
+            allow_event_stream: false,
         }
     }
 }
@@ -463,7 +466,8 @@ impl WebPolicy {
             .unwrap_or("")
             .trim()
             .to_ascii_lowercase();
-        if !TEXTUAL.contains(&essence.as_str()) {
+        let allowed_sse = request.allow_event_stream && essence == "text/event-stream";
+        if !allowed_sse && !TEXTUAL.contains(&essence.as_str()) {
             let shown = if essence.is_empty() {
                 "no content type"
             } else {

@@ -100,12 +100,36 @@ fn a_blank_web_answer_records_the_keyless_search() {
 }
 
 #[test]
+fn choosing_agent_reach_records_the_keyless_backend() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let file = tmp.path().join("config.yaml");
+
+    // memory, auto-compact off, gateway, notes (blank), web (2 = Agent Reach)
+    let (outcome, rendered) = drive(&file, "1\n2\n1\n\n2\n");
+
+    assert!(outcome.web.enabled);
+    assert_eq!(outcome.web.backend, SearchBackend::AgentReach);
+    assert_eq!(outcome.web.api_key_env, None);
+
+    let config = read_config(&file);
+    assert_eq!(config["tools"]["web"]["enabled"].as_bool(), Some(true));
+    assert_eq!(
+        config["tools"]["web"]["search_backend"].as_str(),
+        Some("agent-reach")
+    );
+    assert!(
+        rendered.contains("Agent Reach (Exa) — free, no key needed"),
+        "{rendered}"
+    );
+}
+
+#[test]
 fn choosing_a_keyed_backend_records_the_variable_that_holds_the_key() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let file = tmp.path().join("config.yaml");
 
-    // memory, auto-compact off, gateway, notes (blank), web (2 = Brave), variable name
-    let (outcome, rendered) = drive(&file, "1\n2\n1\n\n2\nMY_BRAVE_KEY\n");
+    // memory, auto-compact off, gateway, notes (blank), web (3 = Brave), variable name
+    let (outcome, rendered) = drive(&file, "1\n2\n1\n\n3\nMY_BRAVE_KEY\n");
 
     assert!(outcome.web.enabled);
     assert_eq!(outcome.web.backend, SearchBackend::Brave);
@@ -141,8 +165,8 @@ fn the_environment_variable_can_be_left_to_the_backend_default() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let file = tmp.path().join("config.yaml");
 
-    // ... web (3 = Tavily), then a blank variable name.
-    let (outcome, rendered) = drive(&file, "1\n2\n1\n\n3\n\n");
+    // ... web (4 = Tavily), then a blank variable name.
+    let (outcome, rendered) = drive(&file, "1\n2\n1\n\n4\n\n");
 
     assert_eq!(outcome.web.backend, SearchBackend::Tavily);
     assert_eq!(outcome.web.api_key_env.as_deref(), Some("TAVILY_API_KEY"));
@@ -161,7 +185,7 @@ fn web_access_can_be_turned_off_entirely() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let file = tmp.path().join("config.yaml");
 
-    let (outcome, rendered) = drive(&file, "1\n2\n1\n\n4\n");
+    let (outcome, rendered) = drive(&file, "1\n2\n1\n\n5\n");
 
     assert!(!outcome.web.enabled);
     assert_eq!(outcome.web.backend, SearchBackend::Disabled);

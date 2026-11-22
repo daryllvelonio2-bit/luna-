@@ -110,6 +110,15 @@ fn setup_web_direct_value_updates_config() {
     );
     assert_eq!(cfg["first_run"].as_bool(), Some(false));
 
+    let out = run_luna(&["setup", "web", "agent-reach"], &config_path);
+    assert!(out.status.success());
+    let cfg = read_config(&config_path);
+    assert_eq!(cfg["tools"]["web"]["enabled"].as_bool(), Some(true));
+    assert_eq!(
+        cfg["tools"]["web"]["search_backend"].as_str(),
+        Some("agent-reach")
+    );
+
     let out = run_luna(&["setup", "web", "off"], &config_path);
     assert!(out.status.success());
     let cfg = read_config(&config_path);

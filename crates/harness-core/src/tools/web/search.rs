@@ -19,6 +19,7 @@
 //! choice of *provider*, never a hole in the policy. The endpoints are constants rather than config
 //! because they are facts about the providers, not preferences of the user.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -37,10 +38,15 @@ use super::policy::{Request, WebError, WebPolicy};
 
 /// DuckDuckGo's HTML results page: no key, no JSON, no promise.
 pub const DUCKDUCKGO_ENDPOINT: &str = "https://lite.duckduckgo.com/lite/";
+/// Exa's free hosted MCP endpoint used by Agent Reach web search.
+pub const EXA_MCP_ENDPOINT: &str = "https://mcp.exa.ai/mcp";
 /// Brave Search's web endpoint.
 pub const BRAVE_ENDPOINT: &str = "https://api.search.brave.com/res/v1/web/search";
 /// Tavily's search endpoint.
 pub const TAVILY_ENDPOINT: &str = "https://api.tavily.com/search";
+
+/// Maximum snippet length emitted per Agent Reach / Exa search hit.
+const AGENT_REACH_SNIPPET_MAX_CHARS: usize = 600;
 
 /// Brave's key header, as its documentation names it.
 const BRAVE_KEY_HEADER: &str = "x-subscription-token";
@@ -115,6 +121,7 @@ impl WebSearchTool {
     ) -> Result<Vec<SearchHit>, WebError> {
         match self.backend {
             SearchBackend::DuckDuckGo => self.duckduckgo(query, limit, cancel).await,
+            SearchBackend::AgentReach => self.agent_reach(query, limit, cancel).await,
             SearchBackend::Brave => self.brave(query, limit, cancel).await,
             SearchBackend::Tavily => self.tavily(query, limit, allowed, blocked, cancel).await,
             // Registration never builds a search tool for `Disabled`; reaching here means a caller
@@ -162,6 +169,7 @@ impl WebSearchTool {
                 "application/x-www-form-urlencoded".to_string(),
                 body.clone(),
             )),
+            allow_event_stream: false,
         };
         let fetched = self
             .policy
@@ -169,6 +177,105 @@ impl WebSearchTool {
             .await?;
         // The endpoint can redirect to the non-lite HTML page; both are parsed the same way.
         Ok(parse_duckduckgo(&fetched.body))
+    }
+
+    /// Agent Reach (`agent-reach web search` CLI, with direct Exa MCP fallback when not installed).
+    async fn agent_reach(
+        &self,
+        query: &str,
+        limit: usize,
+        cancel: &CancellationToken,
+    ) -> Result<Vec<SearchHit>, WebError> {
+        if let Some(bin) = find_agent_reach_bin() {
+            match self.agent_reach_cli(&bin, query, limit, cancel).await {
+                Ok(hits) => return Ok(hits),
+                Err(WebError::Cancelled) => return Err(WebError::Cancelled),
+                Err(WebError::Transport(msg)) if msg.starts_with("spawn:") => {
+                    tracing::debug!("agent-reach CLI unavailable ({msg}), falling back to Exa MCP");
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        self.exa_mcp(query, limit, cancel).await
+    }
+
+    async fn agent_reach_cli(
+        &self,
+        bin: &std::path::Path,
+        query: &str,
+        limit: usize,
+        cancel: &CancellationToken,
+    ) -> Result<Vec<SearchHit>, WebError> {
+        let mut cmd = tokio::process::Command::new(bin);
+        cmd.args(["web", "search", query, "--limit", &limit.to_string()]);
+        let timeout = self.policy.timeout();
+        let output = tokio::select! {
+            _ = cancel.cancelled() => return Err(WebError::Cancelled),
+            res = tokio::time::timeout(timeout, cmd.output()) => {
+                match res {
+                    Err(_) => {
+                        return Err(WebError::Transport(format!(
+                            "agent-reach timed out after {}s",
+                            timeout.as_secs()
+                        )));
+                    }
+                    Ok(Err(err)) => {
+                        return Err(WebError::Transport(format!("spawn: {err}")));
+                    }
+                    Ok(Ok(output)) => output,
+                }
+            }
+        };
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stdout.trim().is_empty() && !output.status.success() {
+            return Err(WebError::Transport(format!(
+                "agent-reach exited with {}: {}",
+                output.status,
+                stderr.trim()
+            )));
+        }
+        parse_agent_reach_cli(&stdout)
+    }
+
+    async fn exa_mcp(
+        &self,
+        query: &str,
+        limit: usize,
+        cancel: &CancellationToken,
+    ) -> Result<Vec<SearchHit>, WebError> {
+        let payload = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "web_search_exa",
+                "arguments": {
+                    "query": query,
+                    "objective": query,
+                    "numResults": limit
+                }
+            }
+        });
+        let request = Request {
+            method: reqwest::Method::POST,
+            headers: vec![
+                (
+                    "accept".to_string(),
+                    "application/json, text/event-stream".to_string(),
+                ),
+                ("content-type".to_string(), "application/json".to_string()),
+                ("accept-language".to_string(), ACCEPT_LANGUAGE.to_string()),
+            ],
+            body: Some(("application/json".to_string(), payload.to_string())),
+            allow_event_stream: true,
+        };
+        let fetched = self
+            .policy
+            .fetch(EXA_MCP_ENDPOINT, &request, &[], &[], cancel)
+            .await?;
+        parse_exa_response(&fetched.body)
     }
 
     /// Brave answers a documented JSON API and takes the key in a header.
@@ -192,6 +299,7 @@ impl WebSearchTool {
                 ("accept-language".to_string(), ACCEPT_LANGUAGE.to_string()),
             ],
             body: None,
+            allow_event_stream: false,
         };
         let fetched = self
             .policy
@@ -236,6 +344,7 @@ impl WebSearchTool {
                 ("content-type".to_string(), "application/json".to_string()),
             ],
             body: Some(("application/json".to_string(), payload.to_string())),
+            allow_event_stream: false,
         };
         let fetched = self
             .policy
@@ -511,6 +620,180 @@ fn string_at(value: &serde_json::Value, key: &str) -> String {
         .to_string()
 }
 
+/// Locate the `agent-reach` CLI executable in `$PATH` or `~/.local/bin/agent-reach`.
+fn find_agent_reach_bin() -> Option<PathBuf> {
+    if let Some(paths) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&paths) {
+            let candidate = dir.join("agent-reach");
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        let local = PathBuf::from(home).join(".local/bin/agent-reach");
+        if local.is_file() {
+            return Some(local);
+        }
+    }
+    None
+}
+
+fn truncate_snippet(raw: &str, max_chars: usize) -> String {
+    let collapsed = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() <= max_chars {
+        return collapsed;
+    }
+    let prefix: String = collapsed.chars().take(max_chars).collect();
+    format!("{}…", prefix.trim_end())
+}
+
+/// Parse the JSON stdout produced by `agent-reach web search --limit N`.
+fn parse_agent_reach_cli(stdout: &str) -> Result<Vec<SearchHit>, WebError> {
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).map_err(|error| {
+        WebError::Transport(format!("agent-reach returned invalid JSON: {error}"))
+    })?;
+    if !parsed.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+        let err_obj = parsed.get("error");
+        let msg = err_obj
+            .and_then(|e| e.get("message"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("agent-reach search failed");
+        let hint = err_obj
+            .and_then(|e| e.get("hint"))
+            .and_then(|v| v.as_str())
+            .filter(|h| !h.is_empty());
+        return Err(WebError::Transport(match hint {
+            Some(h) => format!("{msg} ({h})"),
+            None => msg.to_string(),
+        }));
+    }
+    let hits = parsed
+        .get("items")
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    let url = string_at(item, "url");
+                    if url.is_empty() {
+                        return None;
+                    }
+                    let title = string_at(item, "title");
+                    let title = if title.is_empty() { url.clone() } else { title };
+                    let snippet = truncate_snippet(
+                        &string_at(item, "text"),
+                        AGENT_REACH_SNIPPET_MAX_CHARS,
+                    );
+                    Some(SearchHit {
+                        title,
+                        url,
+                        snippet,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(hits)
+}
+
+/// Parse an Exa MCP response (either SSE `data: {...}` frames or plain JSON-RPC).
+fn parse_exa_response(body: &str) -> Result<Vec<SearchHit>, WebError> {
+    let json_line = body
+        .lines()
+        .filter_map(|line| line.strip_prefix("data:"))
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .last()
+        .unwrap_or_else(|| body.trim());
+    let msg: serde_json::Value = serde_json::from_str(json_line).map_err(|error| {
+        WebError::Transport(format!("exa MCP returned invalid JSON: {error}"))
+    })?;
+    if let Some(err) = msg.get("error") {
+        let message = err
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("exa MCP error");
+        return Err(WebError::Transport(format!("exa: {message}")));
+    }
+    let result = msg.get("result").unwrap_or(&serde_json::Value::Null);
+    let text = result
+        .get("content")
+        .and_then(|v| v.as_array())
+        .map(|parts| {
+            parts
+                .iter()
+                .filter(|c| c.get("type").and_then(|t| t.as_str()) == Some("text"))
+                .filter_map(|c| c.get("text").and_then(|t| t.as_str()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default();
+    if result.get("isError").and_then(|v| v.as_bool()).unwrap_or(false) {
+        return Err(WebError::Transport(format!("exa: {}", text.trim())));
+    }
+
+    Ok(parse_exa_blocks(&text))
+}
+
+fn parse_exa_blocks(text: &str) -> Vec<SearchHit> {
+    let mut hits = Vec::new();
+    let mut title = String::new();
+    let mut url = String::new();
+    let mut body_lines: Vec<&str> = Vec::new();
+    let mut in_headers = false;
+
+    let flush = |title: &mut String,
+                 url: &mut String,
+                 body_lines: &mut Vec<&str>,
+                 hits: &mut Vec<SearchHit>| {
+        if !url.is_empty() {
+            let final_title = if title.is_empty() {
+                url.clone()
+            } else {
+                title.clone()
+            };
+            let snippet = truncate_snippet(&body_lines.join(" "), AGENT_REACH_SNIPPET_MAX_CHARS);
+            hits.push(SearchHit {
+                title: final_title,
+                url: url.clone(),
+                snippet,
+            });
+        }
+        title.clear();
+        url.clear();
+        body_lines.clear();
+    };
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("Title:") {
+            flush(&mut title, &mut url, &mut body_lines, &mut hits);
+            title = rest.trim().to_string();
+            in_headers = true;
+            continue;
+        }
+        if in_headers {
+            if let Some(rest) = trimmed.strip_prefix("URL:") {
+                url = rest.trim().to_string();
+                continue;
+            }
+            if trimmed.starts_with("Published:") || trimmed.starts_with("Author:") {
+                continue;
+            }
+            in_headers = false;
+        }
+        if matches!(trimmed, "Highlights:" | "Text:" | "---") {
+            continue;
+        }
+        if !trimmed.is_empty() {
+            body_lines.push(trimmed);
+        }
+    }
+    flush(&mut title, &mut url, &mut body_lines, &mut hits);
+    hits
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -736,5 +1019,33 @@ mod tests {
             .append_pair("q", "a&b=c d")
             .finish();
         assert_eq!(encoded, "q=a%26b%3Dc+d");
+    }
+
+    #[test]
+    fn agent_reach_cli_json_is_parsed_into_hits() {
+        let json = r#"{
+            "schema_version": 1,
+            "ok": true,
+            "items": [
+                {"title": "Ponytail", "url": "https://github.com/DietrichGebert/ponytail/", "text": "Lazy senior dev mode."}
+            ]
+        }"#;
+        let hits = parse_agent_reach_cli(json).expect("valid cli json");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].title, "Ponytail");
+        assert_eq!(hits[0].url, "https://github.com/DietrichGebert/ponytail/");
+        assert_eq!(hits[0].snippet, "Lazy senior dev mode.");
+    }
+
+    #[test]
+    fn exa_mcp_sse_response_is_parsed_into_hits() {
+        let sse = "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Title: First Result\\nURL: https://example.com/one\\nPublished: N/A\\nAuthor: N/A\\nHighlights:\\nFirst snippet line.\\n\\n---\\n\\nTitle: Second Result\\nURL: https://example.com/two\\nHighlights:\\nSecond snippet.\"}]}}\n";
+        let hits = parse_exa_response(sse).expect("valid sse");
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].title, "First Result");
+        assert_eq!(hits[0].url, "https://example.com/one");
+        assert_eq!(hits[0].snippet, "First snippet line.");
+        assert_eq!(hits[1].title, "Second Result");
+        assert_eq!(hits[1].url, "https://example.com/two");
     }
 }

@@ -34,13 +34,13 @@ pub const PANEL: Panel = Panel {
 };
 
 /// The question, in the accent colour.
-pub const PROMPT: &str = "Select 1-4 ▸ ";
+pub const PROMPT: &str = "Select 1-5 ▸ ";
 /// The footer: what to type, what is recorded, and where the key lives.
 pub const HINT: &str =
     "Enter a number, then press Enter — blank keeps DuckDuckGo (1), which needs \
-                        no account. Keys are read from the environment and never written to the \
-                        config file. Change it later with `luna config set \
-                        tools.web.search_backend brave`.";
+                        no account. Agent Reach (2) is also free with no key. Keys are read from \
+                        the environment and never written to the config file. Change it later with \
+                        `luna config set tools.web.search_backend agent-reach`.";
 /// How many rejected answers are tolerated before the flow gives up.
 pub const MAX_ATTEMPTS: usize = 10;
 
@@ -61,7 +61,7 @@ pub struct Choice {
 
 /// The options, in the order they are shown. The first is the default, and the default is what a
 /// fresh install gets if the user just presses Enter.
-pub const CHOICES: [Choice; 4] = [
+pub const CHOICES: [Choice; 5] = [
     Choice {
         id: 1,
         name: "DuckDuckGo (free, no key)",
@@ -72,6 +72,14 @@ pub const CHOICES: [Choice; 4] = [
     },
     Choice {
         id: 2,
+        name: "Agent Reach (Exa semantic search, free, no key)",
+        detail: "Uses Agent Reach / Exa semantic search with zero API key needed. Better snippets \
+                 and higher reliability than DuckDuckGo; uses the local agent-reach CLI or Exa MCP.",
+        backend: SearchBackend::AgentReach,
+        enabled: true,
+    },
+    Choice {
+        id: 3,
         name: "Brave Search API",
         detail: "A documented JSON API with its own index. Needs a key from brave.com/search/api; \
                  I read it from an environment variable, so it stays out of your config file.",
@@ -79,7 +87,7 @@ pub const CHOICES: [Choice; 4] = [
         enabled: true,
     },
     Choice {
-        id: 3,
+        id: 4,
         name: "Tavily Search API",
         detail: "Built for agents: each result arrives with extracted page text, which is useful \
                  when the question is about content rather than about which page to open. Needs a \
@@ -88,7 +96,7 @@ pub const CHOICES: [Choice; 4] = [
         enabled: true,
     },
     Choice {
-        id: 4,
+        id: 5,
         name: "No web access",
         detail: "Register neither tool. I read only what you put in front of me — nothing leaves \
                  this machine on my behalf.",
@@ -108,15 +116,15 @@ pub fn parse_selection(answer: &str) -> Result<Choice, String> {
             .ok_or_else(|| format!("internal error: default option {DEFAULT_ID} is missing"));
     }
     // Names are accepted as well as numbers: this is a decision people have opinions about, and
-    // `brave` is both shorter to type and harder to get wrong than counting menu rows.
+    // `agent-reach` or `brave` is both shorter to type and harder to get wrong than counting rows.
     if let Ok(backend) = SearchBackend::parse(trimmed) {
         return choice_for(backend)
-            .ok_or_else(|| format!("'{trimmed}' is not an option: pick 1, 2, 3, or 4"));
+            .ok_or_else(|| format!("'{trimmed}' is not an option: pick 1, 2, 3, 4, or 5"));
     }
     let id: u8 = trimmed
         .parse()
-        .map_err(|_| format!("'{trimmed}' is not a number: pick 1, 2, 3, or 4"))?;
-    choice(id).ok_or_else(|| format!("there is no option {id}: pick 1, 2, 3, or 4"))
+        .map_err(|_| format!("'{trimmed}' is not a number: pick 1, 2, 3, 4, or 5"))?;
+    choice(id).ok_or_else(|| format!("there is no option {id}: pick 1, 2, 3, 4, or 5"))
 }
 
 /// The option with this id, if it exists.
@@ -139,6 +147,7 @@ pub fn summary(selection: &WebSelection) -> String {
     }
     match selection.backend {
         SearchBackend::DuckDuckGo => "DuckDuckGo — free, no key needed".to_string(),
+        SearchBackend::AgentReach => "Agent Reach (Exa) — free, no key needed".to_string(),
         SearchBackend::Brave | SearchBackend::Tavily => format!(
             "{} — key from {}",
             selection.backend.label(),
@@ -379,26 +388,30 @@ mod tests {
     }
 
     #[test]
-    fn the_keyless_backend_is_the_default_and_off_is_the_fourth_option() {
-        assert_eq!(CHOICES.len(), 4);
+    fn the_keyless_backend_is_the_default_and_off_is_the_fifth_option() {
+        assert_eq!(CHOICES.len(), 5);
         assert_eq!(
             parse_selection("").unwrap().backend,
             SearchBackend::DuckDuckGo
         );
         assert!(parse_selection("").unwrap().enabled);
-        assert_eq!(choice(4).unwrap().backend, SearchBackend::Disabled);
-        assert!(!choice(4).unwrap().enabled);
-        assert!(choice(5).is_none());
+        assert_eq!(choice(2).unwrap().backend, SearchBackend::AgentReach);
+        assert!(choice(2).unwrap().enabled);
+        assert_eq!(choice(5).unwrap().backend, SearchBackend::Disabled);
+        assert!(!choice(5).unwrap().enabled);
+        assert!(choice(6).is_none());
     }
 
     #[test]
     fn a_backend_can_be_named_instead_of_counted() {
-        assert_eq!(parse_selection("brave\n").unwrap().id, 2);
-        assert_eq!(parse_selection(" Tavily ").unwrap().id, 3);
+        assert_eq!(parse_selection("agent-reach\n").unwrap().id, 2);
+        assert_eq!(parse_selection("exa").unwrap().id, 2);
+        assert_eq!(parse_selection("brave\n").unwrap().id, 3);
+        assert_eq!(parse_selection(" Tavily ").unwrap().id, 4);
         assert_eq!(parse_selection("ddg").unwrap().id, 1);
-        assert_eq!(parse_selection("off").unwrap().id, 4);
+        assert_eq!(parse_selection("off").unwrap().id, 5);
         let error = parse_selection("google").unwrap_err();
-        assert!(error.contains("pick 1, 2, 3, or 4"), "{error}");
+        assert!(error.contains("pick 1, 2, 3, 4, or 5"), "{error}");
         let error = parse_selection("9").unwrap_err();
         assert!(error.contains("there is no option 9"), "{error}");
     }
@@ -408,6 +421,15 @@ mod tests {
         assert_eq!(
             summary(&WebSelection::default()),
             "DuckDuckGo — free, no key needed"
+        );
+        let agent_reach = WebSelection {
+            enabled: true,
+            backend: SearchBackend::AgentReach,
+            api_key_env: None,
+        };
+        assert_eq!(
+            summary(&agent_reach),
+            "Agent Reach (Exa) — free, no key needed"
         );
         let brave = WebSelection {
             enabled: true,
@@ -438,7 +460,11 @@ mod tests {
         }
         assert!(text.contains("WEB ACCESS"));
         assert_eq!(text.matches(menu::DEFAULT_MARKER).count(), 1);
-        assert!(text.contains("never written to the config file"), "{text}");
+        let flattened = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            flattened.contains("never written to the config file"),
+            "{text}"
+        );
     }
 
     #[test]
