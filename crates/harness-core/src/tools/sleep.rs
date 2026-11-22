@@ -138,7 +138,11 @@ mod tests {
         });
         let started = Instant::now();
         let res = tool
-            .execute("c2", &json!({ "seconds": 30, "reason": "polling" }), &cancel)
+            .execute(
+                "c2",
+                &json!({ "seconds": 30, "reason": "polling" }),
+                &cancel,
+            )
             .await
             .unwrap();
         assert!(started.elapsed() < Duration::from_secs(2));
@@ -150,15 +154,17 @@ mod tests {
     async fn sleep_rejects_invalid_durations() {
         let tool = SleepTool;
         let cancel = CancellationToken::new();
-        assert!(tool
-            .execute("c3", &json!({ "seconds": -1 }), &cancel)
-            .await
-            .unwrap()
-            .is_error);
-        assert!(tool
-            .execute("c4", &json!({ "seconds": 99999 }), &cancel)
-            .await
-            .unwrap()
-            .is_error);
+        assert!(
+            tool.execute("c3", &json!({ "seconds": -1 }), &cancel)
+                .await
+                .unwrap()
+                .is_error
+        );
+        assert!(
+            tool.execute("c4", &json!({ "seconds": 99999 }), &cancel)
+                .await
+                .unwrap()
+                .is_error
+        );
     }
 }

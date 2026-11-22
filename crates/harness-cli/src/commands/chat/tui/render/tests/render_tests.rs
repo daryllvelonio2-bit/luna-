@@ -815,6 +815,7 @@ fn ensure_settled_transcript_caches_and_appends_incrementally() {
         ctrl_c_armed: None,
         spinner_tick: 0,
         cwd_label: "/workspace".to_string(),
+        session_pinned_skills: Vec::new(),
         version: "0.1.8".to_string(),
         update_notice: None,
         last_rendered_rect: (100, 30),
@@ -1383,6 +1384,7 @@ fn landing_status_lines_show_features_and_saver_mode() {
             disabled_days_left: None,
         },
         memory_mode: harness_core::MemoryMode::Background,
+        pinned_skills: Vec::new(),
     };
 
     let wide = build_landing_status_lines(&features, 100);

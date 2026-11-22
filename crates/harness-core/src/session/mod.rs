@@ -59,6 +59,9 @@ pub struct SessionRecord {
     pub compact_model: Option<(String, String)>,
     /// Provider -> credential_id map for session-specific priority credentials.
     pub credential_priorities: std::collections::HashMap<String, String>,
+    /// Skill names pinned to this session.
+    #[serde(default)]
+    pub pinned_skills: Vec<String>,
 }
 
 /// A message as it is stored: the row id and sequence number matter, because compaction marks the
@@ -132,6 +135,12 @@ pub trait SessionStore: Send + Sync {
     /// Clear the priority credential for a provider in this session.
     async fn clear_credential_priority(&self, id: &str, provider: &str)
         -> Result<(), HarnessError>;
+
+    /// Record the pinned skill names for this session.
+    async fn set_pinned_skills(&self, id: &str, skills: &[String]) -> Result<(), HarnessError>;
+
+    /// Read the pinned skill names for this session.
+    async fn get_pinned_skills(&self, id: &str) -> Result<Vec<String>, HarnessError>;
 
     /// Append one message, assigning the next `seq` and updating the session's `updated_at`.
     /// Returns the new row id.
@@ -280,8 +289,8 @@ pub fn clean_user_display_text(raw: &str) -> String {
     // Strip `[PLAN MODE ACTIVE: ...]`, `[VOICE MODE ACTIVE: ...]`, etc. (including repeated/nested).
     loop {
         let trimmed = text.trim_start();
-        let is_mode_banner = trimmed.starts_with("[PLAN MODE ACTIVE:")
-            || trimmed.starts_with("[VOICE MODE ACTIVE:");
+        let is_mode_banner =
+            trimmed.starts_with("[PLAN MODE ACTIVE:") || trimmed.starts_with("[VOICE MODE ACTIVE:");
         if is_mode_banner {
             if let Some(end) = trimmed.find(']') {
                 text = trimmed[end + 1..].trim_start_matches(['\r', '\n', ' ', '\t']);

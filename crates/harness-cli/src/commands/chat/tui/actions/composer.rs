@@ -321,6 +321,26 @@ pub async fn run_slash_command(
             open_thinking_picker(env, st).await;
             return Ok(Flow::Continue);
         }
+        "/skills" if arg.is_some_and(|a| a.starts_with("pin")) => {
+            let rest = arg.unwrap().strip_prefix("pin").unwrap_or("").trim();
+            if rest.is_empty() {
+                let skills_arc = env.skills_arc.clone();
+                let skills: &[harness_plugins::Skill] =
+                    skills_arc.as_deref().map(Vec::as_slice).unwrap_or(&[]);
+                let items: Vec<String> = skills.iter().map(|s| s.name.clone()).collect();
+                if items.is_empty() {
+                    env.ui.emit_above("No skills installed to pin.");
+                } else {
+                    st.modal = ActiveModal::SelectModal {
+                        title: "Select Skill to Pin".to_string(),
+                        items: items.clone(),
+                        selected: 0,
+                        action: SelectAction::SkillPinSelect { skills: items },
+                    };
+                }
+                return Ok(Flow::Continue);
+            }
+        }
         "/voice" => {
             handle_voice_slash_command(env, st, arg).await?;
             return Ok(Flow::Continue);

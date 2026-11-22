@@ -34,6 +34,7 @@ import {
   Activity,
   AppWindow,
   Laptop,
+  Pin,
 } from 'lucide-react';
 import { MarkdownContent } from './MarkdownContent';
 import { Composer } from './Composer';
@@ -100,6 +101,8 @@ interface ChatViewProps {
     target: string | null,
     question: string
   ) => Promise<string>;
+  pinnedSkills?: string[];
+  onOpenSkillPin?: () => void;
 }
 
 interface PairedToolStep {
@@ -587,6 +590,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
   pendingClarify,
   onResolveClarify,
   onAskApprovalQuestion,
+  pinnedSkills,
+  onOpenSkillPin,
 }) => {
   const [expandedActivity, setExpandedActivity] = useState<Record<string, boolean>>({});
   const [collapsedLive, setCollapsedLive] = useState<Record<string, boolean>>({});
@@ -800,6 +805,19 @@ export const ChatView: React.FC<ChatViewProps> = ({
         </div>
 
         <div className="chat-header-right">
+          {pinnedSkills && pinnedSkills.length > 0 && (
+            <button
+              type="button"
+              className="status-chip"
+              onClick={onOpenSkillPin}
+              title={`Pinned skills: ${pinnedSkills.join(', ')}. Click to manage.`}
+              style={{ cursor: 'pointer', gap: '5px' }}
+            >
+              <Pin size={11} className="text-accent" />
+              <span>{pinnedSkills.length} pinned</span>
+            </button>
+          )}
+
           {goal && goal.running && (
             <button
               type="button"
@@ -1002,6 +1020,51 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 <p className="chat-empty-subtitle">
                   {workspaceFolder} : {provider || 'default'} / {modelLabel}
                 </p>
+                {pinnedSkills && pinnedSkills.length > 0 && (
+                  <div
+                    style={{
+                      display: 'flex',
+                      flexWrap: 'wrap',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: '6px',
+                      marginTop: '8px',
+                    }}
+                  >
+                    <span
+                      style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: '4px',
+                        fontSize: '0.78rem',
+                        color: 'var(--text-muted)',
+                      }}
+                    >
+                      <Pin size={12} className="text-accent" />
+                      Pinned skills:
+                    </span>
+                    {pinnedSkills.map((s) => (
+                      <button
+                        key={s}
+                        type="button"
+                        onClick={onOpenSkillPin}
+                        title={`Skill '${s}' is pinned. Click to manage.`}
+                        style={{
+                          background: 'rgba(56, 189, 248, 0.1)',
+                          color: 'var(--accent, #38bdf8)',
+                          border: '1px solid rgba(56, 189, 248, 0.25)',
+                          borderRadius: '12px',
+                          padding: '2px 8px',
+                          fontSize: '0.74rem',
+                          fontWeight: 600,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        {s}
+                      </button>
+                    ))}
+                  </div>
+                )}
                 <div style={{ marginTop: '14px' }}>
                   <button type="button" className="btn btn-primary" onClick={onNewSession}>
                     <Plus size={15} />
@@ -1033,6 +1096,52 @@ export const ChatView: React.FC<ChatViewProps> = ({
                     {provider || 'default'} / {modelLabel}
                   </button>
                 </p>
+
+                {pinnedSkills && pinnedSkills.length > 0 && (
+                  <div
+                    style={{
+                      display: 'flex',
+                      flexWrap: 'wrap',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: '6px',
+                      marginBottom: '10px',
+                    }}
+                  >
+                    <span
+                      style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: '4px',
+                        fontSize: '0.78rem',
+                        color: 'var(--text-muted)',
+                      }}
+                    >
+                      <Pin size={12} className="text-accent" />
+                      Pinned skills:
+                    </span>
+                    {pinnedSkills.map((s) => (
+                      <button
+                        key={s}
+                        type="button"
+                        onClick={onOpenSkillPin}
+                        title={`Skill '${s}' is pinned and active on every turn. Click to manage.`}
+                        style={{
+                          background: 'rgba(56, 189, 248, 0.1)',
+                          color: 'var(--accent, #38bdf8)',
+                          border: '1px solid rgba(56, 189, 248, 0.25)',
+                          borderRadius: '12px',
+                          padding: '2px 8px',
+                          fontSize: '0.74rem',
+                          fontWeight: 600,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        {s}
+                      </button>
+                    ))}
+                  </div>
+                )}
 
                 <div className="chat-landing-composer-wrap">
                   <Composer

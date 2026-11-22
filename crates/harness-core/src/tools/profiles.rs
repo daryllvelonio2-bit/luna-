@@ -76,8 +76,7 @@ fn read_profile_yaml(dir: &Path) -> ProfileYamlInfo {
     let Ok(raw) = std::fs::read_to_string(&path) else {
         return ProfileYamlInfo::default();
     };
-    let parsed: serde_yaml::Value =
-        serde_yaml::from_str(&raw).unwrap_or(serde_yaml::Value::Null);
+    let parsed: serde_yaml::Value = serde_yaml::from_str(&raw).unwrap_or(serde_yaml::Value::Null);
     let provider = parsed
         .get("model")
         .and_then(|m| m.get("provider"))
@@ -565,7 +564,10 @@ impl Tool for ProfileEditTool {
             Err(e) => return Ok(ToolResult::error(call_id, e.to_string())),
         };
         let Some(dir) = profile.dir.clone() else {
-            return Ok(ToolResult::error(call_id, "Profile has no directory on disk"));
+            return Ok(ToolResult::error(
+                call_id,
+                "Profile has no directory on disk",
+            ));
         };
 
         if let Some(s) = arguments["summary"]
@@ -758,7 +760,11 @@ mod tests {
             .await
             .unwrap();
         assert!(!created.is_error, "{}", created.content);
-        assert!(cfg.paths.profiles_dir.join("night-coder/credentials.json").is_file());
+        assert!(cfg
+            .paths
+            .profiles_dir
+            .join("night-coder/credentials.json")
+            .is_file());
 
         // Edit (append_behavior + model)
         let edited = reg

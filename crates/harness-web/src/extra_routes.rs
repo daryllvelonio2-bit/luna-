@@ -96,8 +96,15 @@ pub fn extra_router() -> Router<Arc<WebState>> {
         .route("/api/workers", post(upsert_worker))
         .route("/api/workers/{name}", delete(delete_worker))
         .route("/api/profiles", get(list_profiles).post(create_profile))
-        .route("/api/profiles/{name}", put(update_profile).delete(delete_profile))
+        .route(
+            "/api/profiles/{name}",
+            put(update_profile).delete(delete_profile),
+        )
         .route("/api/heartbeat", get(get_heartbeat))
+        // Pinned skills
+        .route("/api/skills/pinned", get(get_pinned_skills))
+        .route("/api/skills/pin", post(pin_skills))
+        .route("/api/skills/unpin", post(unpin_skill))
 }
 
 fn persist_config(cfg: &harness_core::Config) -> Result<(), (StatusCode, String)> {
@@ -1496,7 +1503,10 @@ async fn create_profile(
     validate_profile_name(&name).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     let (profiles_dir, creds_src) = {
         let cfg = state.config.read().await;
-        (cfg.paths.profiles_dir.clone(), cfg.paths.credentials.clone())
+        (
+            cfg.paths.profiles_dir.clone(),
+            cfg.paths.credentials.clone(),
+        )
     };
     let dir = profile_dir(&profiles_dir, &name);
     if dir.exists() {
@@ -1558,17 +1568,32 @@ async fn update_profile(
         ));
     }
     let profiles_dir = state.config.read().await.paths.profiles_dir.clone();
-    let mut prof = load_profile(&name, &profiles_dir)
-        .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
+    let mut prof =
+        load_profile(&name, &profiles_dir).map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
     let dir = profile_dir(&profiles_dir, &name);
 
-    if let Some(s) = payload.summary.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(s) = payload
+        .summary
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         prof.summary = s.to_string();
     }
-    if let Some(p) = payload.persona.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(p) = payload
+        .persona
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         prof.persona = p.to_string();
     }
-    if let Some(b) = payload.behavior.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(b) = payload
+        .behavior
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         prof.behavior = b.to_string();
     }
 
@@ -1682,4 +1707,261 @@ async fn get_heartbeat(
         "mcp_servers_count": cfg.mcp.servers.len(),
         "context_tokens": context_tokens,
     })))
+}
+
+#[derive(Deserialize)]
+pub struct PinnedSkillsQuery {
+    pub session_id: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct PinnedSkillEntry {
+    pub name: String,
+    pub scope: String,
+    pub description: String,
+}
+
+#[derive(Serialize)]
+pub struct PinnedSkillsResponse {
+    pub global: Vec<String>,
+    pub session: Vec<String>,
+    pub all: Vec<String>,
+    pub items: Vec<PinnedSkillEntry>,
+}
+
+pub async fn get_pinned_skills(
+    State(state): State<Arc<WebState>>,
+    Query(query): Query<PinnedSkillsQuery>,
+) -> Result<Json<PinnedSkillsResponse>, (StatusCode, String)> {
+    let cfg = state.config.read().await;
+    let global = cfg.agent.pinned_skills.clone();
+    let session = if let Some(sid) = &query.session_id {
+        state.store.get_pinned_skills(sid).await.unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    let mut all = global.clone();
+    for s in &session {
+        if !all
+            .iter()
+            .any(|existing| harness_plugins::names_match(existing, s))
+        {
+            all.push(s.clone());
+        }
+    }
+
+    let available = gather_available_skills(&cfg);
+    let mut items = Vec::new();
+    for g in &global {
+        let desc = available
+            .iter()
+            .find(|s| harness_plugins::names_match(&s.name, g))
+            .map(|s| s.description.clone())
+            .unwrap_or_default();
+        items.push(PinnedSkillEntry {
+            name: g.clone(),
+            scope: "global".to_string(),
+            description: desc,
+        });
+    }
+    for s in &session {
+        if !global.iter().any(|g| harness_plugins::names_match(g, s)) {
+            let desc = available
+                .iter()
+                .find(|item| harness_plugins::names_match(&item.name, s))
+                .map(|item| item.description.clone())
+                .unwrap_or_default();
+            items.push(PinnedSkillEntry {
+                name: s.clone(),
+                scope: "session".to_string(),
+                description: desc,
+            });
+        }
+    }
+
+    Ok(Json(PinnedSkillsResponse {
+        global,
+        session,
+        all,
+        items,
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct PinSkillsPayload {
+    pub skills: Vec<String>,
+    #[serde(default = "default_session_scope")]
+    pub scope: String,
+    pub session_id: Option<String>,
+}
+
+fn default_session_scope() -> String {
+    "session".to_string()
+}
+
+pub async fn pin_skills(
+    State(state): State<Arc<WebState>>,
+    Json(payload): Json<PinSkillsPayload>,
+) -> Result<Json<PinnedSkillsResponse>, (StatusCode, String)> {
+    if payload.skills.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "no skills specified to pin".to_string(),
+        ));
+    }
+
+    let scope = payload.scope.to_ascii_lowercase();
+    let is_global = scope == "global";
+
+    if is_global {
+        let mut cfg = state.config.write().await;
+        for s in &payload.skills {
+            let clean = s.trim();
+            if !clean.is_empty()
+                && !cfg
+                    .agent
+                    .pinned_skills
+                    .iter()
+                    .any(|p| harness_plugins::names_match(p, clean))
+            {
+                cfg.agent.pinned_skills.push(clean.to_string());
+            }
+        }
+        persist_config(&cfg)?;
+    } else {
+        let sid = payload.session_id.as_deref().ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                "session_id required when pinning to session".to_string(),
+            )
+        })?;
+        let mut session_pinned = state
+            .store
+            .get_pinned_skills(sid)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        for s in &payload.skills {
+            let clean = s.trim();
+            if !clean.is_empty()
+                && !session_pinned
+                    .iter()
+                    .any(|p| harness_plugins::names_match(p, clean))
+            {
+                session_pinned.push(clean.to_string());
+            }
+        }
+        state
+            .store
+            .set_pinned_skills(sid, &session_pinned)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
+
+    refresh_live_pinned_skills(&state, payload.session_id.as_deref()).await;
+
+    get_pinned_skills(
+        State(state),
+        Query(PinnedSkillsQuery {
+            session_id: payload.session_id,
+        }),
+    )
+    .await
+}
+
+#[derive(Deserialize)]
+pub struct UnpinSkillPayload {
+    pub skill: String,
+    pub scope: Option<String>,
+    pub session_id: Option<String>,
+}
+
+pub async fn unpin_skill(
+    State(state): State<Arc<WebState>>,
+    Json(payload): Json<UnpinSkillPayload>,
+) -> Result<Json<PinnedSkillsResponse>, (StatusCode, String)> {
+    let clean = payload.skill.trim();
+    if clean.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "no skill specified to unpin".to_string(),
+        ));
+    }
+
+    let scope = payload
+        .scope
+        .as_deref()
+        .unwrap_or("both")
+        .to_ascii_lowercase();
+    let unpin_global = scope == "global" || scope == "both";
+    let unpin_session = scope == "session" || scope == "both";
+
+    if unpin_global {
+        let mut cfg = state.config.write().await;
+        cfg.agent
+            .pinned_skills
+            .retain(|p| !harness_plugins::names_match(p, clean));
+        persist_config(&cfg)?;
+    }
+
+    if unpin_session {
+        if let Some(sid) = &payload.session_id {
+            let mut session_pinned = state.store.get_pinned_skills(sid).await.unwrap_or_default();
+            session_pinned.retain(|p| !harness_plugins::names_match(p, clean));
+            let _ = state.store.set_pinned_skills(sid, &session_pinned).await;
+        }
+    }
+
+    refresh_live_pinned_skills(&state, payload.session_id.as_deref()).await;
+
+    get_pinned_skills(
+        State(state),
+        Query(PinnedSkillsQuery {
+            session_id: payload.session_id,
+        }),
+    )
+    .await
+}
+
+fn gather_available_skills(cfg: &harness_core::Config) -> Vec<harness_plugins::Skill> {
+    let mut all_skills = Vec::new();
+    if let Ok(skills) = harness_plugins::SkillLoader::load_skills_from_dir(&cfg.paths.skills_dir) {
+        all_skills.extend(skills);
+    }
+    let ws_skills = cfg.paths.workspace_root.join(".harness/skills");
+    if ws_skills.exists() {
+        if let Ok(skills) = harness_plugins::SkillLoader::load_skills_from_dir(&ws_skills) {
+            all_skills.extend(skills);
+        }
+    }
+    all_skills.push(harness_plugins::plugin_skill());
+    all_skills
+}
+
+async fn refresh_live_pinned_skills(state: &Arc<WebState>, target_sid: Option<&str>) {
+    let cfg = state.config.read().await;
+    let global_pinned = cfg.agent.pinned_skills.clone();
+    let available = gather_available_skills(&cfg);
+
+    let sessions = state.sessions.lock().await;
+    for (sid, handle) in sessions.iter() {
+        if target_sid.is_none() || target_sid == Some(sid.as_str()) {
+            let session_pinned = state.store.get_pinned_skills(sid).await.unwrap_or_default();
+            let mut combined = session_pinned;
+            for g in &global_pinned {
+                if !combined.iter().any(|s| harness_plugins::names_match(s, g)) {
+                    combined.push(g.clone());
+                }
+            }
+            let resolved = harness_plugins::resolve_pinned_instructions(
+                &combined,
+                &available,
+                Some(&cfg.paths.skills_dir),
+            );
+            let rt = handle.runtime.lock().await;
+            let mut ag = rt.agent.lock().await;
+            ag.set_pinned_skills(combined);
+            ag.set_pinned_skill_instructions(resolved);
+        }
+    }
 }

@@ -81,7 +81,22 @@ where
             ""
         };
 
-        Ok(format!("{}{}{}", base, env_info, voice_instruction))
+        let pinned_skills_block = if !self.config.pinned_skill_instructions.is_empty() {
+            let mut block = String::from(
+                "\n\nPINNED SKILLS (ALWAYS ACTIVE):\nThe following skill instructions are pinned and MUST be strictly obeyed on every turn:\n",
+            );
+            for (name, instructions) in &self.config.pinned_skill_instructions {
+                block.push_str(&format!("\n--- PINNED SKILL: {name} ---\n{instructions}\n"));
+            }
+            block
+        } else {
+            String::new()
+        };
+
+        Ok(format!(
+            "{}{}{}{}",
+            base, env_info, voice_instruction, pinned_skills_block
+        ))
     }
 
     /// The active profile's persona and behavior. `system_prompt_override` replaces only the

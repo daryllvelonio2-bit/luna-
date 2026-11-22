@@ -127,6 +127,41 @@ impl SkillLoader {
     }
 }
 
+/// Resolve skill instructions for a list of skill names from preloaded skills or disk.
+pub fn resolve_pinned_instructions(
+    names: &[String],
+    skills: &[Skill],
+    skills_dir: Option<&Path>,
+) -> Vec<(String, String)> {
+    let mut resolved = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for name in names {
+        let trimmed = name.trim();
+        if trimmed.is_empty() || !seen.insert(trimmed.to_lowercase()) {
+            continue;
+        }
+
+        // 1. Check in preloaded skills
+        if let Some(skill) = skills.iter().find(|s| names_match(&s.name, trimmed)) {
+            resolved.push((skill.name.clone(), skill.instructions.clone()));
+            continue;
+        }
+
+        // 2. Try loading from skills_dir/<name>/SKILL.md if not preloaded
+        if let Some(dir) = skills_dir {
+            let skill_file = dir.join(trimmed).join("SKILL.md");
+            if skill_file.exists() {
+                if let Ok(skill) = SkillLoader::parse_skill_file(&skill_file) {
+                    resolved.push((skill.name, skill.instructions));
+                    continue;
+                }
+            }
+        }
+    }
+    resolved
+}
+
 pub struct SkillToolAdapter {
     skill: Skill,
 }

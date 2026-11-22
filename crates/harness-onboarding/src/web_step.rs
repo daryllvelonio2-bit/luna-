@@ -73,7 +73,8 @@ pub const CHOICES: [Choice; 5] = [
     Choice {
         id: 2,
         name: "Agent Reach (Exa semantic search, free, no key)",
-        detail: "Uses Agent Reach / Exa semantic search with zero API key needed. Better snippets \
+        detail:
+            "Uses Agent Reach / Exa semantic search with zero API key needed. Better snippets \
                  and higher reliability than DuckDuckGo; uses the local agent-reach CLI or Exa MCP.",
         backend: SearchBackend::AgentReach,
         enabled: true,

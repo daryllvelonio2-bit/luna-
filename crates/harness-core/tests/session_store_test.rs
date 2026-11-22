@@ -624,6 +624,35 @@ async fn credential_priorities_persistence_survives_reopening_the_database() {
 }
 
 #[tokio::test]
+async fn pinned_skills_persistence_survives_reopening_and_forking() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("sessions.db");
+
+    {
+        let store = SqliteSessionStore::new(Some(path.clone())).unwrap();
+        store.ensure_session("s1").await.unwrap();
+        store
+            .set_pinned_skills("s1", &["ponytail".to_string(), "browser".to_string()])
+            .await
+            .unwrap();
+    }
+
+    let reopened = SqliteSessionStore::new(Some(path.clone())).unwrap();
+    let rec = reopened.get("s1").await.unwrap();
+    assert_eq!(
+        rec.pinned_skills,
+        vec!["ponytail".to_string(), "browser".to_string()]
+    );
+
+    let forked_id = reopened.fork_session("s1", Some("Forked")).await.unwrap();
+    let forked_rec = reopened.get(&forked_id).await.unwrap();
+    assert_eq!(
+        forked_rec.pinned_skills,
+        vec!["ponytail".to_string(), "browser".to_string()]
+    );
+}
+
+#[tokio::test]
 async fn estimate_prefers_reported_usage_and_adds_the_heuristic_tail() {
     let mut with_usage = Message::assistant("an answer");
     with_usage.usage = Some(TokenUsage::estimated(1_000, 200));

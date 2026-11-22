@@ -681,10 +681,8 @@ fn parse_agent_reach_cli(stdout: &str) -> Result<Vec<SearchHit>, WebError> {
                     }
                     let title = string_at(item, "title");
                     let title = if title.is_empty() { url.clone() } else { title };
-                    let snippet = truncate_snippet(
-                        &string_at(item, "text"),
-                        AGENT_REACH_SNIPPET_MAX_CHARS,
-                    );
+                    let snippet =
+                        truncate_snippet(&string_at(item, "text"), AGENT_REACH_SNIPPET_MAX_CHARS);
                     Some(SearchHit {
                         title,
                         url,
@@ -706,9 +704,8 @@ fn parse_exa_response(body: &str) -> Result<Vec<SearchHit>, WebError> {
         .filter(|line| !line.is_empty())
         .last()
         .unwrap_or_else(|| body.trim());
-    let msg: serde_json::Value = serde_json::from_str(json_line).map_err(|error| {
-        WebError::Transport(format!("exa MCP returned invalid JSON: {error}"))
-    })?;
+    let msg: serde_json::Value = serde_json::from_str(json_line)
+        .map_err(|error| WebError::Transport(format!("exa MCP returned invalid JSON: {error}")))?;
     if let Some(err) = msg.get("error") {
         let message = err
             .get("message")
@@ -729,7 +726,11 @@ fn parse_exa_response(body: &str) -> Result<Vec<SearchHit>, WebError> {
                 .join("\n")
         })
         .unwrap_or_default();
-    if result.get("isError").and_then(|v| v.as_bool()).unwrap_or(false) {
+    if result
+        .get("isError")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
         return Err(WebError::Transport(format!("exa: {}", text.trim())));
     }
 

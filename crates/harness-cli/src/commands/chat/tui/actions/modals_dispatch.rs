@@ -551,6 +551,83 @@ pub async fn run_select_action(
                 env.ui.emit_above("Cancelled.");
             }
         }
+        SelectAction::SkillPinSelect { skills } => {
+            if let Some(skill) = skills.get(choice) {
+                st.modal = ActiveModal::SelectModal {
+                    title: format!("Pin '{}'", skill),
+                    items: vec![
+                        "Pin to this session only".to_string(),
+                        "Pin globally (all sessions)".to_string(),
+                    ],
+                    selected: 0,
+                    action: SelectAction::SkillPinScope {
+                        skill: skill.clone(),
+                    },
+                };
+            }
+        }
+        SelectAction::SkillPinScope { skill } => {
+            let is_global = choice == 1;
+            if is_global {
+                if !env
+                    .config
+                    .agent
+                    .pinned_skills
+                    .iter()
+                    .any(|s| harness_plugins::names_match(s, &skill))
+                {
+                    env.config.agent.pinned_skills.push(skill.clone());
+                    let path = harness_core::config::config_file_path();
+                    if let Ok(yaml) = serde_yaml::to_string(env.config) {
+                        let _ = std::fs::write(path, yaml);
+                    }
+                }
+                env.ui
+                    .emit_above(&format!("✔ Pinned '{}' globally.", skill));
+            } else {
+                let mut session_pinned = env
+                    .store
+                    .get_pinned_skills(env.session_id)
+                    .await
+                    .unwrap_or_default();
+                if !session_pinned
+                    .iter()
+                    .any(|s| harness_plugins::names_match(s, &skill))
+                {
+                    session_pinned.push(skill.clone());
+                }
+                let _ = env
+                    .store
+                    .set_pinned_skills(env.session_id, &session_pinned)
+                    .await;
+                st.session_pinned_skills = session_pinned;
+                env.ui
+                    .emit_above(&format!("✔ Pinned '{}' to this session.", skill));
+            }
+
+            // Refresh active agent
+            let session_pinned = env
+                .store
+                .get_pinned_skills(env.session_id)
+                .await
+                .unwrap_or_default();
+            let mut combined = session_pinned;
+            for g in &env.config.agent.pinned_skills {
+                if !combined.iter().any(|s| harness_plugins::names_match(s, g)) {
+                    combined.push(g.clone());
+                }
+            }
+            let skills_slice: &[harness_plugins::Skill] =
+                env.skills_arc.as_deref().map(Vec::as_slice).unwrap_or(&[]);
+            let resolved = harness_plugins::resolve_pinned_instructions(
+                &combined,
+                skills_slice,
+                Some(&env.config.paths.skills_dir),
+            );
+            let mut ag = env.agent.lock().await;
+            ag.set_pinned_skills(combined);
+            ag.set_pinned_skill_instructions(resolved);
+        }
         SelectAction::ProfileCreateProviders { name, summary } => {
             let copy_providers = choice == 0;
             match create_profile(env, &name, summary, copy_providers) {

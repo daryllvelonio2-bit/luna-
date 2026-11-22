@@ -11,7 +11,9 @@ use harness_app::events::{from_agent_event, from_subagent_event, AppEvent};
 use harness_app::runtime::{AppRuntime, AppSessionOptions, ExtraToolRegistrar};
 use harness_app::session::{create_session as create_store_session, open_store, SessionSelection};
 use harness_core::config::Config;
-use harness_core::profiles::{apply_profile_prompt_and_overrides, load as load_profile, DEFAULT_PROFILE};
+use harness_core::profiles::{
+    apply_profile_prompt_and_overrides, load as load_profile, DEFAULT_PROFILE,
+};
 use harness_core::session::{SessionStore, SqliteSessionStore};
 use harness_core::tools::register_profile_tools;
 use harness_core::{ApprovalDecision, ClarifyResponse, HarnessError, ToolRegistry};
@@ -23,8 +25,7 @@ use harness_providers::{CredentialManager, ModelDiscovery};
 use harness_scheduler::{
     automation_skill, ensure_scheduler_plugin, register_schedule_tools_with_service,
     CancellableDeliveryHandler, DeliveryReceipt, DeliveryTarget, ExecutionMode,
-    ScheduleDeliveryHandler, ScheduleStore, ScheduleTask, SchedulerService,
-    AUTOMATION_SKILL_NAME,
+    ScheduleDeliveryHandler, ScheduleStore, ScheduleTask, SchedulerService, AUTOMATION_SKILL_NAME,
 };
 
 use crate::auth::WebAuthState;
@@ -213,7 +214,8 @@ impl WebState {
                 let prev_model = cfg_snapshot.model.default.clone();
                 match load_profile(pname, &cfg_snapshot.paths.profiles_dir) {
                     Ok(prof) => {
-                        if let Err(err) = apply_profile_prompt_and_overrides(&mut cfg_snapshot, &prof)
+                        if let Err(err) =
+                            apply_profile_prompt_and_overrides(&mut cfg_snapshot, &prof)
                         {
                             tracing::warn!("failed to apply profile '{}': {}", pname, err);
                         } else if cfg_snapshot.model.provider != prev_provider
@@ -603,9 +605,7 @@ impl WebState {
     }
 
     /// Build the cancellable background delivery handler consumed by `SchedulerService::spawn_loop_cancellable`.
-    pub fn cancellable_schedule_delivery_handler(
-        self: &Arc<Self>,
-    ) -> CancellableDeliveryHandler {
+    pub fn cancellable_schedule_delivery_handler(self: &Arc<Self>) -> CancellableDeliveryHandler {
         let state = Arc::clone(self);
         Arc::new(move |task: ScheduleTask, cancel: CancellationToken| {
             let state = Arc::clone(&state);

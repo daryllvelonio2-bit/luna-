@@ -521,7 +521,7 @@ where
     answer
 }
 
-async fn choice_step(
+pub(crate) async fn choice_step(
     ui: &ChatUi,
     key_rx: &mut mpsc::UnboundedReceiver<AppKey>,
     title: &str,
@@ -589,7 +589,7 @@ async fn choice_step_with_body(
     answer
 }
 
-async fn multi_step(
+pub(crate) async fn multi_step(
     ui: &ChatUi,
     key_rx: &mut mpsc::UnboundedReceiver<AppKey>,
     title: &str,

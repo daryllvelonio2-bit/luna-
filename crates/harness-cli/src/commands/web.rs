@@ -219,13 +219,18 @@ fn spawn_detached_web(cmd: &WebCommand, config: &Config) -> Result<(), HarnessEr
         .truncate(true)
         .open(&log_path)
         .map_err(|e| {
-            HarnessError::Io(format!("failed to open web log '{}': {}", log_path.display(), e))
+            HarnessError::Io(format!(
+                "failed to open web log '{}': {}",
+                log_path.display(),
+                e
+            ))
         })?;
     let log_err = log_out
         .try_clone()
         .map_err(|e| HarnessError::Io(format!("failed to clone web log handle: {}", e)))?;
 
-    let ready_path = std::env::temp_dir().join(format!("luna-web-ready-{}.json", std::process::id()));
+    let ready_path =
+        std::env::temp_dir().join(format!("luna-web-ready-{}.json", std::process::id()));
     let _ = std::fs::remove_file(&ready_path);
 
     let exe = std::env::current_exe().map_err(|e| HarnessError::Io(e.to_string()))?;
@@ -328,7 +333,16 @@ fn spawn_detached_web(cmd: &WebCommand, config: &Config) -> Result<(), HarnessEr
             let _ = std::fs::remove_file(&ready_path);
             let log_tail = std::fs::read_to_string(&log_path)
                 .ok()
-                .map(|s| s.lines().rev().take(6).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n"))
+                .map(|s| {
+                    s.lines()
+                        .rev()
+                        .take(6)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })
                 .unwrap_or_default();
             return Err(HarnessError::Io(format!(
                 "luna web exited early ({status}){}",

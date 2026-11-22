@@ -42,7 +42,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     name                  TEXT NOT NULL DEFAULT '',
     model                 TEXT NOT NULL DEFAULT '',
     compact_model         TEXT NOT NULL DEFAULT '',
-    credential_priorities TEXT NOT NULL DEFAULT ''
+    credential_priorities TEXT NOT NULL DEFAULT '',
+    pinned_skills         TEXT NOT NULL DEFAULT '[]'
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -184,6 +185,17 @@ impl SqliteSessionStore {
                     "failed to add the session credential_priorities column",
                     error,
                 )
+            })?;
+        }
+
+        let has_pinned_skills = columns.iter().any(|column| column == "pinned_skills");
+        if !has_pinned_skills {
+            conn.execute(
+                "ALTER TABLE sessions ADD COLUMN pinned_skills TEXT NOT NULL DEFAULT '[]'",
+                [],
+            )
+            .map_err(|error| {
+                session_error("failed to add the session pinned_skills column", error)
             })?;
         }
 
@@ -519,7 +531,8 @@ fn count_ordinary(conn: &Connection, session_id: &str) -> Result<usize, HarnessE
 }
 
 fn read_session(conn: &Connection, id: &str) -> Result<SessionRecord, HarnessError> {
-    let (created_at, updated_at, title, name, model, compact_model, credential_priorities): (
+    let (created_at, updated_at, title, name, model, compact_model, credential_priorities, pinned_skills): (
+        String,
         String,
         String,
         String,
@@ -529,7 +542,7 @@ fn read_session(conn: &Connection, id: &str) -> Result<SessionRecord, HarnessErr
         String,
     ) = conn
         .query_row(
-            "SELECT created_at, updated_at, title, name, model, compact_model, credential_priorities FROM sessions WHERE id = ?1",
+            "SELECT created_at, updated_at, title, name, model, compact_model, credential_priorities, pinned_skills FROM sessions WHERE id = ?1",
             params![id],
             |row| {
                 Ok((
@@ -540,6 +553,7 @@ fn read_session(conn: &Connection, id: &str) -> Result<SessionRecord, HarnessErr
                     row.get(4)?,
                     row.get(5)?,
                     row.get::<_, Option<String>>(6)?.unwrap_or_default(),
+                    row.get::<_, Option<String>>(7)?.unwrap_or_default(),
                 ))
             },
         )
@@ -547,6 +561,8 @@ fn read_session(conn: &Connection, id: &str) -> Result<SessionRecord, HarnessErr
 
     let parsed_priorities: std::collections::HashMap<String, String> =
         serde_json::from_str(&credential_priorities).unwrap_or_default();
+    let parsed_pinned_skills: Vec<String> =
+        serde_json::from_str(&pinned_skills).unwrap_or_default();
 
     Ok(SessionRecord {
         id: id.to_string(),
@@ -566,6 +582,7 @@ fn read_session(conn: &Connection, id: &str) -> Result<SessionRecord, HarnessErr
             .filter(|(provider, m)| !provider.is_empty() && !m.is_empty())
             .map(|(provider, m)| (provider.to_string(), m.to_string())),
         credential_priorities: parsed_priorities,
+        pinned_skills: parsed_pinned_skills,
     })
 }
 
@@ -787,6 +804,46 @@ impl SessionStore for SqliteSessionStore {
                 )));
             }
             Ok(())
+        })
+        .await
+    }
+
+    async fn set_pinned_skills(&self, id: &str, skills: &[String]) -> Result<(), HarnessError> {
+        let id = id.to_string();
+        let serialized = serde_json::to_string(skills).unwrap_or_else(|_| "[]".to_string());
+        self.with_conn(move |conn| {
+            let updated = conn
+                .execute(
+                    "UPDATE sessions SET pinned_skills = ?1 WHERE id = ?2",
+                    params![serialized, id],
+                )
+                .map_err(|error| session_error("failed to update session pinned skills", error))?;
+            if updated == 0 {
+                return Err(HarnessError::SessionError(format!(
+                    "session '{}' not found",
+                    id
+                )));
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    async fn get_pinned_skills(&self, id: &str) -> Result<Vec<String>, HarnessError> {
+        let id = id.to_string();
+        self.with_conn(move |conn| {
+            let raw: Option<String> = conn
+                .query_row(
+                    "SELECT pinned_skills FROM sessions WHERE id = ?1",
+                    params![id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| session_error("failed to query session pinned skills", error))?;
+            let parsed: Vec<String> = raw
+                .as_deref()
+                .and_then(|r| serde_json::from_str(r).ok())
+                .unwrap_or_default();
+            Ok(parsed)
         })
         .await
     }
@@ -1114,9 +1171,9 @@ impl SessionStore for SqliteSessionStore {
         let source_id = source_id.to_string();
         let new_title = new_title.map(str::to_string);
         self.with_conn(move |conn| {
-            let (title, name, model, compact_model, credential_priorities) = conn
+            let (title, name, model, compact_model, credential_priorities, pinned_skills) = conn
                 .query_row(
-                    "SELECT title, name, model, compact_model, credential_priorities FROM sessions WHERE id = ?1",
+                    "SELECT title, name, model, compact_model, credential_priorities, pinned_skills FROM sessions WHERE id = ?1",
                     params![source_id],
                     |row| {
                         Ok((
@@ -1125,6 +1182,7 @@ impl SessionStore for SqliteSessionStore {
                             row.get::<_, String>(2)?,
                             row.get::<_, String>(3)?,
                             row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                            row.get::<_, Option<String>>(5)?.unwrap_or_default(),
                         ))
                     },
                 )
@@ -1150,9 +1208,9 @@ impl SessionStore for SqliteSessionStore {
 
             transaction
                 .execute(
-                    "INSERT INTO sessions (id, created_at, updated_at, title, name, model, compact_model, credential_priorities)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                    params![new_id, now, now, forked_title, name, model, compact_model, credential_priorities],
+                    "INSERT INTO sessions (id, created_at, updated_at, title, name, model, compact_model, credential_priorities, pinned_skills)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    params![new_id, now, now, forked_title, name, model, compact_model, credential_priorities, pinned_skills],
                 )
                 .map_err(|e| session_error("failed to create forked session record", e))?;
 

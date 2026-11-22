@@ -390,8 +390,14 @@ impl Tool for ScheduleEditTool {
                     svc.cancel_task(id);
                 }
                 match self.store.delete(id) {
-                    Ok(true) => Ok(ToolResult::success(call_id, format!("Deleted schedule {id}"))),
-                    Ok(false) => Ok(ToolResult::error(call_id, format!("Schedule {id} not found"))),
+                    Ok(true) => Ok(ToolResult::success(
+                        call_id,
+                        format!("Deleted schedule {id}"),
+                    )),
+                    Ok(false) => Ok(ToolResult::error(
+                        call_id,
+                        format!("Schedule {id} not found"),
+                    )),
                     Err(e) => Ok(ToolResult::error(call_id, e)),
                 }
             }

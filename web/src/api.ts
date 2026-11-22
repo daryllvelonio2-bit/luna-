@@ -17,6 +17,7 @@ import type {
   PluginSummary,
   ProfileItem,
   ProviderInfo,
+  PinnedSkillsResponse,
   RotationStrategy,
   ScheduleTask,
   SessionStatePayload,
@@ -778,6 +779,33 @@ class ApiClient {
   public async getKnowledgeGraph(q = ''): Promise<KnowledgeGraphResponse> {
     const qs = q.trim() ? `?q=${encodeURIComponent(q.trim())}` : '';
     return this.request<KnowledgeGraphResponse>(`/api/knowledge-graph${qs}`);
+  }
+
+  public async getPinnedSkills(sessionId?: string): Promise<PinnedSkillsResponse> {
+    const q = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : '';
+    return this.request<PinnedSkillsResponse>(`/api/skills/pinned${q}`);
+  }
+
+  public async pinSkills(
+    skills: string[],
+    scope: 'session' | 'global',
+    sessionId?: string
+  ): Promise<PinnedSkillsResponse> {
+    return this.request<PinnedSkillsResponse>('/api/skills/pin', {
+      method: 'POST',
+      body: JSON.stringify({ skills, scope, session_id: sessionId }),
+    });
+  }
+
+  public async unpinSkill(
+    skill: string,
+    scope?: 'session' | 'global' | 'both',
+    sessionId?: string
+  ): Promise<PinnedSkillsResponse> {
+    return this.request<PinnedSkillsResponse>('/api/skills/unpin', {
+      method: 'POST',
+      body: JSON.stringify({ skill, scope, session_id: sessionId }),
+    });
   }
 }
 

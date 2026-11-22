@@ -25,7 +25,8 @@ pub use plugin_skill::{
 };
 pub use runtime::{PluginRegistrations, PluginRuntimeHandle, RegisteredPluginTool};
 pub use skills::{
-    names_match, Skill, SkillLoader, SkillMetadata, SkillToolAdapter, SkillViewTool, SkillsListTool,
+    names_match, resolve_pinned_instructions, Skill, SkillLoader, SkillMetadata, SkillToolAdapter,
+    SkillViewTool, SkillsListTool,
 };
 pub use tools::{
     register_plugin_tools, PluginCreateTool, PluginListTool, PluginReloadTool, PluginRemoveTool,

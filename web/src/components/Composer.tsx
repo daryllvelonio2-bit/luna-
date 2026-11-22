@@ -28,6 +28,9 @@ export interface SlashItem {
 
 const BUILTIN_SLASH_COMMANDS: SlashItem[] = [
   { cmd: '/model', desc: 'Pick provider, account, and model', category: 'command' },
+  { cmd: '/skills pin', desc: 'Pin skills to this session or globally', category: 'command' },
+  { cmd: '/skills', desc: 'List installed skills & MCP servers', category: 'command' },
+  { cmd: '/pin', desc: 'Pin skills to this session or globally', category: 'command' },
   { cmd: '/thinking', desc: 'Set thinking / reasoning effort', category: 'command', hasArg: true },
   { cmd: '/plan', desc: 'Toggle read-only plan mode', category: 'command' },
   { cmd: '/mode', desc: 'Switch build / auto / plan mode', category: 'command', hasArg: true },

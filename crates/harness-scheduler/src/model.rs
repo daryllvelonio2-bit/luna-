@@ -164,7 +164,9 @@ pub fn compute_next_run(rule: &str, after: DateTime<Utc>) -> Result<Option<DateT
                 .succ_opt()
                 .ok_or_else(|| "date overflow computing daily-local".to_string())?;
         }
-        return Err(format!("could not resolve next daily-local time for '{hm}'"));
+        return Err(format!(
+            "could not resolve next daily-local time for '{hm}'"
+        ));
     }
     if let Some(cron_raw) = trimmed.strip_prefix("local-cron:") {
         let parts: Vec<&str> = cron_raw.split_whitespace().collect();
@@ -392,7 +394,9 @@ fn eval_window_at(spec: &ActiveWindowSpec, at: DateTime<Utc>) -> bool {
     let day_idx = wd.num_days_from_sunday() as usize;
 
     if spec.start_min < spec.end_min {
-        spec.allowed_days[day_idx] && minute_of_day >= spec.start_min && minute_of_day < spec.end_min
+        spec.allowed_days[day_idx]
+            && minute_of_day >= spec.start_min
+            && minute_of_day < spec.end_min
     } else {
         // Overnight window (e.g. 22:00-06:00): after start on an allowed day, OR before end when
         // yesterday was an allowed day.
@@ -562,7 +566,9 @@ mod tests {
     #[test]
     fn parses_local_and_continuous_rules() {
         let now = Utc::now();
-        assert!(compute_next_run("daily-local:09:30", now).unwrap().is_some());
+        assert!(compute_next_run("daily-local:09:30", now)
+            .unwrap()
+            .is_some());
         assert!(compute_next_run("local-cron:0 9 * * 1-5", now)
             .unwrap()
             .is_some());

@@ -238,4 +238,30 @@ async fn feature_toggles_remove_only_their_own_prompt_blocks() {
         prompt.contains("read_file(path, offset, limit)"),
         "{prompt}"
     );
+
+    // Pinned skills are injected directly into the system prompt with their full instructions.
+    let config = AgentConfig {
+        pinned_skills: vec!["ponytail".to_string()],
+        pinned_skill_instructions: vec![(
+            "ponytail".to_string(),
+            "Write the minimum code that solves the whole task.".to_string(),
+        )],
+        ..Default::default()
+    };
+    let prompt = agent_with_config(DefaultToolRegistry::new(), config)
+        .build_system_prompt("hello")
+        .await
+        .expect("prompt builds");
+    assert!(
+        prompt.contains("PINNED SKILLS (ALWAYS ACTIVE):"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("--- PINNED SKILL: ponytail ---"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("Write the minimum code that solves the whole task."),
+        "{prompt}"
+    );
 }

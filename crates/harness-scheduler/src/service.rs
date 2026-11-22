@@ -14,8 +14,8 @@ use tokio_util::sync::CancellationToken;
 use harness_plugins::PluginScheduleDecl;
 
 use crate::model::{
-    compute_effective_next_run, is_within_active_window, next_active_window_start,
-    DeliveryReceipt, DeliveryTarget, ScheduleTask,
+    compute_effective_next_run, is_within_active_window, next_active_window_start, DeliveryReceipt,
+    DeliveryTarget, ScheduleTask,
 };
 use crate::store::ScheduleStore;
 
@@ -152,19 +152,13 @@ impl SchedulerService {
 
         // 2. Respect optional lightweight shell trigger gate (`trigger_command`).
         if let Some(cmd) = task.trigger_command.as_deref() {
-            let ws = self
-                .workspace_root
-                .lock()
-                .ok()
-                .and_then(|g| g.clone());
+            let ws = self.workspace_root.lock().ok().and_then(|g| g.clone());
             let passed = run_trigger_command(cmd, ws.as_deref()).await;
             if !passed {
                 // Advance next_run_at cleanly without firing an LLM turn.
-                if let Ok(next) = compute_effective_next_run(
-                    &task.rule,
-                    task.active_window.as_deref(),
-                    now,
-                ) {
+                if let Ok(next) =
+                    compute_effective_next_run(&task.rule, task.active_window.as_deref(), now)
+                {
                     let _ = self.store.set_next_run_at(&task.id, next);
                 }
                 return false;

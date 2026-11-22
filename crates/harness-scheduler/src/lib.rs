@@ -35,7 +35,9 @@ mod tests {
         let now = Utc::now();
         assert!(compute_next_run("every:60", now).unwrap().is_some());
         assert!(compute_next_run("daily:14:30", now).unwrap().is_some());
-        assert!(compute_next_run("daily-local:14:30", now).unwrap().is_some());
+        assert!(compute_next_run("daily-local:14:30", now)
+            .unwrap()
+            .is_some());
         assert!(compute_next_run("0 9 * * *", now).unwrap().is_some());
         assert!(compute_next_run("local-cron:0 9 * * *", now)
             .unwrap()

@@ -388,11 +388,8 @@ impl ScheduleStore {
         }
 
         if recompute_next {
-            task.next_run_at = compute_effective_next_run(
-                &task.rule,
-                task.active_window.as_deref(),
-                now,
-            )?;
+            task.next_run_at =
+                compute_effective_next_run(&task.rule, task.active_window.as_deref(), now)?;
             task.completed = task.next_run_at.is_none();
         }
 
@@ -452,8 +449,7 @@ impl ScheduleStore {
             let drain = task.history.len() - MAX_DELIVERY_HISTORY;
             task.history.drain(0..drain);
         }
-        if task.rule.trim().starts_with("once:")
-            && task.execution_mode != ExecutionMode::Continuous
+        if task.rule.trim().starts_with("once:") && task.execution_mode != ExecutionMode::Continuous
         {
             task.next_run_at = None;
             task.completed = true;
@@ -498,11 +494,8 @@ fn ensure_extra_columns(conn: &Connection) -> Result<(), String> {
     ];
     for (col, ddl) in additions {
         if !cols.iter().any(|c| c == col) {
-            conn.execute(
-                &format!("ALTER TABLE schedules ADD COLUMN {col} {ddl}"),
-                [],
-            )
-            .map_err(|e| e.to_string())?;
+            conn.execute(&format!("ALTER TABLE schedules ADD COLUMN {col} {ddl}"), [])
+                .map_err(|e| e.to_string())?;
         }
     }
     Ok(())

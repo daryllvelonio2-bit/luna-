@@ -323,11 +323,7 @@ fn extract_memory_hub(rec: &MemoryRecord) -> (String, String, String) {
 }
 
 fn format_memory_label(rec: &MemoryRecord) -> String {
-    let parts: Vec<&str> = rec
-        .subject
-        .split('.')
-        .filter(|s| !s.is_empty())
-        .collect();
+    let parts: Vec<&str> = rec.subject.split('.').filter(|s| !s.is_empty()).collect();
     let scope = if parts.first().copied() == Some("project") && parts.len() >= 3 {
         title_case_slug(&parts[2..].join(" "))
     } else if parts.len() >= 2 && parts[0] == "user" {
@@ -496,8 +492,12 @@ pub fn build_unified_knowledge_graph(
     let mut note_graph_node_to_ui: HashMap<String, String> = HashMap::new();
     let mut node_degree_in_note_graph: HashMap<String, usize> = HashMap::new();
     for e in &built.graph.edges {
-        *node_degree_in_note_graph.entry(e.source.clone()).or_default() += 1;
-        *node_degree_in_note_graph.entry(e.target.clone()).or_default() += 1;
+        *node_degree_in_note_graph
+            .entry(e.source.clone())
+            .or_default() += 1;
+        *node_degree_in_note_graph
+            .entry(e.target.clone())
+            .or_default() += 1;
     }
 
     // Add Note neurons first
@@ -644,7 +644,10 @@ pub fn build_unified_knowledge_graph(
                 ));
             }
             NodeKind::Concept => {
-                let deg = node_degree_in_note_graph.get(&gnode.id).copied().unwrap_or(0);
+                let deg = node_degree_in_note_graph
+                    .get(&gnode.id)
+                    .copied()
+                    .unwrap_or(0);
                 if deg < 2 || gnode.label.chars().count() < 4 {
                     continue;
                 }
@@ -726,8 +729,8 @@ pub fn build_unified_knowledge_graph(
     // 3. Cross-synapse memories <-> tags/concepts & direct memory <-> note links
     for rec in memories {
         let mem_ui_id = format!("mem:{}", rec.id);
-        let mem_hay = format!("{} {} {}", rec.subject, rec.object, rec.raw_content)
-            .to_ascii_lowercase();
+        let mem_hay =
+            format!("{} {} {}", rec.subject, rec.object, rec.raw_content).to_ascii_lowercase();
         for (bridge_id, bridge_label, term) in &tag_and_concept_terms {
             if term.len() >= 4 && mem_hay.contains(term.as_str()) {
                 add_edge(
@@ -899,8 +902,7 @@ mod tests {
         let notes = vec![Note {
             id: "n1".to_string(),
             title: "Stickman Horror Format Teardown".to_string(),
-            content: "# Teardown\nStickman videos using Kokoro TTS and YouTube pacing."
-                .to_string(),
+            content: "# Teardown\nStickman videos using Kokoro TTS and YouTube pacing.".to_string(),
             summary_pointer: "Stickman horror video format notes".to_string(),
             tags: vec!["project:inbox".to_string(), "stickman".to_string()],
             created_at: now,

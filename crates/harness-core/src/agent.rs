@@ -167,6 +167,12 @@ pub struct AgentConfig {
     /// Number of newest turns each auto-compaction fold keeps verbatim.
     #[serde(default = "default_auto_compact_turns")]
     pub auto_compact_turns: usize,
+    /// List of skill names pinned globally across sessions.
+    #[serde(default)]
+    pub pinned_skills: Vec<String>,
+    /// Runtime resolved instructions for pinned skills: `(name, instructions)`.
+    #[serde(skip)]
+    pub pinned_skill_instructions: Vec<(String, String)>,
     /// The active model's context window in tokens, when the caller knows it.
     ///
     /// Compaction is a bound on the model's context, so one fixed token bar cannot be right for
@@ -260,6 +266,8 @@ impl Default for AgentConfig {
             auto_compact_threshold: 150_000,
             auto_compact_percent: None,
             auto_compact_turns: 20,
+            pinned_skills: Vec::new(),
+            pinned_skill_instructions: Vec::new(),
             context_window: None,
         }
     }
@@ -914,6 +922,26 @@ where
     /// Enable or disable skill tools and skill commands for this session.
     pub fn set_skills_enabled(&mut self, enabled: bool) {
         self.config.skills_enabled = enabled;
+    }
+
+    /// Set the list of pinned skill names.
+    pub fn set_pinned_skills(&mut self, skills: Vec<String>) {
+        self.config.pinned_skills = skills;
+    }
+
+    /// Set runtime resolved pinned skill instructions `[(name, instructions)]`.
+    pub fn set_pinned_skill_instructions(&mut self, instructions: Vec<(String, String)>) {
+        self.config.pinned_skill_instructions = instructions;
+    }
+
+    /// Read the list of pinned skill names.
+    pub fn pinned_skills(&self) -> &[String] {
+        &self.config.pinned_skills
+    }
+
+    /// Read runtime resolved pinned skill instructions.
+    pub fn pinned_skill_instructions(&self) -> &[(String, String)] {
+        &self.config.pinned_skill_instructions
     }
 
     /// Enable or disable MCP tools and the MCP prompt block for this session.

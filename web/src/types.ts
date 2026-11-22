@@ -8,6 +8,7 @@ export interface SessionRecord {
   model: [string, string] | null;
   compact_model: [string, string] | null;
   credential_priorities?: Record<string, string>;
+  pinned_skills?: string[];
 }
 
 export interface GuiSessionItem {
@@ -526,6 +527,20 @@ export interface BootstrapPayload {
   workers?: Record<string, WorkerProfile>;
   skills?: SkillSummary[];
   mcp_servers?: McpServerSummary[];
+  pinned_skills?: string[];
+}
+
+export interface PinnedSkillItem {
+  name: string;
+  scope: 'global' | 'session';
+  description: string;
+}
+
+export interface PinnedSkillsResponse {
+  global: string[];
+  session: string[];
+  all: string[];
+  items: PinnedSkillItem[];
 }
 
 export type AppEvent =

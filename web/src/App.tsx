@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { api } from './api';
 import type {
   AgentMode,
@@ -30,6 +30,7 @@ import { MemoryNotesView } from './components/MemoryNotesView';
 import { SettingsModal, type SettingsTab } from './components/SettingsModal';
 import { ModelPickerModal } from './components/ModelPickerModal';
 import { WorkspaceModal } from './components/WorkspaceModal';
+import { SkillPinModal } from './components/SkillPinModal';
 import { SessionDrawers, type ActiveDrawerTab } from './components/SessionDrawers';
 
 export const App: React.FC = () => {
@@ -41,6 +42,8 @@ export const App: React.FC = () => {
     typeof window !== 'undefined' ? window.innerWidth > 768 : true
   );
 
+  const [isSkillPinOpen, setIsSkillPinOpen] = useState(false);
+  const [globalPinnedSkills, setGlobalPinnedSkills] = useState<string[]>([]);
   const [sessions, setSessions] = useState<GuiSessionItem[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [composerPrefill, setComposerPrefill] = useState<string | null>(null);
@@ -259,6 +262,7 @@ export const App: React.FC = () => {
         if (data.workers) setWorkers(data.workers);
         if (data.skills) setSkills(data.skills);
         if (data.mcp_servers) setMcpServers(data.mcp_servers);
+        if (data.pinned_skills) setGlobalPinnedSkills(data.pinned_skills);
 
         if (data.sessions.length > 0) {
           const firstId = data.sessions[0].record.id;
@@ -897,6 +901,14 @@ export const App: React.FC = () => {
         setIsSettingsOpen(true);
         return true;
       }
+      if (cmd === '/skills' && arg?.trim().toLowerCase().startsWith('pin')) {
+        setIsSkillPinOpen(true);
+        return true;
+      }
+      if (cmd === '/pin') {
+        setIsSkillPinOpen(true);
+        return true;
+      }
       if (cmd === '/skills' || cmd === '/mcp') {
         setSettingsTab('features');
         setIsSettingsOpen(true);
@@ -1351,6 +1363,20 @@ export const App: React.FC = () => {
   );
 
   const activeSessionItem = sessions.find((s) => s.record.id === activeSessionId);
+  const activeSessionPinnedSkills = useMemo(
+    () => activeSessionItem?.record.pinned_skills || [],
+    [activeSessionItem]
+  );
+  const effectivePinnedSkills = useMemo(() => {
+    const combined = [...globalPinnedSkills];
+    for (const s of activeSessionPinnedSkills) {
+      if (!combined.some((g) => g.toLowerCase() === s.toLowerCase())) {
+        combined.push(s);
+      }
+    }
+    return combined;
+  }, [globalPinnedSkills, activeSessionPinnedSkills]);
+
   const sessionPluginId = activeSessionItem?.plugin_agent_id
     ? plugins.find(
         (p) =>
@@ -1479,6 +1505,8 @@ export const App: React.FC = () => {
             pendingClarify={pendingClarify}
             onResolveClarify={handleResolveClarify}
             onAskApprovalQuestion={api.askApprovalQuestion.bind(api)}
+            pinnedSkills={effectivePinnedSkills}
+            onOpenSkillPin={() => setIsSkillPinOpen(true)}
           />
         )}
 
@@ -1579,6 +1607,23 @@ export const App: React.FC = () => {
         currentWorkspace={workspaceRoot}
         launchWorkspaceRoot={launchWorkspaceRoot}
         onSelectWorkspace={handleSelectWorkspace}
+      />
+
+      <SkillPinModal
+        isOpen={isSkillPinOpen}
+        onClose={() => setIsSkillPinOpen(false)}
+        sessionId={activeSessionId}
+        skills={skills}
+        onPinnedChanged={(res) => {
+          setGlobalPinnedSkills(res.global);
+          setSessions((prev) =>
+            prev.map((s) =>
+              s.record.id === activeSessionId
+                ? { ...s, record: { ...s.record, pinned_skills: res.session } }
+                : s
+            )
+          );
+        }}
       />
 
       <SettingsModal

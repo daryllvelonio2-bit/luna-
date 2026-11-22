@@ -355,6 +355,42 @@ impl AppRuntime {
         agent_config.skills_enabled = config.skills_effective_enabled();
         agent_config.mcp_enabled = config.mcp_effective_enabled();
 
+        // Resolve pinned skills (session-specific + global)
+        let session_pinned = store
+            .get_pinned_skills(&session_id)
+            .await
+            .unwrap_or_default();
+        let mut combined_pinned = config.agent.pinned_skills.clone();
+        for sp in session_pinned {
+            if !combined_pinned
+                .iter()
+                .any(|p| harness_plugins::names_match(p, &sp))
+            {
+                combined_pinned.push(sp);
+            }
+        }
+        if !combined_pinned.is_empty() {
+            let mut available_skills = Vec::new();
+            if let Ok(loaded) =
+                harness_plugins::SkillLoader::load_skills_from_dir(&config.paths.skills_dir)
+            {
+                available_skills.extend(loaded);
+            }
+            let ws_skills = config.paths.workspace_root.join(".harness/skills");
+            if ws_skills.exists() {
+                if let Ok(loaded) = harness_plugins::SkillLoader::load_skills_from_dir(&ws_skills) {
+                    available_skills.extend(loaded);
+                }
+            }
+            available_skills.push(harness_plugins::plugin_skill());
+            agent_config.pinned_skills = combined_pinned.clone();
+            agent_config.pinned_skill_instructions = harness_plugins::resolve_pinned_instructions(
+                &combined_pinned,
+                &available_skills,
+                Some(&config.paths.skills_dir),
+            );
+        }
+
         let mut agent = Agent::new(
             provider,
             memory.clone(),

@@ -105,6 +105,7 @@ struct SessionSetup {
     compact_provider: Option<String>,
     compact_model: Option<String>,
     record_credential_priorities: std::collections::HashMap<String, String>,
+    record_pinned_skills: Vec<String>,
 }
 
 struct ProviderSetup {
@@ -231,6 +232,7 @@ async fn prepare_session(
         compact_provider,
         compact_model,
         record_credential_priorities: record.credential_priorities,
+        record_pinned_skills: record.pinned_skills,
     })
 }
 
@@ -493,6 +495,40 @@ fn assemble_agent(
     agent_config.notes_enabled = config.notes_effective_enabled();
     agent_config.skills_enabled = config.skills_effective_enabled();
     agent_config.mcp_enabled = config.mcp_effective_enabled();
+
+    // Resolve pinned skills (session-specific + global)
+    let session_pinned = &session.record_pinned_skills;
+    let mut combined_pinned = config.agent.pinned_skills.clone();
+    for sp in session_pinned {
+        if !combined_pinned
+            .iter()
+            .any(|p| harness_plugins::names_match(p, sp))
+        {
+            combined_pinned.push(sp.clone());
+        }
+    }
+    if !combined_pinned.is_empty() {
+        let mut available_skills = Vec::new();
+        if let Ok(loaded) =
+            harness_plugins::SkillLoader::load_skills_from_dir(&config.paths.skills_dir)
+        {
+            available_skills.extend(loaded);
+        }
+        let ws_skills = config.paths.workspace_root.join(".harness/skills");
+        if ws_skills.exists() {
+            if let Ok(loaded) = harness_plugins::SkillLoader::load_skills_from_dir(&ws_skills) {
+                available_skills.extend(loaded);
+            }
+        }
+        available_skills.push(harness_scheduler::automation_skill());
+        available_skills.push(harness_plugins::plugin_skill());
+        agent_config.pinned_skills = combined_pinned.clone();
+        agent_config.pinned_skill_instructions = harness_plugins::resolve_pinned_instructions(
+            &combined_pinned,
+            &available_skills,
+            Some(&config.paths.skills_dir),
+        );
+    }
 
     let agent = Agent::new(provider, memory, notes, registry, agent_config.clone())
         .with_permissions(harness_core::PermissionEngine::validate(

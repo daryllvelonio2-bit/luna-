@@ -170,6 +170,15 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
                     .filter(|&u| u > now_secs)
                     .map(|u| (u - now_secs).div_ceil(86_400))
             };
+            let mut pinned_skills = env.config.agent.pinned_skills.clone();
+            for s in &st.session_pinned_skills {
+                if !pinned_skills
+                    .iter()
+                    .any(|p| harness_plugins::names_match(p, s))
+                {
+                    pinned_skills.push(s.clone());
+                }
+            }
             let features = LandingFeaturesStatus {
                 mcp: FeatureLandingItem {
                     enabled: env.feature_toggles.enabled(Feature::Mcp),
@@ -188,6 +197,7 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
                     disabled_days_left: days_left(env.config.features.notes_disabled_until),
                 },
                 memory_mode: env.config.memory.mode,
+                pinned_skills,
             };
             let info = FooterInfo {
                 provider: env.current_provider,
@@ -796,6 +806,11 @@ async fn init_tui_state(env: &mut Env<'_>) -> Result<TuiState, HarnessError> {
         ctrl_c_armed: None,
         spinner_tick: 0,
         cwd_label,
+        session_pinned_skills: env
+            .store
+            .get_pinned_skills(env.session_id)
+            .await
+            .unwrap_or_default(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         update_notice: None,
         last_rendered_rect: (120, 34),

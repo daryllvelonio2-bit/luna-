@@ -101,6 +101,12 @@ pub enum SelectAction {
     ProfileDeleteConfirm {
         name: String,
     },
+    SkillPinSelect {
+        skills: Vec<String>,
+    },
+    SkillPinScope {
+        skill: String,
+    },
     ProfileCreateProviders {
         name: String,
         summary: String,
@@ -1428,6 +1434,7 @@ pub struct TuiState {
     pub ctrl_c_armed: Option<std::time::Instant>,
     pub spinner_tick: usize,
     pub cwd_label: String,
+    pub session_pinned_skills: Vec<String>,
     pub version: String,
     pub update_notice: Option<String>,
     pub last_rendered_rect: (u16, u16),

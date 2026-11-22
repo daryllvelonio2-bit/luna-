@@ -47,13 +47,14 @@ impl Default for FeatureLandingItem {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LandingFeaturesStatus {
     pub mcp: FeatureLandingItem,
     pub skills: FeatureLandingItem,
     pub memory: FeatureLandingItem,
     pub notes: FeatureLandingItem,
     pub memory_mode: harness_core::MemoryMode,
+    pub pinned_skills: Vec<String>,
 }
 
 pub struct FooterInfo<'a> {
@@ -745,6 +746,24 @@ pub(crate) fn build_landing_status_lines(
         ]),
         saver_w,
     ));
+
+    if !features.pinned_skills.is_empty() {
+        let text = format!("pinned: {}", features.pinned_skills.join(", "));
+        let w = text.width();
+        lines.push((
+            Line::from(vec![
+                Span::styled(
+                    "pinned: ",
+                    Style::default().fg(text_muted()).bg(bg_canvas()),
+                ),
+                Span::styled(
+                    features.pinned_skills.join(", "),
+                    Style::default().fg(accent_coral()).bg(bg_canvas()),
+                ),
+            ]),
+            w,
+        ));
+    }
     lines
 }
 

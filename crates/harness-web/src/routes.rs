@@ -80,6 +80,7 @@ pub struct GuiBootstrapPayload {
     pub workers: serde_json::Value,
     pub skills: Vec<serde_json::Value>,
     pub mcp_servers: Vec<serde_json::Value>,
+    pub pinned_skills: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -513,6 +514,7 @@ async fn bootstrap(
         workers: serde_json::to_value(&cfg.workers).unwrap_or(serde_json::json!({})),
         skills,
         mcp_servers,
+        pinned_skills: cfg.agent.pinned_skills.clone(),
     }))
 }
 
@@ -1535,8 +1537,9 @@ async fn create_schedule_task(
     }
 
     let execution_mode = match payload.execution_mode.as_deref() {
-        Some(raw) => ExecutionMode::from_str_lossy(raw)
-            .map_err(|e| (StatusCode::BAD_REQUEST, e))?,
+        Some(raw) => {
+            ExecutionMode::from_str_lossy(raw).map_err(|e| (StatusCode::BAD_REQUEST, e))?
+        }
         None => ExecutionMode::Scheduled,
     };
 
@@ -1605,9 +1608,9 @@ async fn update_schedule_task(
         .map(|t| parse_delivery_target(Some(t), payload.session_id.as_deref()));
 
     let execution_mode = match payload.execution_mode.as_deref() {
-        Some(raw) => Some(
-            ExecutionMode::from_str_lossy(raw).map_err(|e| (StatusCode::BAD_REQUEST, e))?,
-        ),
+        Some(raw) => {
+            Some(ExecutionMode::from_str_lossy(raw).map_err(|e| (StatusCode::BAD_REQUEST, e))?)
+        }
         None => None,
     };
 

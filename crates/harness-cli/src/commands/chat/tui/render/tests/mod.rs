@@ -92,6 +92,7 @@ pub(crate) fn test_dummy_tui_state() -> TuiState {
         ctrl_c_armed: None,
         spinner_tick: 0,
         cwd_label: "/workspace".to_string(),
+        session_pinned_skills: Vec::new(),
         version: "0.1.8".to_string(),
         update_notice: None,
         last_rendered_rect: (100, 30),
