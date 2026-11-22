@@ -280,9 +280,7 @@ fn parse_days_spec(spec: &str) -> Result<[bool; 7], String> {
     match lower.as_str() {
         "" | "daily" | "everyday" | "all" | "24/7" => return Ok([true; 7]),
         "weekdays" | "weekday" | "workdays" => {
-            for d in 1..=5 {
-                days[d] = true;
-            }
+            days[1..=5].fill(true);
             return Ok(days);
         }
         "weekends" | "weekend" => {
@@ -342,10 +340,8 @@ fn parse_active_window(raw: &str) -> Result<ActiveWindowSpec, String> {
         if tok.eq_ignore_ascii_case("UTC") {
             use_utc = true;
             false
-        } else if tok.eq_ignore_ascii_case("LOCAL") {
-            false
         } else {
-            true
+            !tok.eq_ignore_ascii_case("LOCAL")
         }
     });
 

@@ -24,7 +24,6 @@ version = "0.1.13"
 edition = "2021"
 authors = ["Luna Harness Team"]
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/luna-ai/rust-agent-harness"
 
 [workspace.dependencies]
 tokio = { version = "1.38", features = ["full"] }

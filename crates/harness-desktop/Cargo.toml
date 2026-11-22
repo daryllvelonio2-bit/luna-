@@ -9,6 +9,4 @@ description = "Computer use for the Luna harness: observe and operate desktop ap
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
-thiserror = { workspace = true }
-tracing = { workspace = true }
 rand = { workspace = true }
