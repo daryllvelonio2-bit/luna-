@@ -27,28 +27,81 @@ impl ClipboardImage {
 
 /// Write plain text to the system clipboard (used by transcript mouse selection).
 pub fn write_clipboard_text(text: &str) -> Result<(), String> {
-    // 1. Wayland clipboard support via `wl-copy`.
-    // When available, wl-copy forks and stays resident in the Wayland compositor to serve
-    // paste requests reliably across applications.
-    if write_via_command("wl-copy", &[], text) {
-        // Also copy to PRIMARY selection for middle-click paste.
-        write_via_command("wl-copy", &["--primary"], text);
-        return Ok(());
-    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        // 1. Wayland clipboard support via `wl-copy`.
+        // When available, wl-copy forks and stays resident in the Wayland compositor to serve
+        // paste requests reliably across applications.
+        if write_via_command("wl-copy", &[], text) {
+            // Also copy to PRIMARY selection for middle-click paste.
+            write_via_command("wl-copy", &["--primary"], text);
+            return Ok(());
+        }
 
-    // 2. X11 clipboard support via `xclip` or `xsel`.
-    if write_via_command("xclip", &["-selection", "clipboard"], text) {
-        write_via_command("xclip", &["-selection", "primary"], text);
-        return Ok(());
-    } else if write_via_command("xsel", &["--clipboard", "--input"], text) {
-        write_via_command("xsel", &["--primary", "--input"], text);
-        return Ok(());
+        // 2. X11 clipboard support via `xclip` or `xsel`.
+        if write_via_command("xclip", &["-selection", "clipboard"], text) {
+            write_via_command("xclip", &["-selection", "primary"], text);
+            return Ok(());
+        } else if write_via_command("xsel", &["--clipboard", "--input"], text) {
+            write_via_command("xsel", &["--primary", "--input"], text);
+            return Ok(());
+        }
     }
 
     // 3. Native arboard clipboard (works natively on macOS, Windows, and fallback X11/Wayland).
-    let mut cb = arboard::Clipboard::new().map_err(|e| format!("clipboard unavailable: {e}"))?;
-    cb.set_text(text.to_string())
-        .map_err(|e| format!("clipboard write failed: {e}"))
+    // Retry in a bounded loop in case the system clipboard is temporarily held by another process.
+    let mut last_err = None;
+    for _ in 0..10 {
+        match arboard::Clipboard::new() {
+            Ok(mut cb) => match cb.set_text(text.to_string()) {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    last_err = Some(format!("clipboard write failed: {e}"));
+                    std::thread::sleep(Duration::from_millis(15));
+                }
+            },
+            Err(e) => {
+                last_err = Some(format!("clipboard unavailable: {e}"));
+                std::thread::sleep(Duration::from_millis(15));
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        // Windows fallback 1: OS clip.exe
+        if write_via_command("clip", &[], text) {
+            return Ok(());
+        }
+        // Windows fallback 2: PowerShell Set-Clipboard
+        if write_windows_powershell_clipboard(text) {
+            return Ok(());
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| "clipboard write failed".to_string()))
+}
+
+#[cfg(target_os = "windows")]
+fn write_windows_powershell_clipboard(text: &str) -> bool {
+    let mut child = match std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", "$input | Set-Clipboard"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write;
+        let _ = stdin.write_all(text.as_bytes());
+    }
+    match child.wait() {
+        Ok(s) => s.success(),
+        Err(_) => false,
+    }
 }
 
 fn write_via_command(program: &str, args: &[&str], text: &str) -> bool {
@@ -74,43 +127,74 @@ fn write_via_command(program: &str, args: &[&str], text: &str) -> bool {
 
 /// Read plain text from the system clipboard.
 pub fn read_clipboard_text() -> Option<String> {
-    // 1. Wayland `wl-paste`
-    if let Some(bytes) = command_bytes("wl-paste", &["--no-newline"]) {
-        if let Ok(text) = String::from_utf8(bytes) {
-            if !text.is_empty() {
-                return Some(text);
+    #[cfg(not(target_os = "windows"))]
+    {
+        // 1. Wayland `wl-paste`
+        if let Some(bytes) = command_bytes("wl-paste", &["--no-newline"]) {
+            if let Ok(text) = String::from_utf8(bytes) {
+                if !text.is_empty() {
+                    return Some(text);
+                }
+            }
+        }
+
+        // 2. X11 `xclip`
+        if let Some(bytes) = command_bytes("xclip", &["-selection", "clipboard", "-o"]) {
+            if let Ok(text) = String::from_utf8(bytes) {
+                if !text.is_empty() {
+                    return Some(text);
+                }
+            }
+        }
+
+        // 3. X11 `xsel`
+        if let Some(bytes) = command_bytes("xsel", &["--clipboard", "--output"]) {
+            if let Ok(text) = String::from_utf8(bytes) {
+                if !text.is_empty() {
+                    return Some(text);
+                }
             }
         }
     }
 
-    // 2. X11 `xclip`
-    if let Some(bytes) = command_bytes("xclip", &["-selection", "clipboard", "-o"]) {
-        if let Ok(text) = String::from_utf8(bytes) {
-            if !text.is_empty() {
-                return Some(text);
+    // 4. arboard with bounded retries for transient clipboard locks
+    for _ in 0..5 {
+        if let Ok(mut cb) = arboard::Clipboard::new() {
+            if let Ok(text) = cb.get_text() {
+                if !text.is_empty() {
+                    return Some(text);
+                }
             }
         }
+        std::thread::sleep(Duration::from_millis(15));
     }
 
-    // 3. X11 `xsel`
-    if let Some(bytes) = command_bytes("xsel", &["--clipboard", "--output"]) {
-        if let Ok(text) = String::from_utf8(bytes) {
-            if !text.is_empty() {
-                return Some(text);
-            }
-        }
-    }
-
-    // 4. arboard
-    if let Ok(mut cb) = arboard::Clipboard::new() {
-        if let Ok(text) = cb.get_text() {
-            if !text.is_empty() {
-                return Some(text);
-            }
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(text) = read_windows_powershell_clipboard() {
+            return Some(text);
         }
     }
 
     None
+}
+
+#[cfg(target_os = "windows")]
+fn read_windows_powershell_clipboard() -> Option<String> {
+    let out = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", "Get-Clipboard"])
+        .output()
+        .ok()?;
+    if !out.status.success() || out.stdout.is_empty() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    let trimmed = text.trim_end_matches(&['\r', '\n'][..]);
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 /// Read text from the primary selection (Linux mouse selection / middle-click paste).
@@ -215,22 +299,58 @@ fn try_arboard() -> Result<Option<ClipboardImage>, String> {
 /// `wl-paste` under Hyprland). Only `image/png` is accepted: the attach path
 /// labels every image `image/png`, and screenshot/copy tools always offer it.
 fn fallback_image_bytes() -> Option<Vec<u8>> {
-    // wl-paste asks the compositor's data-control protocol directly.
-    if let Some(bytes) = command_bytes("wl-paste", &["--type", "image/png"]) {
-        if png_sniff(&bytes) {
-            return Some(bytes);
+    #[cfg(not(target_os = "windows"))]
+    {
+        // wl-paste asks the compositor's data-control protocol directly.
+        if let Some(bytes) = command_bytes("wl-paste", &["--type", "image/png"]) {
+            if png_sniff(&bytes) {
+                return Some(bytes);
+            }
+        }
+        // xclip for X11 sessions (no-op when it is not installed).
+        if let Some(bytes) = command_bytes(
+            "xclip",
+            &["-selection", "clipboard", "-t", "image/png", "-o"],
+        ) {
+            if png_sniff(&bytes) {
+                return Some(bytes);
+            }
         }
     }
-    // xclip for X11 sessions (no-op when it is not installed).
-    if let Some(bytes) = command_bytes(
-        "xclip",
-        &["-selection", "clipboard", "-t", "image/png", "-o"],
-    ) {
-        if png_sniff(&bytes) {
-            return Some(bytes);
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(bytes) = windows_fallback_image_bytes() {
+            if png_sniff(&bytes) {
+                return Some(bytes);
+            }
         }
     }
     None
+}
+
+#[cfg(target_os = "windows")]
+fn windows_fallback_image_bytes() -> Option<Vec<u8>> {
+    let script = r#"
+Add-Type -AssemblyName System.Windows.Forms;
+$img = [System.Windows.Forms.Clipboard]::GetImage();
+if ($img -ne $null) {
+    $ms = New-Object System.IO.MemoryStream;
+    $img.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png);
+    [System.Convert]::ToBase64String($ms.ToArray())
+}
+"#;
+    let out = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .output()
+        .ok()?;
+    if !out.status.success() || out.stdout.is_empty() {
+        return None;
+    }
+    let b64 = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if b64.is_empty() {
+        return None;
+    }
+    base64::engine::general_purpose::STANDARD.decode(b64.as_bytes()).ok()
 }
 
 fn clipboard_image_from_png(png: Vec<u8>) -> Result<ClipboardImage, String> {

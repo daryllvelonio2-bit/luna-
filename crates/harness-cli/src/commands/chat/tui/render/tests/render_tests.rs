@@ -879,6 +879,10 @@ fn ensure_settled_transcript_caches_and_appends_incrementally() {
         },
         background_sessions: std::collections::HashMap::new(),
         memory_project_filter: None,
+        compacted_added: 0,
+        compacted_deleted: 0,
+        session_max_added: 0,
+        session_max_deleted: 0,
         diff_anim_from_added: 0,
         diff_anim_from_deleted: 0,
         diff_anim_target_added: 0,
@@ -1640,4 +1644,54 @@ fn a_removed_counter_side_stays_hidden() {
     let (added, deleted) = st.animated_diff_labels();
     assert_eq!(added.as_deref(), Some("5"));
     assert_eq!(deleted, None, "zero deletions must not render -0");
+}
+
+#[test]
+fn diff_counter_never_resets_down_to_low_value() {
+    let mut st = test_dummy_tui_state();
+    let in_flight = vec![TurnProcessItem {
+        tool_name: "patch".to_string(),
+        call_formatted: "patch(...)".to_string(),
+        result_formatted: "✔".to_string(),
+        diff_lines: vec![
+            "  + line a".to_string(),
+            "  + line b".to_string(),
+            "  - line c".to_string(),
+        ],
+        output: String::new(),
+        output_dropped: 0,
+        arguments: None,
+        duration_secs: None,
+        is_error: false,
+    }];
+
+    st.update_diff_counter(Some(&in_flight));
+    assert_eq!(st.diff_anim_target_added, 2);
+    assert_eq!(st.diff_anim_target_deleted, 1);
+
+    // Simulate in-flight tool being taken (empty in-flight during await before turns.extend)
+    st.update_diff_counter(None);
+    assert_eq!(st.diff_anim_target_added, 2, "counter must not reset to 0 during transition");
+    assert_eq!(st.diff_anim_target_deleted, 1, "counter must not reset to 0 during transition");
+
+    // Simulate turn appended
+    st.turns.push(TurnRecord {
+        user_query: "query".to_string(),
+        reasoning: None,
+        tools: Vec::new(),
+        tool_items: in_flight,
+        duration: std::time::Duration::ZERO,
+        reply: "done".to_string(),
+    });
+    st.update_diff_counter(None);
+    assert_eq!(st.diff_anim_target_added, 2);
+    assert_eq!(st.diff_anim_target_deleted, 1);
+
+    // Simulate compaction where turns are cleared but preserved in compacted counters
+    st.turns.clear();
+    st.compacted_added = 2;
+    st.compacted_deleted = 1;
+    st.update_diff_counter(None);
+    assert_eq!(st.diff_anim_target_added, 2, "compacted counters preserve diff");
+    assert_eq!(st.diff_anim_target_deleted, 1, "compacted counters preserve diff");
 }

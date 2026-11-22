@@ -26,7 +26,10 @@ pub async fn handle_modal_key(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     key: KeyEvent,
 ) -> Result<Flow, HarnessError> {
-    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('v') {
+    let is_paste = (key.modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(key.code, KeyCode::Char('v') | KeyCode::Char('V')))
+        || (key.modifiers.contains(KeyModifiers::SHIFT) && key.code == KeyCode::Insert);
+    if is_paste {
         if let Some(text) = crate::commands::clipboard_image::read_clipboard_text() {
             handle_paste(env, st, &text);
         }

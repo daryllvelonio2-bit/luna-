@@ -155,6 +155,10 @@ pub(crate) fn park_current_session(env: &Env<'_>, st: &mut TuiState) {
         pending_job_turn: st.pending_job_turn.take(),
         memory_project_filter: st.memory_project_filter.take(),
         feature_toggles: env.feature_toggles.snapshot(),
+        compacted_added: st.compacted_added,
+        compacted_deleted: st.compacted_deleted,
+        session_max_added: st.session_max_added,
+        session_max_deleted: st.session_max_deleted,
     };
     st.background_sessions.insert(old_id, slot);
 }
@@ -228,6 +232,15 @@ pub(crate) fn restore_background_session(
     st.pending_images = slot.pending_images;
     st.pending_job_turn = slot.pending_job_turn;
     st.memory_project_filter = slot.memory_project_filter;
+    st.compacted_added = slot.compacted_added;
+    st.compacted_deleted = slot.compacted_deleted;
+    st.session_max_added = slot.session_max_added;
+    st.session_max_deleted = slot.session_max_deleted;
+    st.diff_anim_target_added = slot.session_max_added;
+    st.diff_anim_target_deleted = slot.session_max_deleted;
+    st.diff_anim_from_added = slot.session_max_added;
+    st.diff_anim_from_deleted = slot.session_max_deleted;
+    st.diff_anim_start = None;
     env.feature_toggles.restore(slot.feature_toggles);
 
     env.todo_scope.set_session(env.session_id.as_str());

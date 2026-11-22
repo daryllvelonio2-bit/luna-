@@ -711,6 +711,14 @@ pub fn sync_turn_meta_len(env: &Env<'_>, st: &mut TuiState) {
 
 pub async fn apply_compaction_completed(env: &Env<'_>, st: &mut TuiState) {
     let result = env.ui.take_compaction_result();
+    let pre_counts = st
+        .turns
+        .iter()
+        .map(crate::commands::chat::render::turn_diff_counts)
+        .fold((0usize, 0usize), |(acc_a, acc_d), (a, d)| {
+            (acc_a + a, acc_d + d)
+        });
+
     if let Ok(replayed) = env
         .store
         .replay_transcript(
@@ -719,7 +727,16 @@ pub async fn apply_compaction_completed(env: &Env<'_>, st: &mut TuiState) {
         )
         .await
     {
-        st.turns = parse_turns_from_history(&replayed.history);
+        let new_turns = parse_turns_from_history(&replayed.history);
+        let post_counts = new_turns
+            .iter()
+            .map(crate::commands::chat::render::turn_diff_counts)
+            .fold((0usize, 0usize), |(acc_a, acc_d), (a, d)| {
+                (acc_a + a, acc_d + d)
+            });
+        st.compacted_added += pre_counts.0.saturating_sub(post_counts.0);
+        st.compacted_deleted += pre_counts.1.saturating_sub(post_counts.1);
+        st.turns = new_turns;
     }
     if let Some((notice, dur)) = result {
         if let Some(summary) = notice.summary.clone() {

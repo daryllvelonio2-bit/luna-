@@ -37,7 +37,7 @@ import {
   Pin,
   ArrowUpCircle,
 } from 'lucide-react';
-import { MarkdownContent } from './MarkdownContent';
+import { MarkdownContent, copyToClipboard } from './MarkdownContent';
 import { Composer } from './Composer';
 import { PluginWorkspace } from './PluginWorkspace';
 import type { ActiveDrawerTab } from './SessionDrawers';
@@ -699,10 +699,10 @@ export const ChatView: React.FC<ChatViewProps> = ({
     (turn: Extract<RenderTurn, { kind: 'assistant' }>) => {
       const text = turn.finalContents.join('\n\n').trim();
       if (!text) return;
-      navigator.clipboard.writeText(text).then(() => {
+      copyToClipboard(text).then(() => {
         setCopiedTurnKey(turn.key);
         setTimeout(() => setCopiedTurnKey(null), 1800);
-      });
+      }).catch(() => {});
     },
     []
   );

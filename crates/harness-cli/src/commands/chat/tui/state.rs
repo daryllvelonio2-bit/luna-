@@ -964,6 +964,10 @@ pub struct BackgroundSession {
     pub pending_job_turn: Option<(String, std::time::Instant)>,
     pub memory_project_filter: Option<String>,
     pub feature_toggles: (bool, bool, bool, bool),
+    pub compacted_added: usize,
+    pub compacted_deleted: usize,
+    pub session_max_added: usize,
+    pub session_max_deleted: usize,
 }
 
 /// A transient notice in the TUI transcript (compaction reports, queue notices, goal updates).
@@ -1493,6 +1497,13 @@ pub struct TuiState {
     pub background_sessions: HashMap<String, BackgroundSession>,
     /// Active project filter for memories in this session (`None` = all memories passed).
     pub memory_project_filter: Option<String>,
+    /// Preserved code changes from compacted turns
+    pub compacted_added: usize,
+    pub compacted_deleted: usize,
+    /// High watermark of total additions in current session to prevent resets
+    pub session_max_added: usize,
+    /// High watermark of total deletions in current session to prevent resets
+    pub session_max_deleted: usize,
     /// Animation state for additions/deletions counter in composer hint row
     pub diff_anim_from_added: usize,
     pub diff_anim_from_deleted: usize,
@@ -1507,23 +1518,20 @@ const DIFF_ROLL_MS: f64 = 640.0;
 impl TuiState {
     /// Update the target code changes, rolling the counter forward when a count grows.
     ///
-    /// Only an increase starts a roll. A decrease (session switch, reset, compaction) snaps
-    /// straight to the new value: walking backwards through numbers the session never produced
-    /// reads as the counter inventing changes.
+    /// The session watermark ensures additions and deletions never reset or drop back
+    /// down during turn transitions, in-flight handoffs, or transcript compactions.
     pub fn update_diff_counter(
         &mut self,
         in_flight: Option<&[crate::commands::chat::render::TurnProcessItem]>,
     ) {
-        let (added, deleted) = self.total_code_changes(in_flight);
+        let (raw_added, raw_deleted) = self.total_code_changes(in_flight);
+        let added = raw_added.max(self.session_max_added);
+        let deleted = raw_deleted.max(self.session_max_deleted);
+        self.session_max_added = added;
+        self.session_max_deleted = deleted;
+
         let grew = added > self.diff_anim_target_added || deleted > self.diff_anim_target_deleted;
         if !grew {
-            if added != self.diff_anim_target_added || deleted != self.diff_anim_target_deleted {
-                self.diff_anim_from_added = added;
-                self.diff_anim_from_deleted = deleted;
-                self.diff_anim_target_added = added;
-                self.diff_anim_target_deleted = deleted;
-                self.diff_anim_start = None;
-            }
             return;
         }
 
@@ -1607,8 +1615,8 @@ impl TuiState {
     ) -> (usize, usize) {
         use crate::commands::chat::render::{item_diff_counts, turn_diff_counts};
 
-        let mut total_a = 0;
-        let mut total_d = 0;
+        let mut total_a = self.compacted_added;
+        let mut total_d = self.compacted_deleted;
 
         // 1. Current active session's completed turns
         for turn in &self.turns {
@@ -1628,6 +1636,8 @@ impl TuiState {
 
         // 3. Parked background sessions (all other open tabs)
         for bg in self.background_sessions.values() {
+            total_a += bg.compacted_added;
+            total_d += bg.compacted_deleted;
             for turn in &bg.turns {
                 let (a, d) = turn_diff_counts(turn);
                 total_a += a;

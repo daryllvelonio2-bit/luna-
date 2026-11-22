@@ -22,8 +22,23 @@ pub async fn handle_key(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     key: KeyEvent,
 ) -> Result<Flow, HarnessError> {
+    // Copy selected text to clipboard on Ctrl+C or Ctrl+Insert when a selection exists
+    if (key.modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C')))
+        || (key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Insert)
+    {
+        if let Some(selection) = st.selection {
+            if selection.is_range() || st.click_count >= 2 {
+                super::mouse::copy_selection_to_clipboard(env, st);
+                return Ok(Flow::Continue);
+            }
+        }
+    }
+
     // Ctrl+C always works (interrupt active turn, or double-tap to exit).
-    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+    if key.modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'))
+    {
         if st.active_turn.is_some() {
             interrupt_turn(env, st).await;
             st.ctrl_c_armed = None;
@@ -98,8 +113,11 @@ pub async fn handle_key(
         return Ok(Flow::Continue);
     }
 
-    // Ctrl+V pastes clipboard image (if present) or clipboard text.
-    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('v') {
+    // Ctrl+V, Ctrl+Shift+V, or Shift+Insert pastes clipboard image (if present) or clipboard text.
+    let is_paste = (key.modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(key.code, KeyCode::Char('v') | KeyCode::Char('V')))
+        || (key.modifiers.contains(KeyModifiers::SHIFT) && key.code == KeyCode::Insert);
+    if is_paste {
         st.voice_pending_autosend_at = None;
         handle_ctrl_v(env, st);
         return Ok(Flow::Continue);
