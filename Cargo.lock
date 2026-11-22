@@ -1517,7 +1517,7 @@ dependencies = [
 
 [[package]]
 name = "harness-app"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1541,7 +1541,7 @@ dependencies = [
 
 [[package]]
 name = "harness-cli"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "arboard",
  "async-trait",
@@ -1597,7 +1597,7 @@ dependencies = [
 
 [[package]]
 name = "harness-core"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1623,7 +1623,7 @@ dependencies = [
 
 [[package]]
 name = "harness-desktop"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "rand 0.8.8",
  "serde",
@@ -1634,7 +1634,7 @@ dependencies = [
 
 [[package]]
 name = "harness-desktop-linux"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "harness-desktop",
  "serde",
@@ -1646,7 +1646,7 @@ dependencies = [
 
 [[package]]
 name = "harness-mcp"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -1663,7 +1663,7 @@ dependencies = [
 
 [[package]]
 name = "harness-memory"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1685,7 +1685,7 @@ dependencies = [
 
 [[package]]
 name = "harness-note-graph"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "chrono",
  "harness-core",
@@ -1697,7 +1697,7 @@ dependencies = [
 
 [[package]]
 name = "harness-notes"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1718,7 +1718,7 @@ dependencies = [
 
 [[package]]
 name = "harness-onboarding"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "crossterm",
  "harness-core",
@@ -1731,7 +1731,7 @@ dependencies = [
 
 [[package]]
 name = "harness-plugins"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1759,7 +1759,7 @@ dependencies = [
 
 [[package]]
 name = "harness-providers"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1785,7 +1785,7 @@ dependencies = [
 
 [[package]]
 name = "harness-scheduler"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1804,7 +1804,7 @@ dependencies = [
 
 [[package]]
 name = "harness-telemetry"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "chrono",
  "harness-core",
@@ -1818,7 +1818,7 @@ dependencies = [
 
 [[package]]
 name = "harness-voice"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "async-trait",
  "cpal",
@@ -1836,7 +1836,7 @@ dependencies = [
 
 [[package]]
 name = "harness-web"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "axum",
  "chrono",

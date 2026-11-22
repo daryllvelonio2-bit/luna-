@@ -135,6 +135,7 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
     let update_config = env.config.clone();
     let (update_tx, mut update_rx) =
         tokio::sync::mpsc::unbounded_channel::<crate::commands::update::UpdateStatus>();
+    let mut update_rx_open = true;
     tokio::spawn(async move {
         if let Some(status) = crate::commands::update::check_at_launch(&update_config).await {
             let _ = update_tx.send(status);
@@ -285,6 +286,22 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
                 }
             }
 
+            turn_res = async {
+                if let Some(ref mut handle) = st.active_turn {
+                    handle.await
+                } else {
+                    std::future::pending().await
+                }
+            } => {
+                handle_turn_end(&env, &mut st, turn_res).await;
+            }
+
+            bg_done = poll_any_background_turn(&mut st.background_sessions), if has_bg_active => {
+                if let Some((bg_id, turn_res)) = bg_done {
+                    handle_background_turn_end(&env, &mut st, &bg_id, turn_res).await;
+                }
+            }
+
             maybe_picker = st.picker_rx.recv() => {
                 if let Some(load) = maybe_picker {
                     actions::apply_picker_load(&mut st, load);
@@ -299,7 +316,8 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
                 }
             }
 
-            maybe_update = update_rx.recv() => {
+            maybe_update = update_rx.recv(), if update_rx_open => {
+                update_rx_open = false;
                 if let Some(status) = maybe_update {
                     st.update_notice = Some(status.latest_label());
                     needs_redraw = true;
@@ -600,22 +618,6 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
                     } else {
                         st.pending_job_turn = Some((env.session_id.clone(), std::time::Instant::now()));
                     }
-                }
-            }
-
-            turn_res = async {
-                if let Some(ref mut handle) = st.active_turn {
-                    handle.await
-                } else {
-                    std::future::pending().await
-                }
-            } => {
-                handle_turn_end(&env, &mut st, turn_res).await;
-            }
-
-            bg_done = poll_any_background_turn(&mut st.background_sessions), if has_bg_active => {
-                if let Some((bg_id, turn_res)) = bg_done {
-                    handle_background_turn_end(&env, &mut st, &bg_id, turn_res).await;
                 }
             }
         }
