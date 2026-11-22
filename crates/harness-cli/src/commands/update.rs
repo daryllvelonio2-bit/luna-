@@ -1178,7 +1178,11 @@ pub async fn run_update_headless(
 
 /// Run update check and install from the command line (`luna update`).
 pub async fn run_update_cli(config: &Config, force: bool) -> Result<(), String> {
-    println!("{} Checking for updates from {}...", "•".cyan(), config.update.repo);
+    println!(
+        "{} Checking for updates from {}...",
+        "•".cyan(),
+        config.update.repo
+    );
     let status = if force {
         let build = fetch_latest(&config.update)
             .await
@@ -1376,7 +1380,10 @@ async fn fetch_latest(settings: &config::UpdateSettings) -> Option<LatestBuild> 
         .ok()?;
 
     // 1. Try public GitHub Releases API first
-    let rel_url = format!("https://api.github.com/repos/{}/releases/latest", settings.repo);
+    let rel_url = format!(
+        "https://api.github.com/repos/{}/releases/latest",
+        settings.repo
+    );
     let mut rel_req = client
         .get(&rel_url)
         .header("Accept", GITHUB_ACCEPT)
@@ -1388,7 +1395,8 @@ async fn fetch_latest(settings: &config::UpdateSettings) -> Option<LatestBuild> 
         if resp.status().is_success() {
             if let Ok(body) = resp.json::<serde_json::Value>().await {
                 if let Some(tag) = body.get("tag_name").and_then(|v| v.as_str()) {
-                    let commit_ts = parse_rfc3339_secs(body.get("published_at").and_then(|v| v.as_str()));
+                    let commit_ts =
+                        parse_rfc3339_secs(body.get("published_at").and_then(|v| v.as_str()));
                     let sha = body
                         .get("target_commitish")
                         .and_then(|v| v.as_str())

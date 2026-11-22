@@ -694,10 +694,7 @@ impl CredentialManager {
             label_or_id.to_string(),
         );
         if raw != canonical {
-            priorities.insert(
-                (session_id.to_string(), raw),
-                label_or_id.to_string(),
-            );
+            priorities.insert((session_id.to_string(), raw), label_or_id.to_string());
         }
     }
 
@@ -730,9 +727,7 @@ impl CredentialManager {
         let r1 = priorities
             .remove(&(session_id.to_string(), canonical))
             .is_some();
-        let r2 = priorities
-            .remove(&(session_id.to_string(), raw))
-            .is_some();
+        let r2 = priorities.remove(&(session_id.to_string(), raw)).is_some();
         r1 || r2
     }
 

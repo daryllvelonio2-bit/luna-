@@ -1698,6 +1698,12 @@ fn diff_counter_never_resets_down_to_low_value() {
     st.compacted_added = 2;
     st.compacted_deleted = 1;
     st.update_diff_counter(None);
-    assert_eq!(st.diff_anim_target_added, 2, "compacted counters preserve diff");
-    assert_eq!(st.diff_anim_target_deleted, 1, "compacted counters preserve diff");
+    assert_eq!(
+        st.diff_anim_target_added, 2,
+        "compacted counters preserve diff"
+    );
+    assert_eq!(
+        st.diff_anim_target_deleted, 1,
+        "compacted counters preserve diff"
+    );
 }

@@ -85,7 +85,12 @@ pub fn write_clipboard_text(text: &str) -> Result<(), String> {
 #[cfg(target_os = "windows")]
 fn write_windows_powershell_clipboard(text: &str) -> bool {
     let mut child = match std::process::Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", "$input | Set-Clipboard"])
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "$input | Set-Clipboard",
+        ])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -350,7 +355,9 @@ if ($img -ne $null) {
     if b64.is_empty() {
         return None;
     }
-    base64::engine::general_purpose::STANDARD.decode(b64.as_bytes()).ok()
+    base64::engine::general_purpose::STANDARD
+        .decode(b64.as_bytes())
+        .ok()
 }
 
 fn clipboard_image_from_png(png: Vec<u8>) -> Result<ClipboardImage, String> {

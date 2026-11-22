@@ -2079,19 +2079,28 @@ pub async fn apply_update(
     if let Ok(tok) = std::env::var("GITHUB_TOKEN").or_else(|_| std::env::var("GH_TOKEN")) {
         req = req.bearer_auth(tok);
     }
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to fetch release info: {e}")))?;
-    let body: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to parse release response: {e}")))?;
+    let resp = req.send().await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to fetch release info: {e}"),
+        )
+    })?;
+    let body: serde_json::Value = resp.json().await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to parse release response: {e}"),
+        )
+    })?;
 
     let assets = body
         .get("assets")
         .and_then(|a| a.as_array())
-        .ok_or_else(|| (StatusCode::BAD_GATEWAY, "No release assets found".to_string()))?;
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_GATEWAY,
+                "No release assets found".to_string(),
+            )
+        })?;
 
     let target_names: &[&str] = if cfg!(target_os = "windows") {
         &["luna-windows-x86_64.zip", "luna-windows-x86_64.exe"]
@@ -2127,17 +2136,31 @@ pub async fn apply_update(
         .header("User-Agent", "luna-web/1.0")
         .send()
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Download failed: {e}")))?
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Download failed: {e}"),
+            )
+        })?
         .bytes()
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Read bytes failed: {e}")))?;
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Read bytes failed: {e}"),
+            )
+        })?;
 
     let binary = if bytes.starts_with(b"\x7fELF") || bytes.starts_with(b"MZ") {
         bytes.to_vec()
     } else {
         let cursor = std::io::Cursor::new(&bytes);
-        let mut archive = zip::ZipArchive::new(cursor)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Invalid zip archive: {e}")))?;
+        let mut archive = zip::ZipArchive::new(cursor).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Invalid zip archive: {e}"),
+            )
+        })?;
         let mut extracted = None;
         for i in 0..archive.len() {
             let mut file = archive
@@ -2157,11 +2180,20 @@ pub async fn apply_update(
                 break;
             }
         }
-        extracted.ok_or_else(|| (StatusCode::BAD_GATEWAY, "No luna binary inside zip".to_string()))?
+        extracted.ok_or_else(|| {
+            (
+                StatusCode::BAD_GATEWAY,
+                "No luna binary inside zip".to_string(),
+            )
+        })?
     };
 
-    let exe = std::env::current_exe()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Cannot find current exe: {e}")))?;
+    let exe = std::env::current_exe().map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Cannot find current exe: {e}"),
+        )
+    })?;
     let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
     let name = exe
         .file_name()
@@ -2169,8 +2201,12 @@ pub async fn apply_update(
         .unwrap_or_else(|| "luna".to_string());
     let staging = exe.with_file_name(format!("{name}.new"));
 
-    std::fs::write(&staging, &binary)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to write new binary: {e}")))?;
+    std::fs::write(&staging, &binary).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to write new binary: {e}"),
+        )
+    })?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -2179,13 +2215,22 @@ pub async fn apply_update(
     let old = exe.with_file_name(format!("{name}.old"));
     let _ = std::fs::remove_file(&old);
     let _ = std::fs::rename(&exe, &old);
-    std::fs::rename(&staging, &exe)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to replace binary: {e}")))?;
+    std::fs::rename(&staging, &exe).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to replace binary: {e}"),
+        )
+    })?;
     let _ = std::fs::remove_file(&old);
 
-    let tag = body.get("tag_name").and_then(|v| v.as_str()).unwrap_or("latest");
+    let tag = body
+        .get("tag_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("latest");
     Ok(Json(UpdateApplyResponse {
         success: true,
-        message: format!("Successfully installed {tag}! Please restart luna (`luna web --stop && luna web`)."),
+        message: format!(
+            "Successfully installed {tag}! Please restart luna (`luna web --stop && luna web`)."
+        ),
     }))
 }
