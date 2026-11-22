@@ -132,6 +132,15 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
         });
     }
 
+    let update_config = env.config.clone();
+    let (update_tx, mut update_rx) =
+        tokio::sync::mpsc::unbounded_channel::<crate::commands::update::UpdateStatus>();
+    tokio::spawn(async move {
+        if let Some(status) = crate::commands::update::check_at_launch(&update_config).await {
+            let _ = update_tx.send(status);
+        }
+    });
+
     let tui_notifier = env.ui.tui_notifier();
     let mut events = EventStream::new();
 
@@ -286,6 +295,13 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
             maybe_voice_evt = st.voice_rx.recv() => {
                 if let Some(evt) = maybe_voice_evt {
                     actions::handle_voice_event(&env, &mut st, evt).await;
+                    needs_redraw = true;
+                }
+            }
+
+            maybe_update = update_rx.recv() => {
+                if let Some(status) = maybe_update {
+                    st.update_notice = Some(status.latest_label());
                     needs_redraw = true;
                 }
             }

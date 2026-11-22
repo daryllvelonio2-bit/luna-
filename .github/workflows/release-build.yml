@@ -121,9 +121,9 @@ jobs:
         run: |
           TAG="${{ github.event.inputs.tag_name || github.ref_name }}"
           if [[ "$TAG" != v* ]]; then
-            TAG="v0.1.10"
+            TAG="v0.1.11"
           fi
           gh release create "$TAG" release-assets/* \
             --title "$TAG" \
-            --notes "Luna $TAG release with skill pinning (/skills pin) and UI improvements." || \
+            --notes "Luna $TAG release with update notifications & self-update support (/update command & Web UI notice), and skill pinning." || \
           gh release upload "$TAG" release-assets/* --clobber

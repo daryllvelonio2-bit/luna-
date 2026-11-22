@@ -35,6 +35,7 @@ import {
   AppWindow,
   Laptop,
   Pin,
+  ArrowUpCircle,
 } from 'lucide-react';
 import { MarkdownContent } from './MarkdownContent';
 import { Composer } from './Composer';
@@ -103,6 +104,8 @@ interface ChatViewProps {
   ) => Promise<string>;
   pinnedSkills?: string[];
   onOpenSkillPin?: () => void;
+  updateNotice?: string | null;
+  onTriggerUpdate?: () => void;
 }
 
 interface PairedToolStep {
@@ -592,6 +595,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
   onAskApprovalQuestion,
   pinnedSkills,
   onOpenSkillPin,
+  updateNotice,
+  onTriggerUpdate,
 }) => {
   const [expandedActivity, setExpandedActivity] = useState<Record<string, boolean>>({});
   const [collapsedLive, setCollapsedLive] = useState<Record<string, boolean>>({});
@@ -805,6 +810,25 @@ export const ChatView: React.FC<ChatViewProps> = ({
         </div>
 
         <div className="chat-header-right">
+          {updateNotice && onTriggerUpdate && (
+            <button
+              type="button"
+              className="status-chip"
+              onClick={onTriggerUpdate}
+              title={`Update available: ${updateNotice}. Click to install now.`}
+              style={{
+                cursor: 'pointer',
+                gap: '5px',
+                background: 'rgba(235, 100, 75, 0.15)',
+                color: 'var(--accent-coral, #ff6b6b)',
+                borderColor: 'rgba(235, 100, 75, 0.3)',
+              }}
+            >
+              <ArrowUpCircle size={12} />
+              <span>Update {updateNotice}</span>
+            </button>
+          )}
+
           {pinnedSkills && pinnedSkills.length > 0 && (
             <button
               type="button"
@@ -1140,6 +1164,33 @@ export const ChatView: React.FC<ChatViewProps> = ({
                         {s}
                       </button>
                     ))}
+                  </div>
+                )}
+
+                {updateNotice && onTriggerUpdate && (
+                  <div style={{ marginBottom: '14px', display: 'flex', justifyContent: 'center' }}>
+                    <button
+                      type="button"
+                      className="picker-action-chip"
+                      onClick={onTriggerUpdate}
+                      title={`A newer version of Luna (${updateNotice}) is available.`}
+                      style={{
+                        padding: '6px 14px',
+                        borderRadius: '20px',
+                        background: 'rgba(235, 100, 75, 0.12)',
+                        color: 'var(--accent-coral, #ff6b6b)',
+                        border: '1px solid rgba(235, 100, 75, 0.3)',
+                        fontSize: '0.82rem',
+                        fontWeight: 600,
+                        cursor: 'pointer',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '6px',
+                      }}
+                    >
+                      <ArrowUpCircle size={14} />
+                      <span>Update to {updateNotice} available — Install now</span>
+                    </button>
                   </div>
                 )}
 

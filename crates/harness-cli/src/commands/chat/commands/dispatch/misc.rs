@@ -377,4 +377,31 @@ impl<'a> SlashContext<'a> {
         }
         Ok(SlashOutcome::Continue)
     }
+
+    pub(super) async fn cmd_update(&mut self) -> Result<SlashOutcome, HarnessError> {
+        self.ui
+            .emit_above(&format!("{} Checking for updates...", "•".cyan()));
+        match crate::commands::update::run_update_headless(self.config, false).await {
+            Ok(Some((from, to))) => {
+                self.ui.emit_above(&format!(
+                    "{} Successfully updated from {} to {}! Restart luna to apply.",
+                    "✔".green().bold(),
+                    from,
+                    to
+                ));
+            }
+            Ok(None) => {
+                self.ui.emit_above(&format!(
+                    "{} Luna is already up to date ({}).",
+                    "✔".green().bold(),
+                    crate::commands::update::CURRENT_DISPLAY
+                ));
+            }
+            Err(e) => {
+                self.ui
+                    .emit_above(&format!("{} Update failed: {}", "✖".red().bold(), e));
+            }
+        }
+        Ok(SlashOutcome::Continue)
+    }
 }

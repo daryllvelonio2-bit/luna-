@@ -353,6 +353,12 @@ enum Commands {
     },
     /// Launch the browser-based web GUI and REST/WebSocket API server
     Web(commands::web::WebCommand),
+    /// Check for and install updates to Luna
+    Update {
+        /// Force re-download even if already up to date
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 /// Everything the profile selector and clap resolve before config-dependent work begins.
@@ -880,6 +886,12 @@ async fn dispatch_command(
         }
         Some(Commands::Web(cmd)) => {
             commands::web::handle_web_command(cmd, config).await?;
+        }
+        Some(Commands::Update { force }) => {
+            if let Err(e) = commands::update::run_update_cli(&config, force).await {
+                eprintln!("{}", e);
+                std::process::exit(1);
+            }
         }
         None => {
             let selection = session_selection(cli.session, cli.fork, cli.continue_session);

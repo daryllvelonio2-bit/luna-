@@ -206,6 +206,7 @@ impl<'a> SlashContext<'a> {
             "/worker" => self.cmd_worker(arg).await,
             "/voice" => self.cmd_voice(arg).await,
             "/settings" => self.cmd_settings(arg).await,
+            "/update" => self.cmd_update().await,
             "exit" | "quit" | "/exit" | "/quit" => self.cmd_exit().await,
             _ => self.cmd_fallback(cmd, name, arg).await,
         }

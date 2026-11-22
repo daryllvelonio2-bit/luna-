@@ -1,5 +1,7 @@
 //! composer
 
+use colored::Colorize;
+
 use super::*;
 
 pub async fn submit_composer(
@@ -343,6 +345,34 @@ pub async fn run_slash_command(
         }
         "/voice" => {
             handle_voice_slash_command(env, st, arg).await?;
+            return Ok(Flow::Continue);
+        }
+        "/update" => {
+            let config_clone = env.config.clone();
+            env.ui
+                .emit_above(&format!("{} Checking for updates...", "•".cyan()));
+            match crate::commands::update::run_update_headless(&config_clone, false).await {
+                Ok(Some((from, to))) => {
+                    env.ui.emit_above(&format!(
+                        "{} Successfully updated from {} to {}! Restart luna to apply.",
+                        "✔".green().bold(),
+                        from,
+                        to
+                    ));
+                    st.update_notice = None;
+                }
+                Ok(None) => {
+                    env.ui.emit_above(&format!(
+                        "{} Luna is already up to date ({}).",
+                        "✔".green().bold(),
+                        crate::commands::update::CURRENT_DISPLAY
+                    ));
+                }
+                Err(e) => {
+                    env.ui
+                        .emit_above(&format!("{} Update failed: {}", "✖".red().bold(), e));
+                }
+            }
             return Ok(Flow::Continue);
         }
         "/settings" if arg.is_none() => {

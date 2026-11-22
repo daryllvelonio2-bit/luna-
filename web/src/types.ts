@@ -543,6 +543,18 @@ export interface PinnedSkillsResponse {
   items: PinnedSkillItem[];
 }
 
+export interface UpdateCheckResponse {
+  current_version: string;
+  latest_version: string;
+  has_update: boolean;
+  release_url: string;
+}
+
+export interface UpdateApplyResponse {
+  success: boolean;
+  message: string;
+}
+
 export type AppEvent =
   | { kind: 'turn_started'; session_id: string; query: string }
   | {

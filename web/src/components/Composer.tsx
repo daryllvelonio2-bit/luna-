@@ -28,6 +28,7 @@ export interface SlashItem {
 
 const BUILTIN_SLASH_COMMANDS: SlashItem[] = [
   { cmd: '/model', desc: 'Pick provider, account, and model', category: 'command' },
+  { cmd: '/update', desc: 'Check for and install updates to Luna', category: 'command' },
   { cmd: '/skills pin', desc: 'Pin skills to this session or globally', category: 'command' },
   { cmd: '/skills', desc: 'List installed skills & MCP servers', category: 'command' },
   { cmd: '/pin', desc: 'Pin skills to this session or globally', category: 'command' },

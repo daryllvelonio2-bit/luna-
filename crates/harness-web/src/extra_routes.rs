@@ -105,6 +105,8 @@ pub fn extra_router() -> Router<Arc<WebState>> {
         .route("/api/skills/pinned", get(get_pinned_skills))
         .route("/api/skills/pin", post(pin_skills))
         .route("/api/skills/unpin", post(unpin_skill))
+        // Updates
+        .route("/api/update", get(get_update_status).post(apply_update))
 }
 
 fn persist_config(cfg: &harness_core::Config) -> Result<(), (StatusCode, String)> {
@@ -1964,4 +1966,209 @@ async fn refresh_live_pinned_skills(state: &Arc<WebState>, target_sid: Option<&s
             ag.set_pinned_skill_instructions(resolved);
         }
     }
+}
+
+#[derive(Serialize)]
+pub struct UpdateCheckResponse {
+    pub current_version: String,
+    pub latest_version: String,
+    pub has_update: bool,
+    pub release_url: String,
+}
+
+pub async fn get_update_status(
+    State(state): State<Arc<WebState>>,
+) -> Result<Json<UpdateCheckResponse>, (StatusCode, String)> {
+    let cfg = state.config.read().await;
+    let repo = &cfg.update.repo;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(4))
+        .build()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let release_url = format!("https://api.github.com/repos/{repo}/releases/latest");
+    let mut req = client
+        .get(&release_url)
+        .header("Accept", "application/vnd.github+json")
+        .header("User-Agent", "luna-web/1.0");
+    if let Ok(tok) = std::env::var("GITHUB_TOKEN").or_else(|_| std::env::var("GH_TOKEN")) {
+        req = req.bearer_auth(tok);
+    }
+
+    let current = env!("CARGO_PKG_VERSION").to_string();
+    let res = req.send().await;
+    if let Ok(resp) = res {
+        if resp.status().is_success() {
+            if let Ok(body) = resp.json::<serde_json::Value>().await {
+                if let Some(tag) = body.get("tag_name").and_then(|v| v.as_str()) {
+                    let latest_ver = tag.strip_prefix('v').unwrap_or(tag).to_string();
+                    let has_update = is_version_newer(&current, &latest_ver);
+                    let html_url = body
+                        .get("html_url")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    return Ok(Json(UpdateCheckResponse {
+                        current_version: current,
+                        latest_version: latest_ver,
+                        has_update,
+                        release_url: html_url,
+                    }));
+                }
+            }
+        }
+    }
+
+    Ok(Json(UpdateCheckResponse {
+        current_version: current.clone(),
+        latest_version: current,
+        has_update: false,
+        release_url: format!("https://github.com/{repo}/releases"),
+    }))
+}
+
+fn is_version_newer(current: &str, candidate: &str) -> bool {
+    let parse = |s: &str| -> Vec<u64> {
+        s.split('.')
+            .filter_map(|p| p.split('-').next().and_then(|n| n.parse::<u64>().ok()))
+            .collect()
+    };
+    let c = parse(current);
+    let cand = parse(candidate);
+    cand > c
+}
+
+#[derive(Serialize)]
+pub struct UpdateApplyResponse {
+    pub success: bool,
+    pub message: String,
+}
+
+pub async fn apply_update(
+    State(state): State<Arc<WebState>>,
+) -> Result<Json<UpdateApplyResponse>, (StatusCode, String)> {
+    let cfg = state.config.read().await;
+    let repo = &cfg.update.repo;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let release_url = format!("https://api.github.com/repos/{repo}/releases/latest");
+    let mut req = client
+        .get(&release_url)
+        .header("Accept", "application/vnd.github+json")
+        .header("User-Agent", "luna-web/1.0");
+    if let Ok(tok) = std::env::var("GITHUB_TOKEN").or_else(|_| std::env::var("GH_TOKEN")) {
+        req = req.bearer_auth(tok);
+    }
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to fetch release info: {e}")))?;
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to parse release response: {e}")))?;
+
+    let assets = body
+        .get("assets")
+        .and_then(|a| a.as_array())
+        .ok_or_else(|| (StatusCode::BAD_GATEWAY, "No release assets found".to_string()))?;
+
+    let target_names: &[&str] = if cfg!(target_os = "windows") {
+        &["luna-windows-x86_64.zip", "luna-windows-x86_64.exe"]
+    } else if cfg!(target_os = "macos") {
+        &["luna-macos-x86_64", "luna-macos-aarch64"]
+    } else {
+        &["luna-linux-x86_64", "luna-linux-x86_64.tar.gz"]
+    };
+
+    let mut download_url = None;
+    for target in target_names {
+        if let Some(asset) = assets.iter().find(|a| {
+            a.get("name")
+                .and_then(|n| n.as_str())
+                .is_some_and(|name| name == *target)
+        }) {
+            if let Some(url) = asset.get("browser_download_url").and_then(|u| u.as_str()) {
+                download_url = Some(url.to_string());
+                break;
+            }
+        }
+    }
+
+    let download_url = download_url.ok_or_else(|| {
+        (
+            StatusCode::BAD_GATEWAY,
+            "Could not find matching binary in release assets".to_string(),
+        )
+    })?;
+
+    let bytes = client
+        .get(&download_url)
+        .header("User-Agent", "luna-web/1.0")
+        .send()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Download failed: {e}")))?
+        .bytes()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Read bytes failed: {e}")))?;
+
+    let binary = if bytes.starts_with(b"\x7fELF") || bytes.starts_with(b"MZ") {
+        bytes.to_vec()
+    } else {
+        let cursor = std::io::Cursor::new(&bytes);
+        let mut archive = zip::ZipArchive::new(cursor)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Invalid zip archive: {e}")))?;
+        let mut extracted = None;
+        for i in 0..archive.len() {
+            let mut file = archive
+                .by_index(i)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            let name = file.name().to_string();
+            if name == "luna"
+                || name.ends_with("/luna")
+                || name == "luna.exe"
+                || name.ends_with("/luna.exe")
+            {
+                use std::io::Read;
+                let mut buf = Vec::new();
+                file.read_to_end(&mut buf)
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+                extracted = Some(buf);
+                break;
+            }
+        }
+        extracted.ok_or_else(|| (StatusCode::BAD_GATEWAY, "No luna binary inside zip".to_string()))?
+    };
+
+    let exe = std::env::current_exe()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Cannot find current exe: {e}")))?;
+    let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
+    let name = exe
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "luna".to_string());
+    let staging = exe.with_file_name(format!("{name}.new"));
+
+    std::fs::write(&staging, &binary)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to write new binary: {e}")))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o755));
+    }
+    let old = exe.with_file_name(format!("{name}.old"));
+    let _ = std::fs::remove_file(&old);
+    let _ = std::fs::rename(&exe, &old);
+    std::fs::rename(&staging, &exe)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to replace binary: {e}")))?;
+    let _ = std::fs::remove_file(&old);
+
+    let tag = body.get("tag_name").and_then(|v| v.as_str()).unwrap_or("latest");
+    Ok(Json(UpdateApplyResponse {
+        success: true,
+        message: format!("Successfully installed {tag}! Please restart luna (`luna web --stop && luna web`)."),
+    }))
 }

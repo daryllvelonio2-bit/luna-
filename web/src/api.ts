@@ -18,6 +18,8 @@ import type {
   ProfileItem,
   ProviderInfo,
   PinnedSkillsResponse,
+  UpdateCheckResponse,
+  UpdateApplyResponse,
   RotationStrategy,
   ScheduleTask,
   SessionStatePayload,
@@ -805,6 +807,16 @@ class ApiClient {
     return this.request<PinnedSkillsResponse>('/api/skills/unpin', {
       method: 'POST',
       body: JSON.stringify({ skill, scope, session_id: sessionId }),
+    });
+  }
+
+  public async checkUpdate(): Promise<UpdateCheckResponse> {
+    return this.request<UpdateCheckResponse>('/api/update');
+  }
+
+  public async applyUpdate(): Promise<UpdateApplyResponse> {
+    return this.request<UpdateApplyResponse>('/api/update', {
+      method: 'POST',
     });
   }
 }

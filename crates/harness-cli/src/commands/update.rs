@@ -116,7 +116,7 @@ impl UpdateStatus {
 }
 
 /// The running build as `luna --version` prints it.
-const CURRENT_DISPLAY: &str = env!("LUNA_VERSION");
+pub const CURRENT_DISPLAY: &str = env!("LUNA_VERSION");
 /// Used when the newer commit's manifest cannot be fetched; the package version changes rarely.
 const PACKAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Reading one small file from raw.githubusercontent should never hold up the question.
@@ -249,7 +249,7 @@ pub async fn ask_and_install(status: &UpdateStatus, config: &Config) -> LaunchOu
         }
         Choice::Update => {
             let progress = ProgressUi::start(status);
-            let result = install(status, config, &progress).await;
+            let result = install(status, config, Some(&progress)).await;
             progress.finish();
             match result {
                 Ok(path) => {
@@ -900,29 +900,110 @@ fn wrap_words(text: &str, width: usize) -> Vec<String> {
 
 // ---------------------------------------------------------------- install
 
-/// Download the artifact of the run the check found and replace the running binary.
-///
-/// The write is staged beside the target and renamed into place, so a failed download or a full
-/// disk leaves the current binary untouched. The running process keeps the old inode and the next
-/// launch gets the new one. Every step reports through `progress`, which owns the modal screen.
-async fn install(
-    status: &UpdateStatus,
+async fn download_release_asset(
     config: &Config,
-    progress: &ProgressUi,
-) -> Result<PathBuf, String> {
-    progress.set_stage(Stage::Preparing);
-    let token = github_token()?;
-    progress.set_stage(Stage::Locating);
-    let run_id = match status.run_id {
-        Some(id) => id,
-        None => fetch_latest(&config.update)
-            .await
-            .map(|build| build.run_id)
-            .ok_or_else(|| "could not find the release workflow run".to_string())?,
+    progress: Option<&ProgressUi>,
+) -> Result<Option<Vec<u8>>, String> {
+    let client = reqwest::Client::builder()
+        .timeout(INSTALL_TIMEOUT)
+        .build()
+        .map_err(|e| format!("client error: {e}"))?;
+
+    let release_url = format!(
+        "https://api.github.com/repos/{}/releases/latest",
+        config.update.repo
+    );
+    let mut req = client
+        .get(&release_url)
+        .header("Accept", GITHUB_ACCEPT)
+        .header("User-Agent", USER_AGENT);
+    if let Ok(tok) = github_token() {
+        req = req.bearer_auth(tok);
+    }
+
+    let response = match req.send().await {
+        Ok(res) if res.status().is_success() => res,
+        _ => return Ok(None),
     };
 
-    // Redirects are followed by hand for the download: GitHub answers an artifact URL with a
-    // pre-signed Blob URL, and forwarding the API token to that host makes it reject the request.
+    let body: serde_json::Value = match response.json().await {
+        Ok(b) => b,
+        Err(_) => return Ok(None),
+    };
+
+    let assets = match body.get("assets").and_then(|a| a.as_array()) {
+        Some(a) => a,
+        None => return Ok(None),
+    };
+
+    let target_names: &[&str] = if cfg!(target_os = "windows") {
+        &["luna-windows-x86_64.zip", "luna-windows-x86_64.exe"]
+    } else if cfg!(target_os = "macos") {
+        &["luna-macos-x86_64", "luna-macos-aarch64"]
+    } else {
+        &["luna-linux-x86_64", "luna-linux-x86_64.tar.gz"]
+    };
+
+    let mut download_url = None;
+    for target in target_names {
+        if let Some(asset) = assets.iter().find(|a| {
+            a.get("name")
+                .and_then(|n| n.as_str())
+                .is_some_and(|name| name == *target)
+        }) {
+            if let Some(url) = asset.get("browser_download_url").and_then(|u| u.as_str()) {
+                download_url = Some(url.to_string());
+                break;
+            }
+        }
+    }
+
+    let Some(download_url) = download_url else {
+        return Ok(None);
+    };
+
+    if let Some(p) = progress {
+        p.set_stage(Stage::Downloading);
+    }
+
+    let mut dl_req = client.get(&download_url).header("User-Agent", USER_AGENT);
+    if let Ok(tok) = github_token() {
+        dl_req = dl_req.bearer_auth(tok);
+    }
+    let mut dl_res = dl_req
+        .send()
+        .await
+        .map_err(|e| format!("could not download release asset: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("release asset download failed: {e}"))?;
+
+    let total = dl_res.content_length();
+    if let Some(p) = progress {
+        p.set_bytes(0, total);
+    }
+    let mut downloaded: u64 = 0;
+    let mut bytes = Vec::with_capacity(total.unwrap_or(0) as usize);
+    while let Some(chunk) = dl_res
+        .chunk()
+        .await
+        .map_err(|e| format!("could not read release asset bytes: {e}"))?
+    {
+        downloaded += chunk.len() as u64;
+        bytes.extend_from_slice(&chunk);
+        if let Some(p) = progress {
+            p.set_bytes(downloaded, total);
+        }
+    }
+
+    Ok(Some(bytes))
+}
+
+async fn download_workflow_artifact(
+    run_id: u64,
+    config: &Config,
+    progress: Option<&ProgressUi>,
+) -> Result<Vec<u8>, String> {
+    let token = github_token()?;
     let client = reqwest::Client::builder()
         .timeout(INSTALL_TIMEOUT)
         .redirect(reqwest::redirect::Policy::none())
@@ -989,13 +1070,13 @@ async fn install(
         .error_for_status()
         .map_err(|error| format!("GitHub refused the artifact download: {error}"))?;
 
-    // Read the body chunk by chunk rather than in one `bytes()` call: the byte count is the
-    // difference between a progress bar that is accurate and one that only appears once the whole
-    // artifact is already in memory. GitHub usually sends a `Content-Length`; when it does not, the
-    // bar falls back to a sweep and the byte count still climbs.
-    progress.set_stage(Stage::Downloading);
+    if let Some(p) = progress {
+        p.set_stage(Stage::Downloading);
+    }
     let total = response.content_length();
-    progress.set_bytes(0, total);
+    if let Some(p) = progress {
+        p.set_bytes(0, total);
+    }
     let mut downloaded: u64 = 0;
     let mut bytes = Vec::with_capacity(total.unwrap_or(0) as usize);
     while let Some(chunk) = response
@@ -1005,12 +1086,51 @@ async fn install(
     {
         downloaded += chunk.len() as u64;
         bytes.extend_from_slice(&chunk);
-        progress.set_bytes(downloaded, total);
+        if let Some(p) = progress {
+            p.set_bytes(downloaded, total);
+        }
     }
 
-    progress.set_stage(Stage::Extracting);
+    Ok(bytes)
+}
+
+/// Download the artifact of the run the check found and replace the running binary.
+///
+/// The write is staged beside the target and renamed into place, so a failed download or a full
+/// disk leaves the current binary untouched. The running process keeps the old inode and the next
+/// launch gets the new one. Every step reports through `progress`, which owns the modal screen.
+async fn install(
+    status: &UpdateStatus,
+    config: &Config,
+    progress: Option<&ProgressUi>,
+) -> Result<PathBuf, String> {
+    if let Some(p) = progress {
+        p.set_stage(Stage::Preparing);
+        p.set_stage(Stage::Locating);
+    }
+
+    let bytes = match download_release_asset(config, progress).await {
+        Ok(Some(bytes)) => bytes,
+        _ => {
+            let run_id = match status.run_id {
+                Some(id) => id,
+                None => fetch_latest(&config.update)
+                    .await
+                    .map(|build| build.run_id)
+                    .ok_or_else(|| "could not find the release workflow run".to_string())?,
+            };
+            download_workflow_artifact(run_id, config, progress).await?
+        }
+    };
+
+    if let Some(p) = progress {
+        p.set_stage(Stage::Extracting);
+    }
     let binary = extract_binary(&bytes)?;
-    progress.set_stage(Stage::Installing);
+
+    if let Some(p) = progress {
+        p.set_stage(Stage::Installing);
+    }
     let installed_path = install_binary(&binary)?;
     let path = cache_path();
     let mut entry = read_cache(&path).unwrap_or_default();
@@ -1018,26 +1138,123 @@ async fn install(
     entry.checked_for = status.latest.clone();
     entry.latest = status.latest.clone();
     entry.latest_version = status.latest_version.clone();
-    entry.run_id = Some(run_id);
+    entry.run_id = status.run_id;
     write_cache(&path, &entry);
     Ok(installed_path)
 }
 
+/// Run an update headlessly (e.g. from `/update` slash command).
+pub async fn run_update_headless(
+    config: &Config,
+    force: bool,
+) -> Result<Option<(String, String)>, String> {
+    let status = if force {
+        let build = fetch_latest(&config.update)
+            .await
+            .ok_or_else(|| "Could not fetch latest release info from GitHub.".to_string())?;
+        let version = fetch_remote_version(&config.update, &build.sha)
+            .await
+            .unwrap_or_else(|| PACKAGE_VERSION.to_string());
+        Some(UpdateStatus {
+            current: BUILD_SHA.to_string(),
+            current_version: CURRENT_DISPLAY.to_string(),
+            latest: build.sha,
+            latest_version: version,
+            run_id: Some(build.run_id),
+        })
+    } else {
+        check_at_launch(config).await
+    };
+
+    let Some(status) = status else {
+        return Ok(None);
+    };
+
+    let from = status.current_label().to_string();
+    let to = status.latest_label();
+    install(&status, config, None).await?;
+    Ok(Some((from, to)))
+}
+
+/// Run update check and install from the command line (`luna update`).
+pub async fn run_update_cli(config: &Config, force: bool) -> Result<(), String> {
+    println!("{} Checking for updates from {}...", "•".cyan(), config.update.repo);
+    let status = if force {
+        let build = fetch_latest(&config.update)
+            .await
+            .ok_or_else(|| "Could not fetch latest release info from GitHub.".to_string())?;
+        let version = fetch_remote_version(&config.update, &build.sha)
+            .await
+            .unwrap_or_else(|| PACKAGE_VERSION.to_string());
+        Some(UpdateStatus {
+            current: BUILD_SHA.to_string(),
+            current_version: CURRENT_DISPLAY.to_string(),
+            latest: build.sha,
+            latest_version: version,
+            run_id: Some(build.run_id),
+        })
+    } else {
+        check_at_launch(config).await
+    };
+
+    let Some(status) = status else {
+        println!(
+            "{} Luna is already up to date ({}).",
+            "✔".green().bold(),
+            CURRENT_DISPLAY
+        );
+        return Ok(());
+    };
+
+    println!(
+        "{} New version available: {} → {}",
+        "•".cyan(),
+        status.current_label(),
+        status.latest_label().bold()
+    );
+    let progress = ProgressUi::start(&status);
+    let result = install(&status, config, Some(&progress)).await;
+    progress.finish();
+
+    match result {
+        Ok(path) => {
+            println!(
+                "{} Successfully updated to {} at {}! Please restart luna.",
+                "✔".green().bold(),
+                status.latest_label(),
+                path.display()
+            );
+            Ok(())
+        }
+        Err(err) => {
+            eprintln!("{} Update failed: {}", "✖".red().bold(), err);
+            Err(err)
+        }
+    }
+}
+
 fn extract_binary(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    if bytes.starts_with(b"\x7fELF") || bytes.starts_with(b"MZ") {
+        return Ok(bytes.to_vec());
+    }
     let cursor = std::io::Cursor::new(bytes);
-    let mut archive =
-        ZipArchive::new(cursor).map_err(|error| format!("artifact is not a zip: {error}"))?;
-    for index in 0..archive.len() {
-        let mut entry = archive
-            .by_index(index)
-            .map_err(|error| format!("could not read artifact entry: {error}"))?;
-        let name = entry.name().to_string();
-        if name == "luna" || name.ends_with("/luna") {
-            let mut out = Vec::new();
-            entry
-                .read_to_end(&mut out)
-                .map_err(|error| format!("could not read the luna binary: {error}"))?;
-            return Ok(out);
+    if let Ok(mut archive) = ZipArchive::new(cursor) {
+        for index in 0..archive.len() {
+            let mut entry = archive
+                .by_index(index)
+                .map_err(|error| format!("could not read artifact entry: {error}"))?;
+            let name = entry.name().to_string();
+            if name == "luna"
+                || name.ends_with("/luna")
+                || name == "luna.exe"
+                || name.ends_with("/luna.exe")
+            {
+                let mut out = Vec::new();
+                entry
+                    .read_to_end(&mut out)
+                    .map_err(|error| format!("could not read the luna binary: {error}"))?;
+                return Ok(out);
+            }
         }
     }
     Err("the artifact did not contain a luna binary".to_string())
@@ -1151,16 +1368,48 @@ pub(crate) fn select_latest_successful_run(body: &serde_json::Value) -> Option<L
     })
 }
 
-/// The newest successful run of the release workflow.
+/// The newest successful run of the release workflow or latest GitHub release.
 async fn fetch_latest(settings: &config::UpdateSettings) -> Option<LatestBuild> {
-    let url = format!(
-        "https://api.github.com/repos/{}/actions/workflows/{}/runs",
-        settings.repo, settings.workflow
-    );
     let client = reqwest::Client::builder()
         .timeout(CHECK_TIMEOUT)
         .build()
         .ok()?;
+
+    // 1. Try public GitHub Releases API first
+    let rel_url = format!("https://api.github.com/repos/{}/releases/latest", settings.repo);
+    let mut rel_req = client
+        .get(&rel_url)
+        .header("Accept", GITHUB_ACCEPT)
+        .header("User-Agent", USER_AGENT);
+    if let Ok(tok) = github_token() {
+        rel_req = rel_req.bearer_auth(tok);
+    }
+    if let Ok(Ok(resp)) = tokio::time::timeout(CHECK_TIMEOUT, rel_req.send()).await {
+        if resp.status().is_success() {
+            if let Ok(body) = resp.json::<serde_json::Value>().await {
+                if let Some(tag) = body.get("tag_name").and_then(|v| v.as_str()) {
+                    let commit_ts = parse_rfc3339_secs(body.get("published_at").and_then(|v| v.as_str()));
+                    let sha = body
+                        .get("target_commitish")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(tag)
+                        .to_string();
+                    let run_id = body.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+                    return Some(LatestBuild {
+                        sha,
+                        run_id,
+                        commit_ts,
+                    });
+                }
+            }
+        }
+    }
+
+    // 2. Fall back to workflow runs
+    let url = format!(
+        "https://api.github.com/repos/{}/actions/workflows/{}/runs",
+        settings.repo, settings.workflow
+    );
     let request = client
         .get(url)
         .query(&[

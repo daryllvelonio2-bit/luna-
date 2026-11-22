@@ -44,6 +44,7 @@ export const App: React.FC = () => {
 
   const [isSkillPinOpen, setIsSkillPinOpen] = useState(false);
   const [globalPinnedSkills, setGlobalPinnedSkills] = useState<string[]>([]);
+  const [updateNotice, setUpdateNotice] = useState<string | null>(null);
   const [sessions, setSessions] = useState<GuiSessionItem[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [composerPrefill, setComposerPrefill] = useState<string | null>(null);
@@ -274,6 +275,11 @@ export const App: React.FC = () => {
 
     api.listSchedules().then(setSchedules).catch(() => {});
     api.listPlugins().then(setPlugins).catch(() => {});
+    api.checkUpdate().then((res) => {
+      if (res.has_update) {
+        setUpdateNotice(res.latest_version);
+      }
+    }).catch(() => {});
   }, [loadTranscript, showError]);
 
   useEffect(() => {
@@ -749,6 +755,21 @@ export const App: React.FC = () => {
     }
   }, [pushNotice, showError]);
 
+  const handleTriggerUpdate = useCallback(async () => {
+    pushNotice('Downloading and installing update...', 'info');
+    try {
+      const res = await api.applyUpdate();
+      if (res.success) {
+        pushNotice(res.message, 'info');
+        setUpdateNotice(null);
+      } else {
+        showError(res.message);
+      }
+    } catch (e) {
+      showError(`Update failed: ${String(e)}`);
+    }
+  }, [pushNotice, showError]);
+
   const handleSlashCommand = useCallback(
     (raw: string, images?: string[]): boolean => {
       const trimmed = raw.trim();
@@ -834,6 +855,10 @@ export const App: React.FC = () => {
       }
       if (cmd === '/usage' || cmd === '/heartbeat') {
         setActiveDrawer('usage');
+        return true;
+      }
+      if (cmd === '/update') {
+        handleTriggerUpdate();
         return true;
       }
       if (cmd === '/goal') {
@@ -1507,6 +1532,8 @@ export const App: React.FC = () => {
             onAskApprovalQuestion={api.askApprovalQuestion.bind(api)}
             pinnedSkills={effectivePinnedSkills}
             onOpenSkillPin={() => setIsSkillPinOpen(true)}
+            updateNotice={updateNotice}
+            onTriggerUpdate={handleTriggerUpdate}
           />
         )}
 
