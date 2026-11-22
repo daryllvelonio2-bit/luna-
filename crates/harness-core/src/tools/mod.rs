@@ -162,6 +162,7 @@ pub async fn register_core_tools_shared_queue(
                 .with_extra_roots(extra_roots.clone())
                 .with_network_policy(config.tools.network)
                 .with_prefix(config.tools.terminal_prefix.clone())
+                .with_allowlist(config.tools.terminal_allowlist.clone())
                 .with_rtk_rewrite(config.tools.rtk_rewrite);
 
                 if let Some(cache) = sudo_cache.clone() {

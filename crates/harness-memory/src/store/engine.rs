@@ -550,7 +550,10 @@ impl MemoryEngine for DaemonWriteEngine {
             .map_err(|e| HarnessError::SerializationError(e.to_string()))?;
         match self.forward("save_memory", payload).await {
             Ok(()) => Ok(()),
-            Err(_) if self.may_fallback() => self.direct.save(record).await,
+            Err(_) if self.may_fallback() => {
+                let _ = self.direct.store().reload();
+                self.direct.save(record).await
+            }
             Err(error) => Err(error),
         }
     }
@@ -559,7 +562,10 @@ impl MemoryEngine for DaemonWriteEngine {
         let payload = serde_json::json!({ "id": id, "record": updated });
         match self.forward("update_memory", payload).await {
             Ok(()) => Ok(()),
-            Err(_) if self.may_fallback() => self.direct.update(id, updated).await,
+            Err(_) if self.may_fallback() => {
+                let _ = self.direct.store().reload();
+                self.direct.update(id, updated).await
+            }
             Err(error) => Err(error),
         }
     }
@@ -568,7 +574,10 @@ impl MemoryEngine for DaemonWriteEngine {
         let payload = serde_json::json!({ "id": id });
         match self.forward("forget_memory", payload).await {
             Ok(()) => Ok(()),
-            Err(_) if self.may_fallback() => self.direct.forget(id).await,
+            Err(_) if self.may_fallback() => {
+                let _ = self.direct.store().reload();
+                self.direct.forget(id).await
+            }
             Err(error) => Err(error),
         }
     }

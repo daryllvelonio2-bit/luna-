@@ -30,14 +30,6 @@ use crate::traits::*;
 use crate::types::*;
 use tokio_util::sync::CancellationToken;
 
-/// How many read-only calls may be in flight at once.
-///
-/// Not a free-for-all: a read-only call is still work — `search_files` walks a tree, `read_file`
-/// reads and decodes a file — and this box is a 7.6 GB / 8-core machine that other workers share
-/// (which is why builds are pinned to `CARGO_BUILD_JOBS=2`). Four hides the latency of a model
-/// asking for a handful of files without turning one turn into a fork bomb.
-pub(super) const MAX_PARALLEL_TOOL_CALLS: usize = 4;
-
 /// The turn-loop state a dispatched call has to touch, bundled so the serial and the batched path
 /// cannot bookkeep differently.
 pub(super) struct DispatchState<'a> {
@@ -129,7 +121,8 @@ where
             if !runnable_alone {
                 // The batch ran to its width: hand it over before taking another call, so the
                 // concurrency bound is a bound on what is in flight, not on the run length.
-                if batch.len() >= MAX_PARALLEL_TOOL_CALLS {
+                let max_parallel = self.config.max_parallel_tool_calls.clamp(1, 32);
+                if batch.len() >= max_parallel {
                     let full = std::mem::take(&mut batch);
                     self.run_read_only_batch(full, state).await?;
                 }

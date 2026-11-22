@@ -370,7 +370,7 @@ impl Tool for WebSearchTool {
          Use it when the answer depends on something the repository cannot tell you: a library's \
          current API, an error message you have not seen, a version's release notes. Follow up with \
          web_fetch on the result that looks most likely, because a snippet is one sentence and \
-         often the wrong one. Set allowed_domains when you already know which sites are authoritative."
+         often the wrong one."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -384,16 +384,6 @@ impl Tool for WebSearchTool {
                 "max_results": {
                     "type": "integer",
                     "description": "How many results to return. Defaults to tools.web.search_max_results."
-                },
-                "allowed_domains": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "description": "Optional per-call allowlist of domains (e.g. [\"docs.rs\", \"github.com\"]). Results outside it are dropped."
-                },
-                "blocked_domains": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "description": "Optional per-call denylist of domains. Always wins."
                 }
             },
             "required": ["query"]

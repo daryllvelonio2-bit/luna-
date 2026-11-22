@@ -149,16 +149,6 @@ impl Tool for WebFetchTool {
                 "prompt": {
                     "type": "string",
                     "description": "Ignored. Accepted for parity with other harnesses; this tool returns the page text instead of answering a question about it."
-                },
-                "allowed_domains": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "description": "Optional per-call allowlist of domains. Narrows what the configured policy already permits; it cannot re-enable a blocked host."
-                },
-                "blocked_domains": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "description": "Optional per-call denylist of domains. Always wins."
                 }
             },
             "required": ["url"]

@@ -135,6 +135,11 @@ impl SqliteSessionStore {
     /// before per-session model persistence existed lack `model`. `CREATE TABLE IF NOT EXISTS`
     /// cannot widen an existing table, so widen it here when a column is absent.
     fn migrate(conn: &Connection) -> Result<(), HarnessError> {
+        const CURRENT_SCHEMA_VERSION: u32 = 1;
+        let current_version: u32 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap_or(0);
+
         let columns: Vec<String> = conn
             .prepare("PRAGMA table_info(sessions)")
             .and_then(|mut stmt| {
@@ -213,6 +218,14 @@ impl SqliteSessionStore {
             conn.execute("ALTER TABLE messages ADD COLUMN reasoning TEXT", [])
                 .map_err(|error| session_error("failed to add the reasoning column", error))?;
         }
+
+        if current_version < CURRENT_SCHEMA_VERSION {
+            let _ = conn.execute(
+                &format!("PRAGMA user_version = {CURRENT_SCHEMA_VERSION}"),
+                [],
+            );
+        }
+
         Ok(())
     }
 

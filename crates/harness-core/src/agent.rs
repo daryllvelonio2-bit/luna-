@@ -183,6 +183,13 @@ pub struct AgentConfig {
     /// host may not know the window (tests, embedded callers, a new provider).
     #[serde(default)]
     pub context_window: Option<usize>,
+    /// How many read-only calls may run in parallel (default 4).
+    #[serde(default = "default_max_parallel_tool_calls")]
+    pub max_parallel_tool_calls: usize,
+}
+
+fn default_max_parallel_tool_calls() -> usize {
+    4
 }
 
 fn default_auto_compact_percent() -> Option<usize> {
@@ -269,6 +276,7 @@ impl Default for AgentConfig {
             pinned_skills: Vec::new(),
             pinned_skill_instructions: Vec::new(),
             context_window: None,
+            max_parallel_tool_calls: 4,
         }
     }
 }

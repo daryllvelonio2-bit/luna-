@@ -14,6 +14,8 @@ use crate::traits::Tool;
 use crate::types::ToolResult;
 
 /// Session-scoped cache of read file contents to enforce read-before-write safety.
+static FS_WALK_SEMAPHORE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+
 #[derive(Debug, Clone, Default)]
 pub struct ReadCache {
     cached: Arc<RwLock<HashMap<PathBuf, String>>>,
@@ -1150,6 +1152,10 @@ impl Tool for SearchFilesTool {
         let scan_mode = output_mode.to_string();
         let cancel = cancel_token.clone();
 
+        let _permit = FS_WALK_SEMAPHORE
+            .acquire()
+            .await
+            .map_err(|e| HarnessError::Io(e.to_string()))?;
         let scan = tokio::task::spawn_blocking(move || {
             scan_files(
                 &root,
@@ -1484,6 +1490,10 @@ impl Tool for ListFilesTool {
         // The walk is a blocking syscall; owning a blocking thread keeps a large tree from
         // parking an async worker, the same reason `search_files` runs its scan this way.
         let request_glob = glob.clone();
+        let _permit = FS_WALK_SEMAPHORE
+            .acquire()
+            .await
+            .map_err(|e| HarnessError::Io(e.to_string()))?;
         let listed = tokio::task::spawn_blocking(move || {
             list_entries(&root, &resolved, glob.as_deref(), depth)
         })

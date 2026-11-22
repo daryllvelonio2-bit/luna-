@@ -332,7 +332,7 @@ impl MemorySaver {
     ) -> Result<String, HarnessError> {
         let options = CompletionOptions {
             model: Some(self.policy.model.clone()),
-            temperature: Some(0.0),
+            temperature: Some(self.policy.temperature),
             max_tokens: Some(max_tokens),
             reasoning_effort: Some(harness_core::ReasoningEffort::Low),
             ..CompletionOptions::default()

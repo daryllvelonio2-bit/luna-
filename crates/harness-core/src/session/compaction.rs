@@ -206,7 +206,8 @@ fn message_chars(message: &Message) -> usize {
         .as_ref()
         .map_or(0, |s| text_content_chars(s));
     if let Some(reasoning) = &message.reasoning {
-        chars += reasoning.len();
+        // Reasoning tokens are typically denser than English prose (~2 chars/token vs 4 chars/token).
+        chars += reasoning.len().saturating_mul(2);
     }
     if let Some(result) = &message.tool_result {
         chars += text_content_chars(&result.content);
@@ -214,7 +215,8 @@ fn message_chars(message: &Message) -> usize {
     for call in &message.tool_calls {
         chars += call.name.len() + call.arguments.to_string().len();
         if let Some(signature) = &call.signature {
-            chars += signature.len();
+            // Signatures are dense opaque strings; weight them equivalently.
+            chars += signature.len().saturating_mul(2);
         }
     }
     chars

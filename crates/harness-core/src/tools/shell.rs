@@ -38,6 +38,7 @@ pub struct TerminalTool {
     sudo_prompter: Option<Arc<dyn SudoPrompter>>,
     queue: Option<Arc<crate::tasks::BackgroundTaskQueue>>,
     prefix: Option<String>,
+    allowlist: Option<Vec<String>>,
     rtk_rewrite: bool,
 }
 
@@ -58,6 +59,7 @@ impl TerminalTool {
             sudo_prompter: None,
             queue: None,
             prefix: None,
+            allowlist: None,
             rtk_rewrite: true,
         }
     }
@@ -76,6 +78,11 @@ impl TerminalTool {
 
     pub fn with_prefix(mut self, prefix: Option<String>) -> Self {
         self.prefix = prefix;
+        self
+    }
+
+    pub fn with_allowlist(mut self, allowlist: Option<Vec<String>>) -> Self {
+        self.allowlist = allowlist;
         self
     }
 
@@ -604,6 +611,29 @@ impl Tool for TerminalTool {
         };
 
         let effective_command = self.resolve_command(command).await;
+
+        if let Some(ref allowlist) = self.allowlist {
+            if !allowlist.is_empty() {
+                let first_word = effective_command.split_whitespace().next().unwrap_or("");
+                let cmd_basename = std::path::Path::new(first_word)
+                    .file_name()
+                    .and_then(|f| f.to_str())
+                    .unwrap_or(first_word);
+                let allowed = allowlist.iter().any(|pattern| {
+                    pattern == cmd_basename
+                        || pattern == first_word
+                        || crate::glob::matches_optional(Some(pattern.as_str()), &effective_command)
+                });
+                if !allowed {
+                    return Ok(ToolResult::error(
+                        call_id,
+                        format!(
+                            "Command '{cmd_basename}' is not permitted by tools.terminal_allowlist policy"
+                        ),
+                    ));
+                }
+            }
+        }
 
         // A blank workdir means the workspace root, same as the filesystem tools' path default.
         let workdir_str = match args.get("workdir").and_then(|w| w.as_str()) {

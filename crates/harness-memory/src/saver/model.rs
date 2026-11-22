@@ -57,6 +57,8 @@ pub struct SaverPolicy {
     pub max_note_writes: usize,
     /// Per-pass operation cap (including deletes).
     pub max_operations: usize,
+    /// Model temperature for distillation queries (default 0.0).
+    pub temperature: f32,
 }
 
 impl SaverPolicy {
@@ -72,6 +74,7 @@ impl SaverPolicy {
             max_memory_writes: MAX_MEMORY_WRITES_PER_PASS,
             max_note_writes: MAX_NOTE_WRITES_PER_PASS,
             max_operations: MAX_OPERATIONS_PER_PASS,
+            temperature: 0.0,
         }
     }
 }

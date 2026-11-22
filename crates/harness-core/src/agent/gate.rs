@@ -128,6 +128,7 @@ where
             let sleep = tokio::time::sleep(timeout);
             tokio::pin!(sleep);
             tokio::select! {
+                biased;
                 res = &mut approve_fut => break Ok(res),
                 _ = async {
                     match &notifier {
@@ -135,6 +136,7 @@ where
                         None => std::future::pending::<()>().await,
                     }
                 } => {
+                    tokio::task::yield_now().await;
                     continue;
                 }
                 _ = &mut sleep => break Err(()),
