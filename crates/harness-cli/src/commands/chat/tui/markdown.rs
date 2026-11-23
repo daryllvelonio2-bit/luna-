@@ -508,9 +508,10 @@ fn render_table(out: &mut Vec<Line<'static>>, table: &TableBuffer, width: usize)
         }
 
         let is_last_row = row_idx + 1 == total_rows;
-        if prep.is_header && row_idx + 1 == table.header_rows && table.header_rows > 0 {
-            push_line(vec![Span::styled(rule("├", "┼", "┤"), border)]);
-        } else if !is_last_row && any_multiline && (row_idx + 1 >= table.header_rows) {
+        let is_header_sep =
+            prep.is_header && row_idx + 1 == table.header_rows && table.header_rows > 0;
+        let is_body_sep = !is_last_row && any_multiline && (row_idx + 1 >= table.header_rows);
+        if is_header_sep || is_body_sep {
             push_line(vec![Span::styled(rule("├", "┼", "┤"), border)]);
         }
     }
