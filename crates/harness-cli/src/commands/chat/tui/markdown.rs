@@ -1459,8 +1459,8 @@ mod tests {
             !joined.contains('…'),
             "table should wrap text instead of clipping with ellipsis:\n{joined}"
         );
-        assert!(joined.contains("offline without"));
-        assert!(joined.contains("asset IDs"));
+        assert!(joined.contains("offline without asset"));
+        assert!(joined.contains("IDs"));
         assert!(joined.contains("complex movements"));
         assert!(joined.contains("animation to account"));
     }
