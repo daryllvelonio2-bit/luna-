@@ -253,7 +253,8 @@ done
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!("harness-mcp-notify-{}-{nanos}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("harness-mcp-notify-{}-{nanos}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let script = dir.join("stub.sh");
         let log = dir.join("requests.log");
