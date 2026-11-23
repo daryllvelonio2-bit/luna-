@@ -17,8 +17,10 @@ Anything is possible: single jobs, multi-stage multi-profile pipelines, conditio
 Create and customize dedicated Luna profiles (`~/.luna/profiles/<name>/`) so different jobs have distinct **personas**, **mindsets**, **operating behaviors**, and optional **model/provider overrides**:
 - `profile_list`: List all available profiles (`default` + custom profiles) and their summaries/model overrides.
 - `profile_view(name)`: Inspect a profile's full `# Summary`, `# Persona`, `# Behavior`, and `config.yaml` overrides.
-- `profile_create(name, summary?, persona?, behavior?, provider?, model?, max_consecutive_failures?, copy_credentials?)`:
-  - Create a specialized profile for a job (e.g. `night-coder`, `research-scout`, `qa-auditor`, `ops-sentinel`).
+- `profile_create(name, summary?, persona?, behavior?, provider?, model?, max_consecutive_failures?, copy_credentials?, notes?, memories?)`:
+  - Create a specialized profile for a job (e.g. `night-coder`, `research-scout`, `qa-auditor`, `ops-sentinel`, `astra`).
+  - Automatically installs a dedicated terminal launcher in `~/.local/bin/<name>` so typing `<name>` directly in the terminal launches this profile.
+  - Ask or specify whether to copy credentials, set default model & provider, and inherit same notes & memory, specific ones, or fresh blank copies.
   - Use `# Persona` to define its role, tone, mindset, and boundaries.
   - Use `# Behavior` to define its exact working habits, verification standards, continuous `sleep` loop rules, escalation rules, and output style.
   - Optionally override `provider` and `model` for that profile's workload.

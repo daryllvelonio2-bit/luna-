@@ -554,7 +554,7 @@ impl Loader for PluginModuleLoader {
             return Module::declare(
                 ctx.clone(),
                 name,
-                "export const SDK_VERSION = '0.1.15';\nexport default { SDK_VERSION };",
+                "export const SDK_VERSION = '0.1.16';\nexport default { SDK_VERSION };",
             );
         }
         let path = Path::new(name);

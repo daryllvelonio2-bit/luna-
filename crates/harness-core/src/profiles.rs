@@ -495,6 +495,86 @@ pub fn render(profile: &Profile) -> String {
     )
 }
 
+/// Install `~/.local/bin/<name>` as a symlink (or batch file on Windows) to the running `luna` binary.
+pub fn install_launcher(name: &str) -> Result<PathBuf, HarnessError> {
+    validate_name(name)?;
+    let bin_dir = crate::config::home_dir().join(".local").join("bin");
+    std::fs::create_dir_all(&bin_dir).map_err(|error| {
+        HarnessError::Io(format!("failed to create {}: {}", bin_dir.display(), error))
+    })?;
+    let link = bin_dir.join(name);
+    let target = std::env::current_exe()
+        .map_err(|error| HarnessError::Io(format!("cannot find the luna binary: {}", error)))?;
+    let target = std::fs::canonicalize(&target).unwrap_or(target);
+
+    if let Ok(metadata) = std::fs::symlink_metadata(&link) {
+        let existing = std::fs::read_link(&link).ok();
+        if existing.as_deref() == Some(target.as_path())
+            || std::fs::canonicalize(&link).ok().as_deref() == Some(target.as_path())
+        {
+            return Ok(link);
+        }
+        if metadata.file_type().is_symlink() {
+            // A stale launcher from a previous install: replacing it is safe.
+            let _ = std::fs::remove_file(&link);
+        } else {
+            return Err(HarnessError::ConfigurationError(format!(
+                "{} already exists and is not a luna launcher",
+                link.display()
+            )));
+        }
+    }
+
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&target, &link).map_err(|error| {
+        HarnessError::Io(format!(
+            "failed to create launcher {}: {}",
+            link.display(),
+            error
+        ))
+    })?;
+    #[cfg(not(unix))]
+    {
+        std::fs::write(
+            &link,
+            format!("@echo off\r\n\"{}\" %*\r\n", target.display()),
+        )
+        .map_err(|error| HarnessError::Io(format!("failed to create launcher: {}", error)))?;
+    }
+
+    Ok(link)
+}
+
+/// Remove `~/.local/bin/<name>` launcher when deleting a profile.
+pub fn remove_launcher(name: &str) -> Result<(), HarnessError> {
+    if !(name
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-'))
+    {
+        return Ok(());
+    }
+    let link = crate::config::home_dir()
+        .join(".local")
+        .join("bin")
+        .join(name);
+    let Ok(metadata) = std::fs::symlink_metadata(&link) else {
+        return Ok(());
+    };
+    // Only remove a launcher that still points at a luna binary.
+    let is_luna = std::fs::read_link(&link)
+        .ok()
+        .and_then(|target| {
+            target
+                .file_name()
+                .map(|name| name.to_string_lossy().eq_ignore_ascii_case("luna"))
+        })
+        .unwrap_or(false);
+    if metadata.file_type().is_symlink() && is_luna {
+        let _ = std::fs::remove_file(&link);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

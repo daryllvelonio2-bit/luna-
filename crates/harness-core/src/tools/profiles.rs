@@ -25,6 +25,8 @@ use crate::types::ToolResult;
 pub struct ProfileToolContext {
     pub profiles_dir: PathBuf,
     pub credentials_path: PathBuf,
+    pub notes_dir: PathBuf,
+    pub memory_db: PathBuf,
     pub allow_mutation: bool,
 }
 
@@ -33,6 +35,8 @@ impl ProfileToolContext {
         Self {
             profiles_dir: config.paths.profiles_dir.clone(),
             credentials_path: config.paths.credentials.clone(),
+            notes_dir: config.paths.notes_dir.clone(),
+            memory_db: config.paths.memory_db.clone(),
             allow_mutation,
         }
     }
@@ -357,6 +361,12 @@ impl Tool for ProfileCreateTool {
                 "copy_credentials": {
                     "type": "boolean",
                     "description": "Copy active provider credentials into the new profile so it can authenticate immediately (default true)."
+                },
+                "notes": {
+                    "description": "Notes to copy into the new profile: 'same' or 'all' to copy all existing notes, 'fresh' or 'none' for an empty notebook (default: 'fresh'), or an array of specific note titles/filenames to copy."
+                },
+                "memories": {
+                    "description": "Memories to copy into the new profile: 'same' or 'all' to copy all active memories, 'fresh' or 'none' for a fresh empty memory store (default: 'fresh'), or an array of specific memory IDs/topics to copy."
                 }
             },
             "required": ["name"]
@@ -473,6 +483,20 @@ impl Tool for ProfileCreateTool {
             }
         }
 
+        let notes_copied = copy_selected_notes(
+            &self.ctx.notes_dir,
+            &paths.notes_dir,
+            arguments.get("notes"),
+        )
+        .unwrap_or(0);
+
+        let memories_copied = copy_selected_memories(
+            &self.ctx.memory_db,
+            &paths.memory_db,
+            arguments.get("memories"),
+        )
+        .unwrap_or(0);
+
         if let Err(e) = std::fs::rename(&staging, &dest) {
             let _ = std::fs::remove_dir_all(&staging);
             return Ok(ToolResult::error(
@@ -481,6 +505,7 @@ impl Tool for ProfileCreateTool {
             ));
         }
 
+        let launcher = crate::profiles::install_launcher(&name).ok();
         let yaml = read_profile_yaml(&dest);
         let out = json!({
             "name": profile.name,
@@ -489,6 +514,14 @@ impl Tool for ProfileCreateTool {
             "provider": yaml.provider,
             "model": yaml.model,
             "max_consecutive_failures": yaml.max_consecutive_failures,
+            "credentials_copied": copy_creds,
+            "notes_copied": notes_copied,
+            "memories_copied": memories_copied,
+            "launcher": launcher.map(|p| p.display().to_string()),
+            "message": format!(
+                "Profile '{}' created successfully. You can launch it by typing '{}' directly in your terminal, or with 'luna --profile {}'.",
+                profile.name, profile.name, profile.name
+            )
         });
         Ok(ToolResult::success(
             call_id,
@@ -712,11 +745,279 @@ impl Tool for ProfileDeleteTool {
                 format!("failed to delete profile '{name}': {e}"),
             ));
         }
+        let _ = crate::profiles::remove_launcher(&name);
         Ok(ToolResult::success(
             call_id,
-            format!("Deleted profile '{name}'."),
+            format!("Deleted profile '{name}' and removed its launcher."),
         ))
     }
+}
+
+fn copy_selected_notes(
+    source_dir: &Path,
+    dest_dir: &Path,
+    notes_arg: Option<&serde_json::Value>,
+) -> Result<usize, HarnessError> {
+    if !source_dir.is_dir() {
+        return Ok(0);
+    }
+    std::fs::create_dir_all(dest_dir).map_err(|e| {
+        HarnessError::Io(format!(
+            "failed to create notes dir {}: {}",
+            dest_dir.display(),
+            e
+        ))
+    })?;
+
+    let Some(arg) = notes_arg else {
+        return Ok(0);
+    };
+
+    let all_notes: Vec<PathBuf> = std::fs::read_dir(source_dir)
+        .map_err(|e| HarnessError::Io(format!("failed to read notes dir: {e}")))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|p| p.is_file() && p.extension().and_then(|e| e.to_str()) == Some("md"))
+        .collect();
+
+    let mut to_copy = Vec::new();
+
+    if let Some(s) = arg.as_str() {
+        let lower = s.trim().to_ascii_lowercase();
+        if lower == "all" || lower == "same" {
+            to_copy = all_notes;
+        } else if lower == "none" || lower == "fresh" {
+            return Ok(0);
+        } else {
+            for note_path in all_notes {
+                let stem = note_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                let title = read_note_title(&note_path);
+                let file_name = note_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if stem.eq_ignore_ascii_case(&lower)
+                    || title.to_ascii_lowercase().contains(&lower)
+                    || file_name.eq_ignore_ascii_case(&lower)
+                {
+                    to_copy.push(note_path);
+                }
+            }
+        }
+    } else if let Some(b) = arg.as_bool() {
+        if b {
+            to_copy = all_notes;
+        } else {
+            return Ok(0);
+        }
+    } else if let Some(arr) = arg.as_array() {
+        let items: Vec<String> = arr
+            .iter()
+            .filter_map(|v| v.as_str())
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect();
+        for note_path in all_notes {
+            let stem = note_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            let title = read_note_title(&note_path).to_ascii_lowercase();
+            let file_name = note_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if items
+                .iter()
+                .any(|item| stem == *item || title.contains(item) || file_name == *item)
+            {
+                to_copy.push(note_path);
+            }
+        }
+    }
+
+    let mut copied = 0;
+    for note in to_copy {
+        if let Some(file_name) = note.file_name() {
+            let dest = dest_dir.join(file_name);
+            if std::fs::copy(&note, &dest).is_ok() {
+                copied += 1;
+            }
+        }
+    }
+    Ok(copied)
+}
+
+fn read_note_title(path: &Path) -> String {
+    let raw = std::fs::read_to_string(path).unwrap_or_default();
+    for line in raw.lines().take(40) {
+        if let Some(value) = line.strip_prefix("title:") {
+            let value = value.trim().trim_matches('"').trim_matches('\'');
+            if !value.is_empty() {
+                return value.to_string();
+            }
+        }
+    }
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("untitled")
+        .to_string()
+}
+
+fn copy_selected_memories(
+    source_db: &Path,
+    dest_db: &Path,
+    memories_arg: Option<&serde_json::Value>,
+) -> Result<usize, HarnessError> {
+    if !source_db.exists() {
+        return Ok(0);
+    }
+    let Some(arg) = memories_arg else {
+        return Ok(0);
+    };
+
+    let copy_all = match arg {
+        serde_json::Value::Bool(b) => *b,
+        serde_json::Value::String(s) => {
+            let lower = s.trim().to_ascii_lowercase();
+            if lower == "none" || lower == "fresh" {
+                return Ok(0);
+            }
+            lower == "all" || lower == "same"
+        }
+        _ => false,
+    };
+
+    let specific_items: Vec<String> = match arg {
+        serde_json::Value::String(s) if !copy_all => {
+            vec![s.trim().to_ascii_lowercase()]
+        }
+        serde_json::Value::Array(arr) => arr
+            .iter()
+            .filter_map(|v| v.as_str())
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect(),
+        _ => Vec::new(),
+    };
+
+    if !copy_all && specific_items.is_empty() {
+        return Ok(0);
+    }
+
+    let source = rusqlite::Connection::open_with_flags(
+        source_db,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .map_err(|e| HarnessError::MemoryError(format!("open source memory.db: {e}")))?;
+
+    if let Some(parent) = dest_db.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let dest = rusqlite::Connection::open(dest_db)
+        .map_err(|e| HarnessError::MemoryError(format!("open dest memory.db: {e}")))?;
+
+    dest.execute_batch(
+        "CREATE TABLE IF NOT EXISTS memories (
+            id TEXT PRIMARY KEY,
+            subject TEXT NOT NULL,
+            predicate TEXT NOT NULL,
+            object TEXT NOT NULL,
+            raw_content TEXT NOT NULL,
+            category TEXT NOT NULL CHECK(category IN ('user_profile', 'code_pattern', 'workflow_rule', 'fact', 'note_pointer', 'transcript')),
+            confidence REAL NOT NULL DEFAULT 1.0,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            superseded_by TEXT REFERENCES memories(id),
+            name TEXT,
+            path TEXT
+        );
+        CREATE TABLE IF NOT EXISTS memory_embeddings (
+            memory_id TEXT PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
+            embedding BLOB NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_memories_subject_predicate ON memories(subject, predicate);
+        CREATE INDEX IF NOT EXISTS idx_memories_active ON memories(is_active);",
+    )
+    .map_err(|e| HarnessError::MemoryError(format!("init dest memory schema: {e}")))?;
+
+    let query = "SELECT id, subject, predicate, object, raw_content, category, confidence,
+                        created_at, updated_at, is_active, superseded_by, name, path
+                 FROM memories WHERE is_active = 1";
+    let mut stmt = source
+        .prepare(query)
+        .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, f64>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, String>(8)?,
+                row.get::<_, i64>(9)?,
+                row.get::<_, Option<String>>(10)?,
+                row.get::<_, Option<String>>(11)?,
+                row.get::<_, Option<String>>(12)?,
+            ))
+        })
+        .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+
+    let mut count = 0;
+    for row_res in rows {
+        let row = row_res.map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+        if !copy_all {
+            let id_matches = specific_items.iter().any(|item| {
+                row.0.to_ascii_lowercase() == *item
+                    || row.1.to_ascii_lowercase() == *item
+                    || row.1.to_ascii_lowercase().starts_with(item)
+                    || row.2.to_ascii_lowercase() == *item
+                    || row
+                        .11
+                        .as_deref()
+                        .unwrap_or("")
+                        .to_ascii_lowercase()
+                        .contains(item)
+            });
+            if !id_matches {
+                continue;
+            }
+        }
+
+        dest.execute(
+            "INSERT OR REPLACE INTO memories
+             (id, subject, predicate, object, raw_content, category, confidence,
+              created_at, updated_at, is_active, superseded_by, name, path)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            rusqlite::params![
+                row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9, row.10,
+                row.11, row.12,
+            ],
+        )
+        .map_err(|e| HarnessError::MemoryError(format!("copy memory row: {e}")))?;
+
+        let embedding: Option<Vec<u8>> = source
+            .query_row(
+                "SELECT embedding FROM memory_embeddings WHERE memory_id = ?1",
+                rusqlite::params![&row.0],
+                |r| r.get(0),
+            )
+            .ok();
+        if let Some(emb) = embedding {
+            let _ = dest.execute(
+                "INSERT OR REPLACE INTO memory_embeddings (memory_id, embedding) VALUES (?1, ?2)",
+                rusqlite::params![&row.0, emb],
+            );
+        }
+        count += 1;
+    }
+
+    Ok(count)
 }
 
 #[cfg(test)]
@@ -834,5 +1135,81 @@ mod tests {
             .unwrap();
         assert!(!deleted.is_error, "{}", deleted.content);
         assert!(!cfg.paths.profiles_dir.join("night-coder").exists());
+    }
+
+    #[tokio::test]
+    async fn profile_create_copies_notes_and_memories() {
+        let dir = tempfile::tempdir().unwrap();
+        let notes_dir = dir.path().join("notes");
+        std::fs::create_dir_all(&notes_dir).unwrap();
+        std::fs::write(
+            notes_dir.join("architecture.md"),
+            "---\ntitle: Architecture\n---\nSystem architecture",
+        )
+        .unwrap();
+
+        let mem_db = dir.path().join("memory.db");
+        {
+            let conn = rusqlite::Connection::open(&mem_db).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE memories (
+                    id TEXT PRIMARY KEY,
+                    subject TEXT NOT NULL,
+                    predicate TEXT NOT NULL,
+                    object TEXT NOT NULL,
+                    raw_content TEXT NOT NULL,
+                    category TEXT NOT NULL,
+                    confidence REAL NOT NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    is_active INTEGER NOT NULL,
+                    superseded_by TEXT,
+                    name TEXT,
+                    path TEXT
+                );
+                INSERT INTO memories (id, subject, predicate, object, raw_content, category, confidence, is_active)
+                VALUES ('mem1', 'astra.engine', 'status', 'ready', 'Engine ready', 'fact', 1.0, 1);"
+            ).unwrap();
+        }
+
+        let mut cfg = Config::default();
+        cfg.paths.profiles_dir = dir.path().join("profiles");
+        cfg.paths.credentials = dir.path().join("credentials.json");
+        std::fs::write(&cfg.paths.credentials, "{}").unwrap();
+        cfg.paths.notes_dir = notes_dir;
+        cfg.paths.memory_db = mem_db;
+
+        let reg: Arc<dyn ToolRegistry> = Arc::new(DefaultToolRegistry::new());
+        register_profile_tools(&reg, &cfg, true).await.unwrap();
+
+        let cancel = CancellationToken::new();
+
+        let created = reg
+            .execute(
+                &crate::types::ToolCall {
+                    id: "c1".into(),
+                    name: "profile_create".into(),
+                    arguments: json!({
+                        "name": "astra",
+                        "summary": "Astra dedicated profile",
+                        "notes": "same",
+                        "memories": "same"
+                    }),
+                    signature: None,
+                },
+                &cancel,
+            )
+            .await
+            .unwrap();
+
+        assert!(!created.is_error, "{}", created.content);
+        assert!(cfg
+            .paths
+            .profiles_dir
+            .join("astra/notes/architecture.md")
+            .is_file());
+        assert!(cfg.paths.profiles_dir.join("astra/memory.db").is_file());
+        assert!(created.content.contains("notes_copied\": 1"));
+        assert!(created.content.contains("memories_copied\": 1"));
     }
 }

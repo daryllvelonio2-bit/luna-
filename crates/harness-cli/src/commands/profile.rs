@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use colored::Colorize;
-use dialoguer::{Confirm, Input, MultiSelect};
+use dialoguer::{Confirm, Input, MultiSelect, Select};
 use harness_core::config::{self, home_dir, Config};
 use harness_core::profiles::{self, Profile, ProfilePaths, ProfileText, DEFAULT_PROFILE};
 use harness_core::HarnessError;
@@ -422,6 +422,30 @@ pub fn create_profile_interactive(
         false
     };
 
+    let (provider, model) = if std::io::stdin().is_terminal() {
+        let custom_model = Confirm::new()
+            .with_prompt(
+                "Set a default provider and model for this profile? (No = use system default)",
+            )
+            .default(false)
+            .interact()
+            .unwrap_or(false);
+        if custom_model {
+            let p = prompt_line(
+                "Default LLM provider (e.g. anthropic, openai, openrouter): ",
+                "",
+            )?;
+            let m = prompt_line("Default LLM model name: ", "")?;
+            let p_opt = if p.is_empty() { None } else { Some(p) };
+            let m_opt = if m.is_empty() { None } else { Some(m) };
+            (p_opt, m_opt)
+        } else {
+            (None, None)
+        }
+    } else {
+        (None, None)
+    };
+
     let notes = pick_notes(source)?;
     let memories = pick_memories(source)?;
 
@@ -433,6 +457,12 @@ pub fn create_profile_interactive(
         "  providers: {}",
         if copy_providers { "same" } else { "fresh" }
     );
+    if let Some(ref p) = provider {
+        println!("  provider:  {}", p);
+    }
+    if let Some(ref m) = model {
+        println!("  model:     {}", m);
+    }
     println!("  notes:     {}", count_or_fresh(notes.len()));
     println!("  memories:  {}", count_or_fresh(memories.len()));
 
@@ -458,6 +488,8 @@ pub fn create_profile_interactive(
         copy_providers,
         &notes,
         &memories,
+        provider,
+        model,
     )
 }
 
@@ -476,6 +508,8 @@ pub(crate) fn create_profile_with(
     copy_providers: bool,
     notes: &[PathBuf],
     memories: &[String],
+    provider: Option<String>,
+    model: Option<String>,
 ) -> Result<PathBuf, HarnessError> {
     profiles::validate_name(name)?;
     let dest = profiles::profile_dir(profiles_dir, name);
@@ -519,7 +553,32 @@ pub(crate) fn create_profile_with(
         profiles::render(&profile),
     )
     .map_err(|error| HarnessError::Io(format!("failed to write profile.md: {}", error)))?;
-    std::fs::write(staging.join("config.yaml"), "{}\n")
+    let mut config_yaml = String::new();
+    if provider.is_some() || model.is_some() {
+        let mut model_map = serde_yaml::Mapping::new();
+        if let Some(p) = provider {
+            model_map.insert(
+                serde_yaml::Value::String("provider".into()),
+                serde_yaml::Value::String(p),
+            );
+        }
+        if let Some(m) = model {
+            model_map.insert(
+                serde_yaml::Value::String("default".into()),
+                serde_yaml::Value::String(m),
+            );
+        }
+        let mut root_map = serde_yaml::Mapping::new();
+        root_map.insert(
+            serde_yaml::Value::String("model".into()),
+            serde_yaml::Value::Mapping(model_map),
+        );
+        config_yaml = serde_yaml::to_string(&root_map).unwrap_or_default();
+    }
+    if config_yaml.trim().is_empty() {
+        config_yaml = "{}\n".to_string();
+    }
+    std::fs::write(staging.join("config.yaml"), config_yaml)
         .map_err(|error| HarnessError::Io(format!("failed to write config.yaml: {}", error)))?;
 
     if copy_providers {
@@ -633,26 +692,35 @@ fn pick_notes(source: &Config) -> Result<Vec<PathBuf>, HarnessError> {
         println!("{}", "No notes to copy; starting fresh.".dimmed());
         return Ok(Vec::new());
     }
-    // The copy is opt-in: a new profile starts with an empty notebook unless the user says which
-    // notes to bring along.
-    let copy = Confirm::new()
-        .with_prompt("Copy notes into the new profile? (No = start fresh)")
-        .default(false)
+    let options = &[
+        "Start fresh with a blank notes notebook",
+        "Copy all existing notes into the new profile",
+        "Select specific notes to copy",
+    ];
+    let selection = Select::new()
+        .with_prompt("Notes for new profile")
+        .items(options)
+        .default(0)
         .interact()
         .map_err(|error| HarnessError::Io(error.to_string()))?;
-    if !copy {
-        return Ok(Vec::new());
+
+    match selection {
+        0 => Ok(Vec::new()),
+        1 => Ok(choices.into_iter().map(|c| c.path).collect()),
+        2 => {
+            let labels: Vec<&str> = choices.iter().map(|choice| choice.label.as_str()).collect();
+            let picked = MultiSelect::new()
+                .with_prompt("Select specific notes (space toggles, ↑/↓ moves, Enter saves)")
+                .items(&labels)
+                .interact()
+                .map_err(|error| HarnessError::Io(error.to_string()))?;
+            Ok(picked
+                .into_iter()
+                .map(|index| choices[index].path.clone())
+                .collect())
+        }
+        _ => Ok(Vec::new()),
     }
-    let labels: Vec<&str> = choices.iter().map(|choice| choice.label.as_str()).collect();
-    let picked = MultiSelect::new()
-        .with_prompt("Notes to copy (space toggles, ↑/↓ moves, Enter saves)")
-        .items(&labels)
-        .interact()
-        .map_err(|error| HarnessError::Io(error.to_string()))?;
-    Ok(picked
-        .into_iter()
-        .map(|index| choices[index].path.clone())
-        .collect())
 }
 
 fn list_notes(dir: &Path) -> Vec<NoteChoice> {
@@ -704,24 +772,35 @@ fn pick_memories(source: &Config) -> Result<Vec<String>, HarnessError> {
         println!("{}", "No memories to copy; starting fresh.".dimmed());
         return Ok(Vec::new());
     }
-    let copy = Confirm::new()
-        .with_prompt("Copy memories into the new profile? (No = start fresh)")
-        .default(false)
+    let options = &[
+        "Start fresh with a blank memory store",
+        "Copy all existing active memories into the new profile",
+        "Select specific memories to copy",
+    ];
+    let selection = Select::new()
+        .with_prompt("Memories for new profile")
+        .items(options)
+        .default(0)
         .interact()
         .map_err(|error| HarnessError::Io(error.to_string()))?;
-    if !copy {
-        return Ok(Vec::new());
+
+    match selection {
+        0 => Ok(Vec::new()),
+        1 => Ok(choices.into_iter().map(|c| c.id).collect()),
+        2 => {
+            let labels: Vec<&str> = choices.iter().map(|choice| choice.label.as_str()).collect();
+            let picked = MultiSelect::new()
+                .with_prompt("Select specific memories (space toggles, ↑/↓ moves, Enter saves)")
+                .items(&labels)
+                .interact()
+                .map_err(|error| HarnessError::Io(error.to_string()))?;
+            Ok(picked
+                .into_iter()
+                .map(|index| choices[index].id.clone())
+                .collect())
+        }
+        _ => Ok(Vec::new()),
     }
-    let labels: Vec<&str> = choices.iter().map(|choice| choice.label.as_str()).collect();
-    let picked = MultiSelect::new()
-        .with_prompt("Memories to copy (space toggles, ↑/↓ moves, Enter saves)")
-        .items(&labels)
-        .interact()
-        .map_err(|error| HarnessError::Io(error.to_string()))?;
-    Ok(picked
-        .into_iter()
-        .map(|index| choices[index].id.clone())
-        .collect())
 }
 
 fn list_memories(db: &Path) -> Vec<MemoryChoice> {
@@ -907,85 +986,14 @@ fn copy_memories(
 
 /// Install `~/.local/bin/<name>` as a symlink to the running `luna` binary.
 pub fn install_launcher(name: &str) -> Result<PathBuf, HarnessError> {
-    profiles::validate_name(name)?;
+    let link = profiles::install_launcher(name)?;
     let bin_dir = home_dir().join(".local").join("bin");
-    std::fs::create_dir_all(&bin_dir).map_err(|error| {
-        HarnessError::Io(format!("failed to create {}: {}", bin_dir.display(), error))
-    })?;
-    let link = bin_dir.join(name);
-    let target = std::env::current_exe()
-        .map_err(|error| HarnessError::Io(format!("cannot find the luna binary: {}", error)))?;
-    let target = std::fs::canonicalize(&target).unwrap_or(target);
-
-    if let Ok(metadata) = std::fs::symlink_metadata(&link) {
-        let existing = std::fs::read_link(&link).ok();
-        if existing.as_deref() == Some(target.as_path())
-            || std::fs::canonicalize(&link).ok().as_deref() == Some(target.as_path())
-        {
-            warn_if_not_on_path(&bin_dir);
-            return Ok(link);
-        }
-        if metadata.file_type().is_symlink() {
-            // A stale launcher from a previous install: replacing it is safe.
-            std::fs::remove_file(&link).map_err(|error| {
-                HarnessError::Io(format!("failed to replace {}: {}", link.display(), error))
-            })?;
-        } else {
-            return Err(HarnessError::ConfigurationError(format!(
-                "{} already exists and is not a luna launcher",
-                link.display()
-            )));
-        }
-    }
-
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&target, &link).map_err(|error| {
-        HarnessError::Io(format!(
-            "failed to create launcher {}: {}",
-            link.display(),
-            error
-        ))
-    })?;
-    #[cfg(not(unix))]
-    {
-        std::fs::write(
-            &link,
-            format!("@echo off\r\n\"{}\" %*\r\n", target.display()),
-        )
-        .map_err(|error| HarnessError::Io(format!("failed to create launcher: {}", error)))?;
-    }
-
     warn_if_not_on_path(&bin_dir);
     Ok(link)
 }
 
 fn remove_launcher(name: &str) -> Result<(), HarnessError> {
-    if !(name
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-'))
-    {
-        return Ok(());
-    }
-    let link = home_dir().join(".local").join("bin").join(name);
-    let Ok(metadata) = std::fs::symlink_metadata(&link) else {
-        return Ok(());
-    };
-    // Only remove a launcher that still points at a luna binary. A file the user replaced with
-    // something of their own is left alone.
-    let is_luna = std::fs::read_link(&link)
-        .ok()
-        .and_then(|target| {
-            target
-                .file_name()
-                .map(|name| name.to_string_lossy().eq_ignore_ascii_case("luna"))
-        })
-        .unwrap_or(false);
-    if metadata.file_type().is_symlink() && is_luna {
-        std::fs::remove_file(&link).map_err(|error| {
-            HarnessError::Io(format!("failed to remove {}: {}", link.display(), error))
-        })?;
-    }
-    Ok(())
+    profiles::remove_launcher(name)
 }
 
 fn warn_if_not_on_path(bin_dir: &Path) {

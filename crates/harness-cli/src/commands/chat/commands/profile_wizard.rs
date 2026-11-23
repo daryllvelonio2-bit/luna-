@@ -285,6 +285,8 @@ fn finish_profile_creation(
         copy_providers,
         notes,
         memories,
+        None,
+        None,
     )?;
     ui.emit_above(&format!(
         "{} Created {}",
