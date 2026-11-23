@@ -366,7 +366,7 @@ impl TableBuffer {
     }
 }
 
-/// Draw the buffered table with box borders, clipped to `width` terminal cells.
+/// Draw the buffered table with box borders, wrapping cells to fit `width` terminal cells.
 fn render_table(out: &mut Vec<Line<'static>>, table: &TableBuffer, width: usize) {
     let cols = table.rows.iter().map(|row| row.len()).max().unwrap_or(0);
     if cols == 0 {
@@ -394,12 +394,55 @@ fn render_table(out: &mut Vec<Line<'static>>, table: &TableBuffer, width: usize)
         let Some((widest, _)) = widths
             .iter()
             .enumerate()
-            .filter(|(_, w)| **w > 3)
+            .filter(|(_, w)| **w > 1)
             .max_by_key(|(_, w)| **w)
         else {
             break;
         };
         widths[widest] -= 1;
+    }
+
+    struct PreparedRow {
+        is_header: bool,
+        cells: Vec<Vec<String>>,
+        height: usize,
+    }
+
+    let mut prepared_rows: Vec<PreparedRow> = Vec::with_capacity(table.rows.len());
+    let mut any_multiline = false;
+
+    for (row_idx, row) in table.rows.iter().enumerate() {
+        let is_header = row_idx < table.header_rows;
+        let mut cells = Vec::with_capacity(cols);
+        let mut row_height = 1;
+
+        for (col, w) in widths.iter().enumerate() {
+            let text = row.get(col).map(String::as_str).unwrap_or("");
+            let clean = clean_terminal_text(text);
+            let wrapped = wrap_plain_text(&clean, *w);
+            let mut col_lines: Vec<String> = wrapped
+                .into_iter()
+                .map(|line| line.trim().to_string())
+                .filter(|line| !line.is_empty())
+                .collect();
+            if col_lines.is_empty() {
+                col_lines.push(String::new());
+            }
+            if col_lines.len() > row_height {
+                row_height = col_lines.len();
+            }
+            cells.push(col_lines);
+        }
+
+        if row_height > 1 {
+            any_multiline = true;
+        }
+
+        prepared_rows.push(PreparedRow {
+            is_header,
+            cells,
+            height: row_height,
+        });
     }
 
     let border = Style::default().fg(border_subtle());
@@ -419,41 +462,55 @@ fn render_table(out: &mut Vec<Line<'static>>, table: &TableBuffer, width: usize)
 
     push_line(vec![Span::styled(rule("┌", "┬", "┐"), border)]);
 
-    for (row_idx, row) in table.rows.iter().enumerate() {
-        let is_header = row_idx < table.header_rows;
-        let mut spans = vec![Span::styled("│", border)];
-        for (col, w) in widths.iter().enumerate() {
-            let text = row.get(col).map(String::as_str).unwrap_or("");
-            let clean = clean_terminal_text(text);
-            let clipped = clip_cells(&clean, *w);
-            let pad = w.saturating_sub(clipped.width());
-            let align = table
-                .alignments
-                .get(col)
-                .copied()
-                .unwrap_or(Alignment::None);
-            let (before, after) = match align {
-                Alignment::Right => (pad, 0),
-                Alignment::Center => (pad / 2, pad - pad / 2),
-                _ => (0, pad),
-            };
-            let style = if is_header {
-                Style::default()
-                    .fg(accent_coral())
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(text_primary())
-            };
-            spans.push(Span::styled(" ", border));
-            spans.push(Span::styled(" ".repeat(before), style));
-            spans.push(Span::styled(clipped, style));
-            spans.push(Span::styled(" ".repeat(after), style));
-            spans.push(Span::styled(" ", border));
-            spans.push(Span::styled("│", border));
+    let total_rows = prepared_rows.len();
+    for (row_idx, prep) in prepared_rows.iter().enumerate() {
+        for sub_idx in 0..prep.height {
+            let mut spans = vec![Span::styled("│", border)];
+            for (col, w) in widths.iter().enumerate() {
+                let cell_text = prep
+                    .cells
+                    .get(col)
+                    .and_then(|lines| lines.get(sub_idx))
+                    .map(String::as_str)
+                    .unwrap_or("");
+                let line_w = cell_text.width();
+                let clipped = if line_w <= *w {
+                    cell_text.to_string()
+                } else {
+                    clip_cells(cell_text, *w)
+                };
+                let pad = w.saturating_sub(clipped.width());
+                let align = table
+                    .alignments
+                    .get(col)
+                    .copied()
+                    .unwrap_or(Alignment::None);
+                let (before, after) = match align {
+                    Alignment::Right => (pad, 0),
+                    Alignment::Center => (pad / 2, pad - pad / 2),
+                    _ => (0, pad),
+                };
+                let style = if prep.is_header {
+                    Style::default()
+                        .fg(accent_coral())
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(text_primary())
+                };
+                spans.push(Span::styled(" ", border));
+                spans.push(Span::styled(" ".repeat(before), style));
+                spans.push(Span::styled(clipped, style));
+                spans.push(Span::styled(" ".repeat(after), style));
+                spans.push(Span::styled(" ", border));
+                spans.push(Span::styled("│", border));
+            }
+            push_line(spans);
         }
-        push_line(spans);
 
-        if is_header && row_idx + 1 == table.header_rows && table.header_rows > 0 {
+        let is_last_row = row_idx + 1 == total_rows;
+        if prep.is_header && row_idx + 1 == table.header_rows && table.header_rows > 0 {
+            push_line(vec![Span::styled(rule("├", "┼", "┤"), border)]);
+        } else if !is_last_row && any_multiline && (row_idx + 1 >= table.header_rows) {
             push_line(vec![Span::styled(rule("├", "┼", "┤"), border)]);
         }
     }
@@ -1367,7 +1424,7 @@ mod tests {
     }
 
     #[test]
-    fn wide_table_clips_cells_instead_of_wrapping_outside_the_frame() {
+    fn wide_table_wraps_cells_instead_of_truncating() {
         let md = "| Key | Description |\n|---|---|\n| a_very_long_key_name | a very long description that cannot possibly fit |";
         let lines = render_markdown(md, 32);
         let joined = text_of(&lines);
@@ -1375,7 +1432,36 @@ mod tests {
             lines.iter().all(|l| l.width() <= 32),
             "table overflowed:\n{joined}"
         );
-        assert!(joined.contains('…'), "expected clipped cells:\n{joined}");
+        assert!(
+            joined.contains("possibly") && joined.contains("fit"),
+            "full cell content should be preserved across wrapped lines:\n{joined}"
+        );
+        assert!(
+            !joined.contains('…'),
+            "expected text to wrap downward instead of clipping with ellipsis:\n{joined}"
+        );
+    }
+
+    #[test]
+    fn multiline_table_cells_extend_downward_without_truncation() {
+        let md = r#"| Approach | Pros | Cons |
+|---|---|---|
+| Procedural (Code) | Works immediately offline without asset IDs | Difficult to animate complex movements in code |
+| Uploaded Assets (Blender) | Full artistic control, custom keyframes | Requires uploading each animation to account |"#;
+        let lines = render_markdown(md, 80);
+        let joined = text_of(&lines);
+        assert!(
+            lines.iter().all(|l| l.width() <= 80),
+            "table overflowed:\n{joined}"
+        );
+        assert!(
+            !joined.contains('…'),
+            "table should wrap text instead of clipping with ellipsis:\n{joined}"
+        );
+        assert!(joined.contains("offline without"));
+        assert!(joined.contains("asset IDs"));
+        assert!(joined.contains("complex movements"));
+        assert!(joined.contains("animation to account"));
     }
 
     #[test]
