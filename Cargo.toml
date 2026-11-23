@@ -20,7 +20,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.1.14"
+version = "0.1.15"
 edition = "2021"
 authors = ["Luna Harness Team"]
 license = "MIT OR Apache-2.0"
@@ -52,7 +52,6 @@ indicatif = "0.17"
 colored = "2.1"
 cpal = "0.15"
 rodio = "0.18"
-hound = "3.5"
 tempfile = "3.10"
 similar = "2.5"
 walkdir = "2.5"
@@ -67,13 +66,6 @@ base64 = "0.22"
 sha2 = "0.10"
 regex = "1.10"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
-rquickjs = { version = "0.14.0", features = ["std", "loader", "macro", "futures"] }
-oxc_allocator = "0.159.0"
-oxc_codegen = "0.159.0"
-oxc_parser = "0.159.0"
-oxc_semantic = "0.159.0"
-oxc_span = "0.159.0"
-oxc_transformer = "0.159.0"
 
 # Internal crate dependencies
 harness-core = { path = "crates/harness-core" }

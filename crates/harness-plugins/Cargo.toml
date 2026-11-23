@@ -16,13 +16,13 @@ async-trait = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 walkdir = { workspace = true }
-rquickjs = { workspace = true }
-oxc_allocator = { workspace = true }
-oxc_codegen = { workspace = true }
-oxc_parser = { workspace = true }
-oxc_semantic = { workspace = true }
-oxc_span = { workspace = true }
-oxc_transformer = { workspace = true }
+rquickjs = { version = "0.14.0", features = ["std", "loader", "macro", "futures"] }
+oxc_allocator = "0.159.0"
+oxc_codegen = "0.159.0"
+oxc_parser = "0.159.0"
+oxc_semantic = "0.159.0"
+oxc_span = "0.159.0"
+oxc_transformer = "0.159.0"
 reqwest = { workspace = true }
 rusqlite = { workspace = true }
 chrono = { workspace = true }

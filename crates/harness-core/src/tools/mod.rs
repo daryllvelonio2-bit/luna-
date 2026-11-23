@@ -59,10 +59,12 @@ pub async fn register_core_tools_with_sudo(
     sudo_prompter: Option<Arc<dyn SudoPrompter>>,
     todo_scope: TodoScope,
 ) -> Result<Arc<crate::tasks::BackgroundTaskQueue>, HarnessError> {
+    let session = todo_scope.session();
     // One queue shared by `terminal` (producer) and `process` (consumer) — see the doc comment.
     let bg_queue = Arc::new(
         crate::tasks::BackgroundTaskQueue::new(config.paths.jobs_dir.clone())
-            .with_network_policy(config.tools.network),
+            .with_network_policy(config.tools.network)
+            .with_session_id(session),
     );
     register_core_tools_shared_queue(
         registry,

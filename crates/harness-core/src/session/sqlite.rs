@@ -140,6 +140,10 @@ impl SqliteSessionStore {
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap_or(0);
 
+        if current_version >= CURRENT_SCHEMA_VERSION {
+            return Ok(());
+        }
+
         let columns: Vec<String> = conn
             .prepare("PRAGMA table_info(sessions)")
             .and_then(|mut stmt| {
@@ -219,12 +223,11 @@ impl SqliteSessionStore {
                 .map_err(|error| session_error("failed to add the reasoning column", error))?;
         }
 
-        if current_version < CURRENT_SCHEMA_VERSION {
-            let _ = conn.execute(
-                &format!("PRAGMA user_version = {CURRENT_SCHEMA_VERSION}"),
-                [],
-            );
-        }
+        conn.execute(
+            &format!("PRAGMA user_version = {CURRENT_SCHEMA_VERSION}"),
+            [],
+        )
+        .map_err(|error| session_error("failed to update schema user_version", error))?;
 
         Ok(())
     }

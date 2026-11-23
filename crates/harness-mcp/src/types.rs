@@ -12,7 +12,8 @@ pub struct JsonRpcRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsonRpcResponse {
     pub jsonrpc: String,
-    pub id: u64,
+    #[serde(default)]
+    pub id: Option<u64>,
     #[serde(default)]
     pub result: Option<serde_json::Value>,
     #[serde(default)]

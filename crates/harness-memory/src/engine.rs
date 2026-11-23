@@ -58,22 +58,39 @@ impl SqliteMemoryEngine {
             HarnessError::MemoryError(format!("Schema initialization failed: {}", e))
         })?;
 
-        // Migration for pre-existing databases: ensure lean fields exist.
-        Self::add_column_if_missing(conn, "memories", "name", "TEXT")?;
-        Self::add_column_if_missing(conn, "memories", "path", "TEXT")?;
-        // The transcript category was added after the first schema. A CHECK constraint cannot be
-        // altered in place, so rewrite the table once when the old one is found.
-        Self::ensure_transcript_category(conn)?;
+        const CURRENT_MEMORY_VERSION: u32 = 1;
+        let current_version: u32 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap_or(0);
 
-        // Normalize any legacy categories (e.g. from obsolete experiments) that would violate CHECK
-        conn.execute(
-            "UPDATE memories SET category = 'fact' WHERE category NOT IN ('user_profile', 'code_pattern', 'workflow_rule', 'fact', 'note_pointer', 'transcript')",
-            [],
-        )
-        .map_err(|e| HarnessError::MemoryError(format!("Category normalization failed: {e}")))?;
+        if current_version < CURRENT_MEMORY_VERSION {
+            // Migration for pre-existing databases: ensure lean fields exist.
+            Self::add_column_if_missing(conn, "memories", "name", "TEXT")?;
+            Self::add_column_if_missing(conn, "memories", "path", "TEXT")?;
+            // The transcript category was added after the first schema. A CHECK constraint cannot be
+            // altered in place, so rewrite the table once when the old one is found.
+            Self::ensure_transcript_category(conn)?;
 
-        // Enforce topic uniqueness: collapse multiple active records for the same topic.
-        Self::collapse_duplicate_active_topics(conn)?;
+            // Normalize any legacy categories (e.g. from obsolete experiments) that would violate CHECK
+            conn.execute(
+                "UPDATE memories SET category = 'fact' WHERE category NOT IN ('user_profile', 'code_pattern', 'workflow_rule', 'fact', 'note_pointer', 'transcript')",
+                [],
+            )
+            .map_err(|e| HarnessError::MemoryError(format!("Category normalization failed: {e}")))?;
+
+            // Enforce topic uniqueness: collapse multiple active records for the same topic.
+            Self::collapse_duplicate_active_topics(conn)?;
+
+            conn.execute(
+                &format!("PRAGMA user_version = {CURRENT_MEMORY_VERSION}"),
+                [],
+            )
+            .map_err(|e| {
+                HarnessError::MemoryError(format!(
+                    "Failed to update memory schema user_version: {e}"
+                ))
+            })?;
+        }
 
         Ok(())
     }

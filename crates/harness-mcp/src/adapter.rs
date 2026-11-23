@@ -230,4 +230,56 @@ done
         assert_eq!(adapter.name(), "luna_start");
         assert_eq!(adapter.remote_name(), "luna_start");
     }
+
+    #[tokio::test]
+    async fn handles_notifications_and_concurrent_requests() {
+        const NOTIFY_SERVER: &str = r#"#!/bin/sh
+log="$1"
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> "$log"
+  id=`printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p'`
+  case "$line" in
+    *'"initialize"'*) body='{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"stub","version":"0"}}' ;;
+    *'"tools/list"'*) body='{"tools":[{"name":"ping","description":"stub","inputSchema":{"type":"object"}}]}' ;;
+    *) body='{"content":[{"type":"text","text":"pong"}]}' ;;
+  esac
+  # Emit an unprompted notification first
+  printf '{"jsonrpc":"2.0","method":"notifications/message","params":{"text":"log"}}\n'
+  printf '{"jsonrpc":"2.0","id":%s,"result":%s}\n' "$id" "$body"
+done
+"#;
+
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("harness-mcp-notify-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("stub.sh");
+        let log = dir.join("requests.log");
+        std::fs::write(&script, NOTIFY_SERVER).unwrap();
+        std::fs::write(&log, "").unwrap();
+
+        let client = McpStdioClient::spawn(
+            "sh",
+            &[script.to_str().unwrap(), log.to_str().unwrap()],
+            &std::collections::BTreeMap::new(),
+            None,
+            10,
+            10,
+        )
+        .await
+        .expect("server with notifications should start");
+
+        // Concurrent requests must not trip over notifications or each other
+        let args = serde_json::json!({});
+        let (r1, r2) = tokio::join!(
+            client.call_tool("ping", &args),
+            client.call_tool("ping", &args)
+        );
+        assert_eq!(r1.unwrap(), "pong");
+        assert_eq!(r2.unwrap(), "pong");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

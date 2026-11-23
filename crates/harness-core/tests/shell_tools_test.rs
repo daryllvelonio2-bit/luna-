@@ -1097,3 +1097,44 @@ fn an_allowed_network_is_left_alone() {
         "the probe reached the kernel's own answer (ECONNREFUSED): {output}"
     );
 }
+
+#[tokio::test]
+async fn test_terminal_allowlist_enforcement_and_operator_chaining() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let cancel = CancellationToken::new();
+
+    let tool = TerminalTool::new(root, 10, 10_000)
+        .with_allowlist(Some(vec!["echo".to_string(), "ls".to_string()]));
+
+    // Allowed simple command
+    let res = tool
+        .execute("call_1", &json!({ "command": "echo hello" }), &cancel)
+        .await
+        .unwrap();
+    assert!(!res.is_error, "echo must be allowed");
+    assert!(res.content.contains("hello"));
+
+    // Disallowed command
+    let res = tool
+        .execute("call_2", &json!({ "command": "whoami" }), &cancel)
+        .await
+        .unwrap();
+    assert!(res.is_error, "whoami must be refused");
+    assert!(res.content.contains("not permitted by tools.terminal_allowlist policy"));
+
+    // Operator chaining attempt (&&, ;, |)
+    let res = tool
+        .execute("call_3", &json!({ "command": "echo hello && whoami" }), &cancel)
+        .await
+        .unwrap();
+    assert!(res.is_error, "command chaining must be refused");
+    assert!(res.content.contains("Command chaining and substitution operators"));
+
+    let res = tool
+        .execute("call_4", &json!({ "command": "echo hello; whoami" }), &cancel)
+        .await
+        .unwrap();
+    assert!(res.is_error, "semicolon chaining must be refused");
+    assert!(res.content.contains("Command chaining and substitution operators"));
+}

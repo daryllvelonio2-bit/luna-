@@ -61,6 +61,7 @@ struct InternalJob {
     /// Shared with the spawned task: whoever finishes first (a kill or the process itself) takes
     /// the sender, so a job that already stopped can never be reported as killed afterwards.
     kill_tx: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+    session_id: Option<String>,
 }
 
 /// Everything the spawned task needs to announce exactly one completion.
@@ -171,6 +172,7 @@ pub struct BackgroundTaskQueue {
     /// `tools.network`: a backgrounded command is still a command the agent started, so it gets
     /// the same boundary rather than escaping it by adding `&`.
     network: crate::tools::netguard::NetworkPolicy,
+    session_id: Option<String>,
 }
 
 impl BackgroundTaskQueue {
@@ -184,7 +186,24 @@ impl BackgroundTaskQueue {
             jobs: Arc::new(Mutex::new(HashMap::new())),
             completion_notifier: Arc::new(Mutex::new(None)),
             network: crate::tools::netguard::NetworkPolicy::Allow,
+            session_id: None,
         }
+    }
+
+    /// Scope this queue to an explicit session ID.
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
+        let sid = session_id.into();
+        self.session_id = if sid.trim().is_empty() {
+            None
+        } else {
+            Some(sid)
+        };
+        self
+    }
+
+    /// Current session scoping, if any.
+    pub fn session_id(&self) -> Option<&str> {
+        self.session_id.as_deref()
     }
 
     /// Install the callback that wakes the host when a job stops.
@@ -244,6 +263,7 @@ impl BackgroundTaskQueue {
             started_at,
             log_path: log_path.clone(),
             kill_tx: kill_tx.clone(),
+            session_id: self.session_id.clone(),
         };
         self.jobs
             .lock()
@@ -273,6 +293,11 @@ impl BackgroundTaskQueue {
         let jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
         let mut list: Vec<JobSummary> = jobs
             .values()
+            .filter(|j| match (&self.session_id, &j.session_id) {
+                (Some(expected), Some(actual)) => expected == actual,
+                (Some(_), None) => false,
+                (None, _) => true,
+            })
             .map(|j| JobSummary {
                 id: j.id.clone(),
                 command: j.command.clone(),
@@ -292,6 +317,11 @@ impl BackgroundTaskQueue {
             let jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
             let job = jobs
                 .get(id)
+                .filter(|j| match (&self.session_id, &j.session_id) {
+                    (Some(expected), Some(actual)) => expected == actual,
+                    (Some(_), None) => false,
+                    (None, _) => true,
+                })
                 .ok_or_else(|| HarnessError::ToolExecutionFailed {
                     tool: "process".to_string(),
                     reason: format!("Background job '{}' not found", id),
@@ -321,6 +351,14 @@ impl BackgroundTaskQueue {
     pub fn kill(&self, id: &str) -> Result<bool, HarnessError> {
         let mut jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(job) = jobs.get_mut(id) {
+            if let Some(ref expected) = self.session_id {
+                if job.session_id.as_ref() != Some(expected) {
+                    return Err(HarnessError::ToolExecutionFailed {
+                        tool: "process".to_string(),
+                        reason: format!("Background job '{}' not found", id),
+                    });
+                }
+            }
             let sender = job.kill_tx.lock().unwrap_or_else(|e| e.into_inner()).take();
             if let Some(tx) = sender {
                 let _ = tx.send(());
@@ -471,5 +509,33 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+    }
+
+    #[tokio::test]
+    async fn queue_scopes_jobs_by_session_id() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let q_base = BackgroundTaskQueue::new(dir.path().join("jobs"));
+        let q_session_a = q_base.clone().with_session_id("session_a");
+        let q_session_b = q_base.clone().with_session_id("session_b");
+
+        let job_a = q_session_a.spawn("echo job_a", Path::new(".")).unwrap();
+        let job_b = q_session_b.spawn("echo job_b", Path::new(".")).unwrap();
+
+        // session_a sees only its own job
+        let list_a = q_session_a.list();
+        assert_eq!(list_a.len(), 1);
+        assert_eq!(list_a[0].id, job_a);
+
+        // session_b sees only its own job
+        let list_b = q_session_b.list();
+        assert_eq!(list_b.len(), 1);
+        assert_eq!(list_b[0].id, job_b);
+
+        // session_a cannot poll or kill session_b's job
+        assert!(q_session_a.poll(&job_b, 10).is_err());
+        assert!(q_session_a.kill(&job_b).is_err());
+
+        // unscoped queue sees both
+        assert_eq!(q_base.list().len(), 2);
     }
 }

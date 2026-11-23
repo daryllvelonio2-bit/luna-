@@ -614,6 +614,15 @@ impl Tool for TerminalTool {
 
         if let Some(ref allowlist) = self.allowlist {
             if !allowlist.is_empty() {
+                if effective_command
+                    .chars()
+                    .any(|c| matches!(c, ';' | '&' | '|' | '`' | '$' | '\n' | '\r'))
+                {
+                    return Ok(ToolResult::error(
+                        call_id,
+                        "Command chaining and substitution operators (;, &, |, `, $, newline) are not permitted when tools.terminal_allowlist is active",
+                    ));
+                }
                 let first_word = effective_command.split_whitespace().next().unwrap_or("");
                 let cmd_basename = std::path::Path::new(first_word)
                     .file_name()

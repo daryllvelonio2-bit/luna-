@@ -475,6 +475,15 @@ fn normalize_opt_string(val: Option<String>) -> Option<String> {
 }
 
 fn ensure_extra_columns(conn: &Connection) -> Result<(), String> {
+    const CURRENT_SCHEMA_VERSION: u32 = 1;
+    let current_version: u32 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap_or(0);
+
+    if current_version >= CURRENT_SCHEMA_VERSION {
+        return Ok(());
+    }
+
     let mut stmt = conn
         .prepare("PRAGMA table_info(schedules)")
         .map_err(|e| e.to_string())?;
@@ -498,6 +507,13 @@ fn ensure_extra_columns(conn: &Connection) -> Result<(), String> {
                 .map_err(|e| e.to_string())?;
         }
     }
+
+    conn.execute(
+        &format!("PRAGMA user_version = {CURRENT_SCHEMA_VERSION}"),
+        [],
+    )
+    .map_err(|e| e.to_string())?;
+
     Ok(())
 }
 

@@ -16,10 +16,12 @@ use harness_core::HarnessError;
 pub struct McpStdioClient {
     #[allow(dead_code)]
     command: String,
+    _child: Mutex<tokio::process::Child>,
     stdin: Mutex<ChildStdin>,
     reader: Mutex<BufReader<ChildStdout>>,
     next_id: AtomicU64,
     call_timeout: Duration,
+    io_lock: Mutex<()>,
 }
 
 /// The stdio command for an MCP server, with its args, environment and working directory.
@@ -30,6 +32,7 @@ fn mcp_command(
     cwd: Option<&Path>,
 ) -> Command {
     let mut cmd = Command::new(program);
+    cmd.kill_on_drop(true);
     cmd.args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -94,10 +97,12 @@ impl McpStdioClient {
 
         let client = Arc::new(Self {
             command: command.to_string(),
+            _child: Mutex::new(child),
             stdin: Mutex::new(stdin),
             reader: Mutex::new(BufReader::new(stdout)),
             next_id: AtomicU64::new(1),
             call_timeout: Duration::from_secs(call_timeout_secs),
+            io_lock: Mutex::new(()),
         });
 
         let init_fut = client.initialize();
@@ -139,6 +144,10 @@ impl McpStdioClient {
         method: &str,
         params: Option<serde_json::Value>,
     ) -> Result<serde_json::Value, HarnessError> {
+        // Guard the entire request-response transaction so concurrent tool calls
+        // cannot interleave writes and misroute read lines.
+        let _io_guard = self.io_lock.lock().await;
+
         let req_id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let req = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -163,19 +172,11 @@ impl McpStdioClient {
                 .map_err(|e| HarnessError::Io(e.to_string()))?;
         }
 
+        let start = tokio::time::Instant::now();
         let mut response_line = String::new();
-        let read_fut = async {
-            let mut reader = self.reader.lock().await;
-            reader
-                .read_line(&mut response_line)
-                .await
-                .map_err(|e| HarnessError::Io(e.to_string()))
-        };
-        match timeout(self.call_timeout, read_fut).await {
-            Ok(res) => {
-                res?;
-            }
-            Err(_) => {
+        loop {
+            let remaining = self.call_timeout.saturating_sub(start.elapsed());
+            if remaining.is_zero() {
                 return Err(HarnessError::ToolExecutionFailed {
                     tool: method.to_string(),
                     reason: format!(
@@ -185,23 +186,52 @@ impl McpStdioClient {
                     ),
                 });
             }
+
+            response_line.clear();
+            let mut reader = self.reader.lock().await;
+            match timeout(remaining, reader.read_line(&mut response_line)).await {
+                Ok(Ok(0)) => {
+                    return Err(HarnessError::Io(
+                        "MCP server closed stdout unexpectedly".to_string(),
+                    ));
+                }
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => return Err(HarnessError::Io(e.to_string())),
+                Err(_) => {
+                    return Err(HarnessError::ToolExecutionFailed {
+                        tool: method.to_string(),
+                        reason: format!(
+                            "MCP server '{}' timed out after {}s",
+                            self.command,
+                            self.call_timeout.as_secs()
+                        ),
+                    });
+                }
+            }
+
+            let trimmed = response_line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            if let Ok(resp) = serde_json::from_str::<JsonRpcResponse>(trimmed) {
+                if resp.id == Some(req_id) {
+                    if let Some(err) = resp.error {
+                        return Err(HarnessError::ToolExecutionFailed {
+                            tool: method.to_string(),
+                            reason: format!("MCP error {}: {}", err.code, err.message),
+                        });
+                    }
+                    return Ok(resp.result.unwrap_or(serde_json::Value::Null));
+                }
+                debug!(
+                    "ignoring non-matching or notification MCP message: {}",
+                    trimmed
+                );
+            } else {
+                debug!("ignoring unparseable MCP stdout line: {}", trimmed);
+            }
         }
-
-        let resp: JsonRpcResponse = serde_json::from_str(&response_line).map_err(|e| {
-            HarnessError::SerializationError(format!(
-                "Failed to parse response '{}': {}",
-                response_line, e
-            ))
-        })?;
-
-        if let Some(err) = resp.error {
-            return Err(HarnessError::ToolExecutionFailed {
-                tool: method.to_string(),
-                reason: format!("MCP error {}: {}", err.code, err.message),
-            });
-        }
-
-        Ok(resp.result.unwrap_or(serde_json::Value::Null))
     }
 
     pub async fn list_tools(&self) -> Result<Vec<McpToolInfo>, HarnessError> {

@@ -17,4 +17,4 @@ tracing = { workspace = true }
 futures-util = { workspace = true }
 cpal = { workspace = true }
 rodio = { workspace = true }
-hound = { workspace = true }
+hound = "3.5"
