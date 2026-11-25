@@ -609,6 +609,7 @@ pub(super) fn wire_delegate_notifications(
     delegate_tool.set_event_notifier(delegate_event_notifier(
         ui.clone(),
         delegate_trackers.clone(),
+        session_id.to_string(),
     ));
     delegate_tool.set_notifier(delegate_completion_notifier(
         ui.clone(),

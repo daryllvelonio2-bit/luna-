@@ -6,7 +6,8 @@ use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
 async fn the_inactivity_watchdog_stops_a_silent_child() {
-    let tracker = SubagentActivityTracker::new("sub_silent".to_string(), "wait".to_string(), None);
+    let tracker =
+        SubagentActivityTracker::new("sub_silent".to_string(), "wait".to_string(), None, None);
     let cancel = CancellationToken::new();
 
     let result = await_subagent_with_inactivity_timeout(
@@ -27,7 +28,8 @@ async fn the_inactivity_watchdog_stops_a_silent_child() {
 
 #[tokio::test]
 async fn progress_resets_the_inactivity_watchdog() {
-    let tracker = SubagentActivityTracker::new("sub_active".to_string(), "work".to_string(), None);
+    let tracker =
+        SubagentActivityTracker::new("sub_active".to_string(), "work".to_string(), None, None);
     let progress_tracker = tracker.clone();
     let cancel = CancellationToken::new();
     let progress = async move {
@@ -221,6 +223,65 @@ async fn a_background_child_reports_start_progress_and_finish() {
     assert!(seen.contains(&"finished".to_string()), "{seen:?}");
 }
 
+/// A child belongs to the session that started it: its notice must not land in another
+/// session's conversation.
+#[tokio::test]
+async fn a_child_reports_the_session_that_started_it() {
+    let tmp = tempfile::tempdir().expect("temporary directory");
+    let mut config = Config::default();
+    config.paths.workspace_root = tmp.path().to_path_buf();
+    config.paths.todos_dir = tmp.path().join("todos");
+    config.paths.jobs_dir = tmp.path().join("jobs");
+
+    let delegate = DelegateTaskTool::new(
+        Arc::new(EchoProvider),
+        Arc::new(EmptyMemory),
+        Arc::new(EmptyNotes),
+        None,
+        config,
+    );
+    let owners = Arc::new(Mutex::new(Vec::<Option<String>>::new()));
+    let owners_by_callback = owners.clone();
+    delegate.set_event_notifier(Arc::new(move |event| match event {
+        SubagentTaskEvent::Started { session, .. } => {
+            owners_by_callback.lock().unwrap().push(session);
+        }
+        SubagentTaskEvent::Finished { record } => {
+            owners_by_callback
+                .lock()
+                .unwrap()
+                .push(record.parent_session.clone());
+        }
+        _ => {}
+    }));
+
+    let cancel = CancellationToken::new();
+    crate::session_context::scope(
+        "session-a",
+        None,
+        delegate.execute(
+            "call_scoped",
+            &json!({ "tasks": [{ "goal": "Stay in my session" }] }),
+            &cancel,
+        ),
+    )
+    .await
+    .expect("background spawn succeeds");
+
+    for _ in 0..200 {
+        if owners.lock().unwrap().len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let owners = owners.lock().unwrap().clone();
+    assert_eq!(owners.len(), 2, "started and finished reported: {owners:?}");
+    for owner in &owners {
+        assert_eq!(owner.as_deref(), Some("session-a"), "{owners:?}");
+    }
+}
+
 #[tokio::test]
 async fn a_worker_forks_the_conversation_and_reports_as_a_subagent() {
     let tmp = tempfile::tempdir().expect("temporary directory");
@@ -382,7 +443,7 @@ async fn a_delegated_child_honours_the_session_approval_mode() {
 #[tokio::test]
 async fn test_watchdog_does_not_timeout_while_tool_is_running() {
     let tracker =
-        SubagentActivityTracker::new("sub_tool_busy".to_string(), "tool".to_string(), None);
+        SubagentActivityTracker::new("sub_tool_busy".to_string(), "tool".to_string(), None, None);
     let cancel = CancellationToken::new();
 
     // Tool starts: active_tools becomes 1

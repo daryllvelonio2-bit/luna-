@@ -349,19 +349,29 @@ pub(super) async fn job(
         &completion.status,
         &format_elapsed_secs(completion.elapsed_secs),
     );
-    ui.emit_above(&notice);
 
     // Store the full result before any turn can replay it. A turn already running
     // loaded its history before this row existed, which is what the deferred
     // auto-resume below is for; the next turn will see it either way.
+    //
+    // A job belongs to the session that started it: another session's completion is stored
+    // in that session's transcript and wakes nothing here.
     let message = harness_core::Message::system(format_job_system_message(&completion));
-    let stored = match store.append(session_id, &message, false).await {
+    let owner = completion
+        .session_id
+        .clone()
+        .unwrap_or_else(|| (*session_id).clone());
+    let stored = match store.append(&owner, &message, false).await {
         Ok(_) => true,
         Err(error) => {
             tracing::warn!("failed to store background job completion: {}", error);
             false
         }
     };
+    if owner != **session_id {
+        return;
+    }
+    ui.emit_above(&notice);
 
     // Only a stored completion can drive a turn: the model reads it from the replay,
     // and a turn started without that row would have nothing to react to. If the

@@ -605,18 +605,41 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
 
             maybe_job = env.job_rx.recv() => {
                 if let Some(comp) = maybe_job {
-                    needs_redraw = true;
-                    st.system_notices.push(state::SystemNotice::new(format!(
-                        "Job {} ({}): {}",
-                        comp.id,
-                        comp.status,
-                        comp.command
-                    )));
+                    // A job belongs to the session that started it. When the user is looking at
+                    // another tab, the completion is stored in the session that owns it and
+                    // waits there for that session to pick it up; it must not wake this one.
+                    let owner = comp
+                        .session_id
+                        .clone()
+                        .unwrap_or_else(|| env.session_id.clone());
                     let msg = harness_core::Message::system(format_job_system_message(&comp));
-                    if let Err(e) = env.store.append(env.session_id, &msg, false).await {
-                        tracing::warn!("failed to record background job notice: {e}");
+                    if owner != *env.session_id {
+                        if let Err(e) = env.store.append(&owner, &msg, false).await {
+                            tracing::warn!("failed to record background job notice: {e}");
+                        } else if let Some(slot) = st.background_sessions.get_mut(&owner) {
+                            slot.system_notices.push(state::SystemNotice::new(format!(
+                                "Job {} ({}): {}",
+                                comp.id,
+                                comp.status,
+                                comp.command
+                            )));
+                            slot.pending_job_turn =
+                                Some((owner.clone(), std::time::Instant::now()));
+                        }
                     } else {
-                        st.pending_job_turn = Some((env.session_id.clone(), std::time::Instant::now()));
+                        needs_redraw = true;
+                        st.system_notices.push(state::SystemNotice::new(format!(
+                            "Job {} ({}): {}",
+                            comp.id,
+                            comp.status,
+                            comp.command
+                        )));
+                        if let Err(e) = env.store.append(env.session_id, &msg, false).await {
+                            tracing::warn!("failed to record background job notice: {e}");
+                        } else {
+                            st.pending_job_turn =
+                                Some((env.session_id.clone(), std::time::Instant::now()));
+                        }
                     }
                 }
             }

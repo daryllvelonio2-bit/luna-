@@ -46,6 +46,10 @@ pub struct JobCompletion {
     pub elapsed_secs: u64,
     pub log_path: String,
     pub output_tail: String,
+    /// The session that started the job. A host with more than one session (the TUI's tabs)
+    /// reports the completion to this session, not to whichever one is on screen when the job
+    /// stops.
+    pub session_id: Option<String>,
 }
 
 /// Called exactly once per background job, from the task that reaped it.
@@ -75,6 +79,7 @@ struct JobRun {
     notify_id: String,
     notify_command: String,
     notify_log: PathBuf,
+    notify_session: Option<String>,
     started_at: Instant,
 }
 
@@ -105,6 +110,7 @@ impl JobRun {
                 elapsed_secs: self.started_at.elapsed().as_secs(),
                 log_path: self.notify_log.to_string_lossy().to_string(),
                 output_tail: read_tail(&self.notify_log, 40),
+                session_id: self.notify_session.clone(),
             });
         }
     }
@@ -255,6 +261,11 @@ impl BackgroundTaskQueue {
 
         // Register before spawning: a command that exits instantly must be findable by `process`
         // the moment its completion event reaches the host, not a scheduler tick later.
+        //
+        // The job belongs to the session that started it. The task-local is the session of the
+        // turn this call ran in — it is right even when the user has since moved to another
+        // session — and the queue's own scope covers the hosts that have no turn.
+        let session_id = crate::session_context::current().or_else(|| self.session_id.clone());
         let internal = InternalJob {
             id: id.clone(),
             command: command.to_string(),
@@ -263,7 +274,7 @@ impl BackgroundTaskQueue {
             started_at,
             log_path: log_path.clone(),
             kill_tx: kill_tx.clone(),
-            session_id: self.session_id.clone(),
+            session_id: session_id.clone(),
         };
         self.jobs
             .lock()
@@ -280,6 +291,7 @@ impl BackgroundTaskQueue {
             notify_id: id.clone(),
             notify_command: command.to_string(),
             notify_log: log_path,
+            notify_session: session_id,
             started_at,
         };
 
@@ -444,6 +456,29 @@ mod tests {
         let polled = queue.poll(&id, 40).expect("poll");
         assert_eq!(polled.status, "completed (exit 0)");
         assert!(polled.output_tail.contains("luna-job-done"));
+    }
+
+    /// The job belongs to the session that started it: a completion handed to another session
+    /// wakes the wrong conversation, so the session travels with the job.
+    #[tokio::test]
+    async fn a_job_carries_the_session_that_started_it() {
+        let (_dir, queue) = test_queue();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        queue.set_completion_notifier(Arc::new(move |completion| {
+            let _ = tx.send(completion);
+        }));
+
+        let id = crate::session_context::scope("session-a", None, async {
+            queue.spawn("echo scoped", Path::new(".")).expect("spawn")
+        })
+        .await;
+
+        let completion = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .expect("completion event")
+            .expect("notifier fired");
+        assert_eq!(completion.id, id);
+        assert_eq!(completion.session_id.as_deref(), Some("session-a"));
     }
 
     #[cfg(unix)]

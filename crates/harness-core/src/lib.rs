@@ -15,6 +15,7 @@ pub mod prompts;
 pub mod registry;
 pub mod saver;
 pub mod session;
+pub mod session_context;
 pub mod tasks;
 pub mod text;
 pub mod tools;

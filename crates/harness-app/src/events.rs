@@ -243,12 +243,17 @@ pub fn from_agent_event(session_id: &str, event: AgentEvent) -> AppEvent {
 pub fn from_subagent_event(session_id: &str, event: SubagentTaskEvent) -> AppEvent {
     let sid = session_id.to_string();
     match event {
-        SubagentTaskEvent::Started { id, goal } => AppEvent::SubagentStarted {
-            session_id: sid,
+        SubagentTaskEvent::Started { id, goal, session } => AppEvent::SubagentStarted {
+            session_id: session.unwrap_or_else(|| sid.clone()),
             id,
             goal,
         },
-        SubagentTaskEvent::Progress { id, activity, .. } => {
+        SubagentTaskEvent::Progress {
+            id,
+            activity,
+            session,
+            ..
+        } => {
             let label = match activity {
                 SubagentActivity::ModelStreaming => "streaming".to_string(),
                 SubagentActivity::ToolStarted { name } => format!("{name} running"),
@@ -271,7 +276,7 @@ pub fn from_subagent_event(session_id: &str, event: SubagentTaskEvent) -> AppEve
                 }
             };
             AppEvent::SubagentProgress {
-                session_id: sid,
+                session_id: session.unwrap_or_else(|| sid.clone()),
                 id,
                 activity: label,
             }
@@ -286,7 +291,7 @@ pub fn from_subagent_event(session_id: &str, event: SubagentTaskEvent) -> AppEve
                 SubagentStatus::Running => (true, "finished".to_string()),
             };
             AppEvent::SubagentFinished {
-                session_id: sid,
+                session_id: record.parent_session.clone().unwrap_or(sid),
                 id: record.id,
                 success,
                 summary,

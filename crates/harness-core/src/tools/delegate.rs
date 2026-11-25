@@ -86,11 +86,16 @@ pub enum SubagentTaskEvent {
     Started {
         id: String,
         goal: String,
+        /// The session that started the child. A host with more than one session draws the
+        /// row in that session, not in whichever one is on screen.
+        session: Option<String>,
     },
     Progress {
         id: String,
         goal: String,
         activity: SubagentActivity,
+        /// The session that started the child.
+        session: Option<String>,
     },
     Finished {
         record: SubagentTaskRecord,
@@ -346,6 +351,10 @@ pub struct SubagentTaskRecord {
     pub started_at: DateTime<Utc>,
     #[serde(default)]
     pub log_path: Option<String>,
+    /// The session that started the child. Its completion is reported to that session, not
+    /// to whichever one is on screen when the child finishes.
+    #[serde(default)]
+    pub parent_session: Option<String>,
 }
 
 pub type SubagentCompletionNotifier = Arc<dyn Fn(&SubagentTaskRecord) + Send + Sync>;
@@ -372,16 +381,24 @@ fn monotonic_millis() -> u64 {
 struct SubagentActivityTracker {
     id: String,
     goal: String,
+    /// The session that started the child; the live row belongs to it.
+    session: Option<String>,
     last_activity_ms: Arc<AtomicU64>,
     active_tools: Arc<std::sync::atomic::AtomicUsize>,
     notifier: Option<SubagentTaskEventNotifier>,
 }
 
 impl SubagentActivityTracker {
-    fn new(id: String, goal: String, notifier: Option<SubagentTaskEventNotifier>) -> Self {
+    fn new(
+        id: String,
+        goal: String,
+        session: Option<String>,
+        notifier: Option<SubagentTaskEventNotifier>,
+    ) -> Self {
         Self {
             id,
             goal,
+            session,
             last_activity_ms: Arc::new(AtomicU64::new(monotonic_millis())),
             active_tools: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             notifier,
@@ -413,6 +430,7 @@ impl SubagentActivityTracker {
                 id: self.id.clone(),
                 goal: self.goal.clone(),
                 activity,
+                session: self.session.clone(),
             });
         }
     }
@@ -581,6 +599,18 @@ where
 
 pub type SteerQueueHandle = Arc<RwLock<Option<Arc<Mutex<VecDeque<String>>>>>>;
 
+/// The steer queue of the session that asked for the work.
+///
+/// The tool's own handle follows whichever session is on screen. A child started by a turn
+/// that is still running in another tab must report back to that turn, not to the tab the
+/// user happens to be looking at when the child finishes.
+fn session_steer_handle(fallback: &SteerQueueHandle) -> SteerQueueHandle {
+    match crate::session_context::current_steer_queue() {
+        Some(queue) => Arc::new(RwLock::new(Some(queue))),
+        None => fallback.clone(),
+    }
+}
+
 pub struct DelegateTaskTool {
     provider: Arc<dyn ModelProvider>,
     memory: Arc<dyn MemoryEngine>,
@@ -685,6 +715,7 @@ impl DelegateTaskTool {
 
         let config = self.config.read().await.clone();
         let started_at = Utc::now();
+        let parent_session = crate::session_context::current();
         let log_path = config
             .paths
             .jobs_dir
@@ -698,6 +729,7 @@ impl DelegateTaskTool {
             status: SubagentStatus::Running,
             started_at,
             log_path: Some(log_path.clone()),
+            parent_session: parent_session.clone(),
         };
         self.tasks_state
             .write()
@@ -711,6 +743,7 @@ impl DelegateTaskTool {
             SubagentTaskEvent::Started {
                 id: child_id.clone(),
                 goal: task.to_string(),
+                session: parent_session.clone(),
             },
         );
 
@@ -725,7 +758,7 @@ impl DelegateTaskTool {
         let tasks_state = self.tasks_state.clone();
         let cancels = self.cancels.clone();
         let notifier = self.notifier.clone();
-        let steer_handle = self.steer_handle.clone();
+        let steer_handle = session_steer_handle(&self.steer_handle);
         let approver = self
             .worker_approver
             .try_read()
@@ -753,6 +786,7 @@ impl DelegateTaskTool {
                 event_notifier,
                 approver,
                 effort,
+                parent_session.clone(),
             )
             .await;
 
@@ -770,6 +804,7 @@ impl DelegateTaskTool {
                 status,
                 started_at,
                 log_path: Some(log_path),
+                parent_session: parent_session.clone(),
             };
 
             let latest_event_notifier = current_event_notifier(&event_notifier_slot);
@@ -867,6 +902,7 @@ async fn run_single_subagent(
     event_notifier: Option<SubagentTaskEventNotifier>,
     approver: Option<Arc<dyn Approver>>,
     reasoning_effort: Option<ReasoningEffort>,
+    parent_session: Option<String>,
 ) -> (String, String, Result<String, String>) {
     let child_registry = Arc::new(DefaultToolRegistry::new());
     if let Err(e) = register_child_tools(&config, &child_session_id, &child_registry).await {
@@ -892,8 +928,12 @@ async fn run_single_subagent(
     let logger = SubagentLogger::new(log_path);
     log_subagent_start(&logger, &child_session_id, &task);
 
-    let tracker =
-        SubagentActivityTracker::new(child_session_id.clone(), task.goal.clone(), event_notifier);
+    let tracker = SubagentActivityTracker::new(
+        child_session_id.clone(),
+        task.goal.clone(),
+        parent_session,
+        event_notifier,
+    );
     let activity_tracker = tracker.clone();
     let provider = Arc::new(DynProvider {
         inner: provider,
@@ -1254,7 +1294,17 @@ impl DelegateTaskTool {
         let mut items: Vec<&SubagentTaskRecord> = if let Some(ref tid) = target_id {
             state.get(tid).into_iter().collect()
         } else {
-            state.values().collect()
+            // Only this session's children: another tab's tasks are not this conversation's
+            // business.
+            let session = crate::session_context::current();
+            state
+                .values()
+                .filter(|task| match (&session, &task.parent_session) {
+                    (Some(current), Some(owner)) => current == owner,
+                    // A task with no recorded owner predates the session scope: show it.
+                    _ => true,
+                })
+                .collect()
         };
         items.sort_by_key(|r| r.started_at);
         for task in items {
@@ -1356,12 +1406,14 @@ impl DelegateTaskTool {
             let goal = task.goal.clone();
             let context = task.context.clone();
             let child_event_notifier = event_notifier.clone();
+            let parent_session = crate::session_context::current();
 
             notify_subagent_event(
                 child_event_notifier.as_ref(),
                 SubagentTaskEvent::Started {
                     id: child_session_id.clone(),
                     goal: goal.clone(),
+                    session: parent_session.clone(),
                 },
             );
 
@@ -1378,16 +1430,17 @@ impl DelegateTaskTool {
                     child_event_notifier,
                     None,
                     None,
+                    parent_session.clone(),
                 )
                 .await;
-                (sub_idx, id, goal, res, started_at, context)
+                (sub_idx, id, goal, res, started_at, context, parent_session)
             });
         }
 
         let mut results = Vec::new();
         while let Some(res) = join_set.join_next().await {
             match res {
-                Ok((idx, id, goal, outcome, started_at, context)) => {
+                Ok((idx, id, goal, outcome, started_at, context, parent_session)) => {
                     let finished_at = Utc::now();
                     let status = match &outcome {
                         Ok(reply) => SubagentStatus::Completed {
@@ -1412,6 +1465,7 @@ impl DelegateTaskTool {
                         status,
                         started_at,
                         log_path: Some(log_path_str),
+                        parent_session,
                     };
                     self.tasks_state
                         .write()
@@ -1504,6 +1558,7 @@ impl DelegateTaskTool {
         event_notifier: Option<&SubagentTaskEventNotifier>,
     ) -> (String, String) {
         let child_session_id = format!("sub_{}_{}", now.format("%Y%m%d_%H%M%S"), sub_idx);
+        let parent_session = crate::session_context::current();
         let log_path_str = current_cfg
             .paths
             .jobs_dir
@@ -1518,6 +1573,7 @@ impl DelegateTaskTool {
             status: SubagentStatus::Running,
             started_at: now,
             log_path: Some(log_path_str.clone()),
+            parent_session: parent_session.clone(),
         };
 
         self.tasks_state
@@ -1530,6 +1586,7 @@ impl DelegateTaskTool {
             SubagentTaskEvent::Started {
                 id: child_session_id.clone(),
                 goal: task.goal.clone(),
+                session: parent_session.clone(),
             },
         );
 
@@ -1546,7 +1603,7 @@ impl DelegateTaskTool {
         let tasks_state = self.tasks_state.clone();
         let cancels = self.cancels.clone();
         let notifier = self.notifier.clone();
-        let steer_handle = self.steer_handle.clone();
+        let steer_handle = session_steer_handle(&self.steer_handle);
         let cid = child_session_id.clone();
         let log_path_task = log_path_str;
         let goal_str = task.goal.clone();
@@ -1571,6 +1628,7 @@ impl DelegateTaskTool {
                 child_event_notifier,
                 None,
                 None,
+                parent_session.clone(),
             )
             .await;
 
@@ -1589,6 +1647,7 @@ impl DelegateTaskTool {
                 status,
                 started_at: now,
                 log_path: Some(log_path_task),
+                parent_session: parent_session.clone(),
             };
 
             record_subagent_finish(

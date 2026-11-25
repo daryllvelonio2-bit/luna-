@@ -372,11 +372,17 @@ impl ObserverState {
 pub(super) fn delegate_event_notifier(
     ui: Arc<ChatUi>,
     trackers: Arc<Mutex<HashMap<String, (std::time::Instant, String)>>>,
+    session_id: String,
 ) -> SubagentTaskEventNotifier {
     Arc::new(move |event| {
         use harness_core::tools::delegate::{SubagentActivity, SubagentTaskEvent};
         match event {
-            SubagentTaskEvent::Started { id, goal } => {
+            SubagentTaskEvent::Started { id, goal, session } => {
+                // A row belongs to the session that started the child. Another tab's child
+                // must not draw a row above this composer.
+                if !session_matches(&session, &session_id) {
+                    return;
+                }
                 // The live row is the notification: `start_delegate_task` draws it above the
                 // composer the moment the child starts, and every event after this one repaints
                 // that same row. Printing a line here as well put the child's state on screen
@@ -387,7 +393,15 @@ pub(super) fn delegate_event_notifier(
                 );
                 ui.start_delegate_task(&id, &goal);
             }
-            SubagentTaskEvent::Progress { id, activity, .. } => {
+            SubagentTaskEvent::Progress {
+                id,
+                activity,
+                session,
+                ..
+            } => {
+                if !session_matches(&session, &session_id) {
+                    return;
+                }
                 // Progress belongs to the live row and nowhere else. A transcript line per tool
                 // event stacked one copy of the same notification per event — a long child buried
                 // the conversation under its own progress. `update_delegate_task` repaints the
@@ -426,10 +440,24 @@ pub(super) fn delegate_event_notifier(
                 ui.update_delegate_task(&id, &label);
             }
             SubagentTaskEvent::Finished { record } => {
+                if !session_matches(&record.parent_session, &session_id) {
+                    return;
+                }
                 ui.finish_delegate_task(&record.id);
             }
         }
     })
+}
+
+/// Whether work that belongs to `owner` belongs to the session on screen.
+///
+/// A task with no owner (`None`) predates this routing and is treated as the current
+/// session's, so nothing disappears from the screen that used to show it.
+fn session_matches(owner: &Option<String>, session_id: &str) -> bool {
+    match owner {
+        Some(owner) => owner == session_id,
+        None => true,
+    }
 }
 
 /// The completion notice a finished subagent leaves above the composer.
@@ -440,10 +468,19 @@ pub(super) fn delegate_completion_notifier(
     session_id: String,
 ) -> harness_core::tools::delegate::SubagentCompletionNotifier {
     Arc::new(move |record| {
+        // The notice belongs to the session that started the child. Another tab's child
+        // stores its notice in its own transcript instead of above this composer.
+        let owner = record
+            .parent_session
+            .clone()
+            .unwrap_or_else(|| session_id.clone());
+        let is_owner = owner == session_id;
         // Safety net: the live row is normally removed by the Finished event. If that event was
         // missed for any reason, the completion callback still clears it, so a finished child
         // never leaves its last action sitting above the composer.
-        ui.finish_delegate_task(&record.id);
+        if is_owner {
+            ui.finish_delegate_task(&record.id);
+        }
         let is_ok = matches!(
             record.status,
             harness_core::tools::delegate::SubagentStatus::Completed { .. }
@@ -469,11 +506,15 @@ pub(super) fn delegate_completion_notifier(
         };
         let status = if is_ok { "finished" } else { "failed" };
         let notice = format_delegate_notification(&glyph, &title, status, &total_time);
-        ui.emit_above(&notice);
-        if !summary.is_empty() && summary != "completed" {
-            ui.emit_above(&format!("   {}", summary.dimmed()));
+        if is_owner {
+            ui.emit_above(&notice);
+            if !summary.is_empty() && summary != "completed" {
+                ui.emit_above(&format!("   {}", summary.dimmed()));
+            }
         }
-        let s_id = session_id.clone();
+        // The transcript row goes to the session that started the child, so the result is
+        // replayed there and not in the conversation the user happens to be reading.
+        let s_id = owner;
         let s_store = store.clone();
         tokio::spawn(async move {
             let _ = s_store

@@ -368,8 +368,11 @@ impl WebState {
             let job_sid = session_id.to_string();
             tokio::spawn(async move {
                 while let Some(comp) = job_rx.recv().await {
+                    // The event belongs to the session that started the job, which is not
+                    // necessarily the one this runtime was opened for.
+                    let owner = comp.session_id.clone().unwrap_or_else(|| job_sid.clone());
                     let _ = job_tx.send(AppEvent::JobCompleted {
-                        session_id: job_sid.clone(),
+                        session_id: owner,
                         job_id: comp.id,
                         command: comp.command,
                         status: comp.status,

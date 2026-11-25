@@ -624,6 +624,7 @@ fn a_finished_job_reads_as_a_notice_and_a_model_message() {
         elapsed_secs: 316,
         log_path: "/tmp/job_000001.log".to_string(),
         output_tail: "line one\nline two\n".to_string(),
+        session_id: None,
     };
 
     let notice = format_job_notification(
@@ -674,6 +675,7 @@ fn a_job_with_no_output_says_so_instead_of_leaving_a_blank() {
         elapsed_secs: 0,
         log_path: "/tmp/job_000002.log".to_string(),
         output_tail: "   \n".to_string(),
+        session_id: None,
     };
     let message = format_job_system_message(&completion);
     assert!(message.contains("(no output)"), "{message}");
@@ -690,6 +692,7 @@ fn a_huge_tail_is_trimmed_to_its_newest_characters() {
         elapsed_secs: 1,
         log_path: "/tmp/job_000003.log".to_string(),
         output_tail: format!("{}THE-END", "x".repeat(10_000)),
+        session_id: None,
     };
     let message = format_job_system_message(&completion);
     assert!(message.contains("earlier characters trimmed"), "{message}");

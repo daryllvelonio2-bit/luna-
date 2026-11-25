@@ -496,6 +496,60 @@ async fn test_registry_wired_terminal_background_job_is_pollable() {
     );
 }
 
+/// A background job started inside a session reports back to that session: the completion
+/// event carries the owner, so a host with several sessions can route it to the right one.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_background_job_reports_the_session_that_started_it() {
+    let tmp = tempdir().unwrap();
+    let mut config = Config::default();
+    config.paths.workspace_root = tmp.path().to_path_buf();
+    config.paths.jobs_dir = tmp.path().join("jobs");
+    config.tools.enabled = vec!["terminal".to_string()];
+
+    let host_queue = Arc::new(harness_core::tasks::BackgroundTaskQueue::new(
+        config.paths.jobs_dir.clone(),
+    ));
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    host_queue.set_completion_notifier(Arc::new(move |completion| {
+        let _ = tx.send(completion);
+    }));
+
+    let registry = Arc::new(DefaultToolRegistry::new());
+    let reg_dyn: Arc<dyn ToolRegistry> = registry.clone();
+    let shared = harness_core::tools::register_core_tools_shared_queue(
+        &reg_dyn,
+        &config,
+        ReadCache::new(),
+        None,
+        None,
+        host_queue.clone(),
+        TodoScope::new(tmp.path().join("todos"), "test"),
+    )
+    .await
+    .expect("core tools register");
+
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let term = TerminalTool::new(tmp.path().to_path_buf(), 5, 50_000)
+        .with_background_queue(shared.clone());
+    harness_core::session_context::scope("session-a", None, async {
+        term.execute(
+            "c_scoped",
+            &json!({ "command": "echo scoped", "background": true }),
+            &cancel,
+        )
+        .await
+        .unwrap()
+    })
+    .await;
+
+    let completion = tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
+        .await
+        .expect("completion event")
+        .expect("notifier fired");
+    assert_eq!(completion.session_id.as_deref(), Some("session-a"));
+}
+
 /// Regression: passing an existing queue in must not create a second one — the returned value
 /// is the very same `Arc`, so hosts and tools can never drift apart.
 #[tokio::test]

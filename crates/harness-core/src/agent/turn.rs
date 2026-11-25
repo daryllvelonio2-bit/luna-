@@ -491,6 +491,28 @@ where
         user_input: &str,
         cancel_token: CancellationToken,
     ) -> Result<TurnOutcome, HarnessError> {
+        // Tool calls carry no session argument, so the turn's session rides in a task-local: a
+        // background job started here belongs to this session and must be reported to it, not
+        // to whichever session the user happens to be looking at when the job stops.
+        match self.session.as_ref() {
+            Some(binding) => {
+                crate::session_context::scope(
+                    binding.session_id.clone(),
+                    Some(self.steer_queue.clone()),
+                    self.run_turn_inner(user_input, cancel_token),
+                )
+                .await
+            }
+            None => self.run_turn_inner(user_input, cancel_token).await,
+        }
+    }
+
+    /// The turn itself, run under the session scope [`Agent::run_turn`] sets.
+    async fn run_turn_inner(
+        &self,
+        user_input: &str,
+        cancel_token: CancellationToken,
+    ) -> Result<TurnOutcome, HarnessError> {
         self.completed_fold
             .lock()
             .unwrap_or_else(|e| e.into_inner())
