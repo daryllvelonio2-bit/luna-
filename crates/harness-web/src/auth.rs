@@ -72,12 +72,16 @@ impl WebAuthState {
         }
 
         if let Some(origin_val) = headers.get("origin").and_then(|v| v.to_str().ok()) {
-            if let Ok(parsed) = url::Url::parse(origin_val) {
-                if let Some(host) = parsed.host_str() {
-                    if !self.is_host_trusted(host) {
-                        return false;
-                    }
-                }
+            // An Origin that cannot be parsed (for example `null` from a sandboxed frame) must not
+            // slip past the fence by leaving the host unchecked.
+            let Ok(parsed) = url::Url::parse(origin_val) else {
+                return false;
+            };
+            if !parsed
+                .host_str()
+                .is_some_and(|host| self.is_host_trusted(host))
+            {
+                return false;
             }
         }
 
@@ -125,4 +129,29 @@ pub fn is_loopback_host(host: &str) -> bool {
         return ip.is_loopback();
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trust_fence_rejects_an_origin_it_cannot_parse() {
+        let auth = WebAuthState::new(
+            "127.0.0.1".into(),
+            Vec::new(),
+            Some("launch-token".into()),
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("host", "localhost:8080".parse().unwrap());
+
+        headers.insert("origin", "null".parse().unwrap());
+        assert!(!auth.verify_trust_fence(&headers));
+
+        headers.insert("origin", "http://localhost:8080".parse().unwrap());
+        assert!(auth.verify_trust_fence(&headers));
+
+        headers.insert("origin", "https://evil.example".parse().unwrap());
+        assert!(!auth.verify_trust_fence(&headers));
+    }
 }

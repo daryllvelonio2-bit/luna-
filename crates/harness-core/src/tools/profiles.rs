@@ -486,27 +486,33 @@ impl Tool for ProfileCreateTool {
             }
         }
 
-        let notes_copied = copy_markdown_store(
-            &self.ctx.notes_dir,
-            &paths.notes_dir,
-            arguments.get("notes"),
-        )
-        .unwrap_or(0);
-
-        // The active memory store is the Markdown tree; `memory.db` is the legacy source a profile
-        // created before the migration still needs, so both are copied.
-        let mut memories_copied = copy_markdown_store(
-            &self.ctx.memory_dir,
-            &paths.memory_dir,
-            arguments.get("memories"),
-        )
-        .unwrap_or(0);
-        memories_copied += copy_selected_memories(
-            &self.ctx.memory_db,
-            &paths.memory_db,
-            arguments.get("memories"),
-        )
-        .unwrap_or(0);
+        let copies: Result<(usize, usize), HarnessError> = (|| {
+            let notes = copy_markdown_store(
+                &self.ctx.notes_dir,
+                &paths.notes_dir,
+                arguments.get("notes"),
+            )?;
+            // The active memory store is the Markdown tree; `memory.db` is the legacy source a
+            // profile created before the migration still needs, so both are copied.
+            let mut memories = copy_markdown_store(
+                &self.ctx.memory_dir,
+                &paths.memory_dir,
+                arguments.get("memories"),
+            )?;
+            memories += copy_selected_memories(
+                &self.ctx.memory_db,
+                &paths.memory_db,
+                arguments.get("memories"),
+            )?;
+            Ok((notes, memories))
+        })();
+        let (notes_copied, memories_copied) = match copies {
+            Ok(counts) => counts,
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&staging);
+                return Ok(ToolResult::error(call_id, e.to_string()));
+            }
+        };
 
         if let Err(e) = std::fs::rename(&staging, &dest) {
             let _ = std::fs::remove_dir_all(&staging);
@@ -1271,5 +1277,61 @@ mod tests {
             "the readout counts the memory record: {}",
             created.content
         );
+    }
+
+    /// A failed copy must fail creation instead of reporting a successful, partial profile.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn profile_create_reports_copy_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let notes_dir = dir.path().join("notes");
+        std::fs::create_dir_all(&notes_dir).unwrap();
+        std::os::unix::fs::symlink(
+            dir.path().join("missing-target.md"),
+            notes_dir.join("broken.md"),
+        )
+        .unwrap();
+
+        let profiles_dir = dir.path().join("profiles");
+        let ctx = ProfileToolContext {
+            profiles_dir: profiles_dir.clone(),
+            credentials_path: dir.path().join("credentials.json"),
+            notes_dir,
+            memory_db: dir.path().join("memory.db"),
+            memory_dir: dir.path().join("memory"),
+            allow_mutation: true,
+        };
+        let cancel = CancellationToken::new();
+        let created = ProfileCreateTool { ctx }
+            .execute(
+                "call-1",
+                &json!({
+                    "name": "broken-copy",
+                    "summary": "Must not create a partial profile",
+                    "notes": "same",
+                    "copy_credentials": false
+                }),
+                &cancel,
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            created.is_error,
+            "a failed copy was reported as success: {}",
+            created.content
+        );
+        assert!(!profiles_dir.join("broken-copy").exists());
+        let staging_left: Vec<_> = std::fs::read_dir(&profiles_dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".staging-")
+            })
+            .collect();
+        assert!(staging_left.is_empty(), "the staging directory was left behind");
     }
 }
