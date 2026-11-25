@@ -820,6 +820,8 @@ pub enum TranscriptClickTarget {
     #[allow(dead_code)]
     OpenSubagent(String),
     OpenCredentialPriority(String),
+    /// Copy a fenced code block; the payload is the raw code text.
+    CopyCodeBlock(String),
 }
 
 #[derive(Debug, Clone)]
@@ -915,6 +917,8 @@ pub struct LiveContentCache {
     pub content: String,
     pub card_inner_w: usize,
     pub lines: Vec<Line<'static>>,
+    /// Code-block regions of the cached render, so copy hit boxes survive cache hits.
+    pub code_regions: Vec<crate::commands::chat::tui::markdown::CodeBlockRegion>,
 }
 
 /// Cached rendered markdown lines for active live reasoning.

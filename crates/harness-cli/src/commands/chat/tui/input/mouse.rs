@@ -467,6 +467,26 @@ pub async fn apply_transcript_click(
         TranscriptClickTarget::OpenCredentialPriority(provider) => {
             super::super::actions::open_connect_priority_credential(env, st, provider).await;
         }
+        TranscriptClickTarget::CopyCodeBlock(code) => {
+            let line_noun = {
+                let lines = code.lines().count().max(1);
+                if lines == 1 {
+                    "1 line".to_string()
+                } else {
+                    format!("{lines} lines")
+                }
+            };
+            match crate::commands::clipboard_image::write_clipboard_text(&code) {
+                Ok(()) => {
+                    st.selection_notice =
+                        Some((format!("Copied {line_noun} to clipboard"), std::time::Instant::now()));
+                }
+                Err(e) => env
+                    .ui
+                    .set_transient_error(Some(format!("Copy failed: {e}"))),
+            }
+            clear_selection(st);
+        }
     }
 }
 

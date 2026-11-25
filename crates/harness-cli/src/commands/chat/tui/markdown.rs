@@ -11,8 +11,34 @@ use super::theme::{
     text_primary,
 };
 
+/// One fenced code block in rendered Markdown: which lines it spans and the raw code text, so a
+/// transcript can hang a copy affordance on the block's header row.
+#[derive(Debug, Clone)]
+pub struct CodeBlockRegion {
+    pub first_line: usize,
+    pub last_line: usize,
+    pub code: String,
+}
+
 /// Render Markdown into wrapped `ratatui` lines constrained to `max_width` terminal cells.
 pub fn render_markdown(input: &str, max_width: usize) -> Vec<Line<'static>> {
+    render_md(input, max_width, false).0
+}
+
+/// Same as `render_markdown`, but every fenced code block gets a header row with a copy
+/// affordance, and the block regions are returned so hit boxes can be attached.
+pub fn render_markdown_with_code(
+    input: &str,
+    max_width: usize,
+) -> (Vec<Line<'static>>, Vec<CodeBlockRegion>) {
+    render_md(input, max_width, true)
+}
+
+fn render_md(
+    input: &str,
+    max_width: usize,
+    show_copy: bool,
+) -> (Vec<Line<'static>>, Vec<CodeBlockRegion>) {
     let width = max_width.max(16);
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_STRIKETHROUGH);
@@ -20,12 +46,14 @@ pub fn render_markdown(input: &str, max_width: usize) -> Vec<Line<'static>> {
 
     let parser = Parser::new_ext(input, opts);
     let mut out: Vec<Line<'static>> = Vec::new();
+    let mut code_regions: Vec<CodeBlockRegion> = Vec::new();
 
     let mut cur_spans: Vec<Span<'static>> = Vec::new();
     let mut style_stack: Vec<Style> = vec![Style::default().fg(text_primary())];
     let mut in_code_block = false;
     let mut code_lang = String::new();
     let mut code_buf = String::new();
+    let mut block_first_line = 0usize;
     let mut list_stack: Vec<Option<u64>> = Vec::new();
     let mut blockquote_depth: usize = 0;
     let mut pending_prefix: Option<Vec<Span<'static>>> = None;
@@ -140,6 +168,7 @@ pub fn render_markdown(input: &str, max_width: usize) -> Vec<Line<'static>> {
                     }
                     in_code_block = true;
                     code_buf.clear();
+                    block_first_line = out.len();
                     code_lang = match kind {
                         CodeBlockKind::Fenced(lang) => {
                             lang.split_whitespace().next().unwrap_or("").to_string()
@@ -223,7 +252,32 @@ pub fn render_markdown(input: &str, max_width: usize) -> Vec<Line<'static>> {
                 TagEnd::CodeBlock => {
                     in_code_block = false;
                     let code_width = width.saturating_sub(2);
-                    if !code_lang.is_empty() {
+                    if show_copy {
+                        // Header row doubles as the copy button: label on the left, affordance
+                        // right-aligned so a click anywhere on the row copies the block.
+                        let label = if code_lang.is_empty() {
+                            "text".to_string()
+                        } else {
+                            code_lang.clone()
+                        };
+                        let affordance = " ⧉ copy";
+                        let pad = code_width
+                            .saturating_sub(label.width() + affordance.width());
+                        out.push(Line::from(vec![
+                            Span::styled(
+                                "│ ",
+                                Style::default().fg(text_dim()).bg(bg_code()),
+                            ),
+                            Span::styled(
+                                format!("{label}{}", " ".repeat(pad)),
+                                Style::default().fg(text_muted()).bg(bg_code()),
+                            ),
+                            Span::styled(
+                                affordance,
+                                Style::default().fg(cyan_link()).bg(bg_code()),
+                            ),
+                        ]));
+                    } else if !code_lang.is_empty() {
                         out.push(Line::from(vec![
                             Span::styled("│ ", Style::default().fg(text_dim()).bg(bg_code())),
                             Span::styled(
@@ -258,6 +312,13 @@ pub fn render_markdown(input: &str, max_width: usize) -> Vec<Line<'static>> {
                             "│ ",
                             Style::default().fg(text_dim()).bg(bg_code()),
                         )));
+                    }
+                    if show_copy {
+                        code_regions.push(CodeBlockRegion {
+                            first_line: block_first_line,
+                            last_line: out.len().saturating_sub(1),
+                            code: code_buf.clone(),
+                        });
                     }
                     out.push(Line::default());
                 }
@@ -343,8 +404,11 @@ pub fn render_markdown(input: &str, max_width: usize) -> Vec<Line<'static>> {
     while out.last().is_some_and(|l| l.spans.is_empty()) {
         out.pop();
     }
+    for region in &mut code_regions {
+        region.last_line = region.last_line.min(out.len().saturating_sub(1));
+    }
 
-    out
+    (out, code_regions)
 }
 
 /// Buffered Markdown table: rows of plain cell text plus the column alignments.
@@ -1464,6 +1528,51 @@ mod tests {
         assert!(joined.contains("complex movements"));
         assert!(joined.contains("animation"));
         assert!(joined.contains("account"));
+    }
+
+    #[test]
+    fn fenced_code_blocks_report_their_span_and_text() {
+        let md = "```rust\nlet a = 1;\nlet b = 2;\n```";
+        let (lines, regions) = render_markdown_with_code(md, 64);
+        assert_eq!(regions.len(), 1, "one fenced block: {regions:?}");
+        let region = &regions[0];
+        assert_eq!(region.code, "let a = 1;\nlet b = 2;\n");
+        assert!(region.last_line > region.first_line, "block spans rows");
+
+        let header: String = lines[region.first_line]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(
+            header.contains("rust") && header.contains("copy"),
+            "header shows the language and the copy affordance: {header}"
+        );
+        assert!(
+            lines[region.last_line]
+                .spans
+                .iter()
+                .any(|s| s.content.contains("let b = 2;")),
+            "last region line is the block's final code row"
+        );
+    }
+
+    #[test]
+    fn plain_render_keeps_code_headers_button_free() {
+        let (lines, regions) = render_markdown_with_code("```rust\nlet a = 1;\n```", 64);
+        assert!(!regions.is_empty());
+        let _ = lines;
+        let lines = render_markdown("```\nlet a = 1;\n```", 64);
+        let joined = lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<String>();
+        assert!(!joined.contains("copy"), "no copy affordance: {joined}");
     }
 
     #[test]

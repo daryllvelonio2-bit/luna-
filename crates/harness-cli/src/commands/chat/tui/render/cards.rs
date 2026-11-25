@@ -242,10 +242,18 @@ pub(crate) fn render_single_settled_turn(
         if !turn.reasoning.as_deref().unwrap_or("").is_empty() || !turn.tool_items.is_empty() {
             out.push(Line::default());
         }
-        for mline in render_markdown(display_reply, card_inner_w) {
+        let (rendered, code_blocks) = render_markdown_with_code(display_reply, card_inner_w);
+        let md_base = out.len();
+        for mline in rendered {
             let mut spans = vec![Span::styled("  ", Style::default().bg(bg_canvas()))];
             spans.extend(mline.spans);
             out.push(Line::from(spans));
+        }
+        for block in code_blocks {
+            hit_targets.push((
+                md_base + block.first_line,
+                TranscriptClickTarget::CopyCodeBlock(block.code),
+            ));
         }
     }
 
@@ -625,10 +633,18 @@ pub(crate) fn render_completed_turn_process(
         } else if item.is_assistant_text() {
             let trimmed = item.output.trim();
             if !trimmed.is_empty() {
-                for mline in render_markdown(trimmed, card_inner_w) {
+                let (rendered, code_blocks) = render_markdown_with_code(trimmed, card_inner_w);
+                let md_base = out.len();
+                for mline in rendered {
                     let mut spans = vec![Span::styled("  ", Style::default().bg(bg_canvas()))];
                     spans.extend(mline.spans);
                     out.push(Line::from(spans));
+                }
+                for block in code_blocks {
+                    hit_targets.push((
+                        md_base + block.first_line,
+                        TranscriptClickTarget::CopyCodeBlock(block.code),
+                    ));
                 }
                 out.push(Line::default());
             }
@@ -724,10 +740,18 @@ pub(crate) fn render_active_turn_process(
         if item.is_assistant_text() {
             let trimmed = item.output.trim();
             if !trimmed.is_empty() {
-                for mline in render_markdown(trimmed, card_inner_w) {
+                let (rendered, code_blocks) = render_markdown_with_code(trimmed, card_inner_w);
+                let md_base = out.len();
+                for mline in rendered {
                     let mut spans = vec![Span::styled("  ", Style::default().bg(bg_canvas()))];
                     spans.extend(mline.spans);
                     out.push(Line::from(spans));
+                }
+                for block in code_blocks {
+                    hit_targets.push((
+                        md_base + block.first_line,
+                        TranscriptClickTarget::CopyCodeBlock(block.code),
+                    ));
                 }
                 out.push(Line::default());
             }
@@ -890,16 +914,28 @@ pub(crate) fn render_active_turn_process(
             live_content_cache.content = snap.content.clone();
             live_content_cache.card_inner_w = card_inner_w;
             live_content_cache.lines.clear();
-            for mline in render_markdown(&snap.content, card_inner_w) {
+            live_content_cache.code_regions.clear();
+            let (rendered, code_blocks) =
+                render_markdown_with_code(&snap.content, card_inner_w);
+            for mline in rendered {
                 let mut spans = vec![Span::styled("  ", Style::default().bg(bg_canvas()))];
                 spans.extend(mline.spans);
                 live_content_cache.lines.push(Line::from(spans));
             }
+            live_content_cache.code_regions = code_blocks;
         }
+        let live_base = out.len();
         out.extend(live_content_cache.lines.iter().cloned());
+        for block in &live_content_cache.code_regions {
+            hit_targets.push((
+                live_base + block.first_line,
+                TranscriptClickTarget::CopyCodeBlock(block.code.clone()),
+            ));
+        }
     } else {
         live_content_cache.content.clear();
         live_content_cache.lines.clear();
+        live_content_cache.code_regions.clear();
         if snap.reasoning.trim().is_empty() && snap.activity_call.is_none() {
             let spinner = SPINNER_FRAMES[spinner_tick % SPINNER_FRAMES.len()];
             out.push(Line::from(vec![
