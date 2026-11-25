@@ -261,13 +261,9 @@ fn render_md(
                             code_lang.clone()
                         };
                         let affordance = " ⧉ copy";
-                        let pad = code_width
-                            .saturating_sub(label.width() + affordance.width());
+                        let pad = code_width.saturating_sub(label.width() + affordance.width());
                         out.push(Line::from(vec![
-                            Span::styled(
-                                "│ ",
-                                Style::default().fg(text_dim()).bg(bg_code()),
-                            ),
+                            Span::styled("│ ", Style::default().fg(text_dim()).bg(bg_code())),
                             Span::styled(
                                 format!("{label}{}", " ".repeat(pad)),
                                 Style::default().fg(text_muted()).bg(bg_code()),

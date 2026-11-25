@@ -915,8 +915,7 @@ pub(crate) fn render_active_turn_process(
             live_content_cache.card_inner_w = card_inner_w;
             live_content_cache.lines.clear();
             live_content_cache.code_regions.clear();
-            let (rendered, code_blocks) =
-                render_markdown_with_code(&snap.content, card_inner_w);
+            let (rendered, code_blocks) = render_markdown_with_code(&snap.content, card_inner_w);
             for mline in rendered {
                 let mut spans = vec![Span::styled("  ", Style::default().bg(bg_canvas()))];
                 spans.extend(mline.spans);

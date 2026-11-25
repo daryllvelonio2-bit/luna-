@@ -478,8 +478,10 @@ pub async fn apply_transcript_click(
             };
             match crate::commands::clipboard_image::write_clipboard_text(&code) {
                 Ok(()) => {
-                    st.selection_notice =
-                        Some((format!("Copied {line_noun} to clipboard"), std::time::Instant::now()));
+                    st.selection_notice = Some((
+                        format!("Copied {line_noun} to clipboard"),
+                        std::time::Instant::now(),
+                    ));
                 }
                 Err(e) => env
                     .ui
