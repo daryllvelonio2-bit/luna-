@@ -1544,12 +1544,14 @@ mod tests {
             header.contains("rust") && header.contains("copy"),
             "header shows the language and the copy affordance: {header}"
         );
+        let last_row: String = lines[region.last_line]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
         assert!(
-            lines[region.last_line]
-                .spans
-                .iter()
-                .any(|s| s.content.contains("let b = 2;")),
-            "last region line is the block's final code row"
+            last_row.contains("let b = 2;"),
+            "last region line is the block's final code row: {last_row:?}"
         );
     }
 
