@@ -1039,7 +1039,7 @@ async fn resolve_clarify(
 
 #[derive(Deserialize)]
 struct AskQuestionReq {
-    tool_name: String,
+    tool_name: Option<String>,
     target: Option<String>,
     question: String,
 }
@@ -1073,15 +1073,20 @@ async fn ask_approval_question(
     )
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+    let context = match (&payload.tool_name, &payload.target) {
+        (Some(tool), Some(target)) => {
+            format!(
+                "The agent proposed tool call '{}' on target '{}'.",
+                tool, target
+            )
+        }
+        (Some(tool), None) => format!("The agent proposed tool call '{}'.", tool),
+        (None, _) => "The agent is asking a clarifying question.".to_string(),
+    };
+
     let prompt = format!(
-        "The agent proposed tool call '{}'{}. User asks: '{}'. Explain concisely.",
-        payload.tool_name,
-        payload
-            .target
-            .as_ref()
-            .map(|t| format!(" on target '{}'", t))
-            .unwrap_or_default(),
-        payload.question
+        "{} User asks: '{}'. Explain concisely.",
+        context, payload.question
     );
 
     let messages = vec![

@@ -23,6 +23,10 @@ use crate::types::*;
 /// resumed transcript should say why the sentence stops where it does.
 const INTERRUPTED_MARKER: &str = "\n\n[interrupted by your next message]";
 
+/// What is written at the end of a reply a failed request cut short: a resumed transcript should
+/// say why the sentence stops where it does when the connection dropped mid-answer.
+const FAILED_REPLY_MARKER: &str = "\n\n[reply cut off: model request failed]";
+
 /// How many times one model call is re-sent after a retryable failure.
 ///
 /// Three retries covers a short 429/503 burst (the provider's own `Retry-After` still wins) while
@@ -569,6 +573,12 @@ where
         let replay_notice = opened.replay_notice;
         let mut messages = opened.messages;
 
+        // Persist the prompt before anything else in the turn can fail: a turn that dies on it
+        // (dropped connection, exhausted retries) must still leave the prompt in the store, or a
+        // resumed session replays a transcript missing the latest chat.
+        let user_message = Message::user(user_input);
+        self.append(&user_message, false).await?;
+
         let fold_policy = self.fold_policy();
         // The newest fold this turn starts from. A fold that lands while the turn runs rewrites the
         // stored transcript, and the checks use this to tell "still over the bar" from "over the
@@ -588,7 +598,7 @@ where
         // the error ones, so a later turn cannot silently capture into the wrong checkpoint.
         let checkpoint = self.begin_checkpoint_guard(user_input);
 
-        let user_message = Message::user(user_input);
+        // Already appended to the store at turn start, above.
         // A turn can be several model calls (tool loop, retries); the ledger wants the turn's
         // total, so every reported usage is folded in later rather than kept per call.
         let turn_started = std::time::Instant::now();
@@ -604,7 +614,7 @@ where
             state: TurnState {
                 messages,
                 user_message,
-                user_appended: false,
+                user_appended: true,
                 executed_tools: Vec::new(),
                 consecutive_failures: 0,
                 last_reasoning: None,
@@ -1031,6 +1041,7 @@ where
                     options,
                     &mut state.executed_tools,
                     cancel_token,
+                    attempt == max_retries,
                 )
                 .await
             {
@@ -1391,6 +1402,7 @@ where
         options: &CompletionOptions,
         executed_tools: &mut Vec<TurnToolCall>,
         cancel_token: &CancellationToken,
+        final_attempt: bool,
     ) -> Result<Streamed, HarnessError> {
         // Count only the tools this call reports. `executed_tools` accumulates across the whole
         // turn, so testing it for emptiness would make every round after the first look as if it
@@ -1416,7 +1428,7 @@ where
         };
 
         let mut acc = StreamAccumulator::default();
-        match self
+        let stream_end = match self
             .consume_stream(
                 &mut stream,
                 &mut acc,
@@ -1425,8 +1437,45 @@ where
                 cancel_token,
                 &call_token,
             )
-            .await?
+            .await
         {
+            Ok(end) => end,
+            Err(error) => {
+                // If this error will not be retried, whatever the stream produced is the
+                // answer the user gets: store it, marked as cut off, so a resumed session
+                // keeps the exchange instead of dropping the turn.
+                let will_retry =
+                    error.is_retryable() && !final_attempt && executed_tools.len() == tools_before;
+                if !will_retry
+                    && (!acc.content.trim().is_empty() || !acc.reasoning.trim().is_empty())
+                {
+                    let content = crate::text::strip_dsml_artifacts(&acc.content);
+                    let partial = Message {
+                        role: Role::Assistant,
+                        content: if content.trim().is_empty() {
+                            None
+                        } else {
+                            Some(format!("{content}{FAILED_REPLY_MARKER}"))
+                        },
+                        reasoning: if acc.reasoning.trim().is_empty() {
+                            None
+                        } else {
+                            Some(acc.reasoning.clone())
+                        },
+                        tool_calls: Vec::new(),
+                        tool_result: None,
+                        usage: acc.usage.clone(),
+                    };
+                    if let Err(persist_error) = self.append(&partial, false).await {
+                        warn!(
+                            "Failed to persist the partial reply of a failed call: {persist_error}"
+                        );
+                    }
+                }
+                return Err(error);
+            }
+        };
+        match stream_end {
             StreamEnd::Ended => {}
             // A tool call is only usable once its arguments are complete; fragments collected so
             // far describe a request the provider never finished. Drop them and keep the prose.

@@ -55,6 +55,7 @@ jobs:
         with:
           name: luna-binary
           path: target/release/luna
+          retention-days: 1
 
   build-windows:
     runs-on: windows-latest
@@ -89,6 +90,7 @@ jobs:
         with:
           name: luna-windows-x86_64
           path: target/release/luna.exe
+          retention-days: 1
 
   publish-release:
     needs: [build, build-windows]

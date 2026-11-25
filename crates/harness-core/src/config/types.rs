@@ -534,7 +534,7 @@ impl Default for ToolsSettings {
             mutating_overrides: Vec::new(),
             network: crate::tools::netguard::NetworkPolicy::Allow,
             read_max_chars: 100_000,
-            terminal_timeout_secs: 300,
+            terminal_timeout_secs: 800,
             terminal_output_max_bytes: 50_000,
             terminal_prefix: None,
             terminal_allowlist: None,

@@ -309,6 +309,37 @@ pub async fn handle_turn_end(
             }
         }
         Ok(Err(e)) => {
+            // A failed turn is still a chat the user had: keep its records in the transcript
+            // (the core has already persisted the prompt and any partial reply), so a dropped
+            // connection does not make the latest exchange vanish from the TUI.
+            if let Some((r, secs)) = trailing_reasoning
+                .as_ref()
+                .filter(|(s, _)| !s.trim().is_empty())
+            {
+                current_tools.push(TurnProcessItem::thinking_with_duration(r.clone(), *secs));
+            }
+            if let Some(p) = trailing_prose.as_ref().filter(|s| !s.trim().is_empty()) {
+                current_tools.push(TurnProcessItem::assistant_text(p.clone()));
+            }
+            let added = turn_records(
+                &st.current_query,
+                interruptions,
+                st.turn_start,
+                turn_dur,
+                None,
+                Vec::new(),
+                current_tools,
+                format!("✖ Error: {e}"),
+            );
+            let count = added.len();
+            st.turns.extend(added);
+            for _ in 0..count {
+                st.turn_meta.push(TurnMeta {
+                    mode: st.mode.label().to_string(),
+                    model: env.current_model.clone(),
+                    output_tokens: None,
+                });
+            }
             env.ui.set_transient_error(Some(format!("Error: {e}")));
             if st.active_goal.take().is_some() {
                 env.ui.set_goal_status(None);
@@ -524,6 +555,34 @@ pub async fn handle_background_turn_end(
             }
         }
         Ok(Err(e)) => {
+            if let Some((r, secs)) = trailing_reasoning
+                .as_ref()
+                .filter(|(s, _)| !s.trim().is_empty())
+            {
+                current_tools.push(TurnProcessItem::thinking_with_duration(r.clone(), *secs));
+            }
+            if let Some(p) = trailing_prose.as_ref().filter(|s| !s.trim().is_empty()) {
+                current_tools.push(TurnProcessItem::assistant_text(p.clone()));
+            }
+            let added = turn_records(
+                &slot.current_query,
+                interruptions,
+                slot.turn_start,
+                turn_dur,
+                None,
+                Vec::new(),
+                current_tools,
+                format!("✖ Error: {e}"),
+            );
+            let count = added.len();
+            slot.turns.extend(added);
+            for _ in 0..count {
+                slot.turn_meta.push(TurnMeta {
+                    mode: slot.mode.label().to_string(),
+                    model: slot.model.clone(),
+                    output_tokens: None,
+                });
+            }
             slot.ui.set_transient_error(Some(format!("Error: {e}")));
             if slot.active_goal.take().is_some() {
                 slot.ui.set_goal_status(None);

@@ -907,3 +907,99 @@ async fn a_stop_keeps_the_provider_tools_that_already_ran() {
     assert_eq!(result.call_id, call.id);
     assert_eq!(result.content, "persisted\n");
 }
+
+struct DyingStreamProvider;
+
+#[async_trait]
+impl ModelProvider for DyingStreamProvider {
+    fn provider_id(&self) -> &str {
+        "dying-stream"
+    }
+
+    async fn fetch_models(&self) -> Result<Vec<String>, HarnessError> {
+        Ok(vec!["mock".to_string()])
+    }
+
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _options: &CompletionOptions,
+    ) -> Result<Message, HarnessError> {
+        unreachable!("the streamed path must answer, not the buffered one")
+    }
+
+    async fn stream(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _options: &CompletionOptions,
+    ) -> Result<BoxStream<'static, Result<StreamEvent, HarnessError>>, HarnessError> {
+        Ok(Box::pin(stream::iter(vec![
+            Ok(StreamEvent::ContentDelta("partial answer".to_string())),
+            Err(HarnessError::ProviderError {
+                provider: "dying-stream".to_string(),
+                message: "model exploded mid-stream".to_string(),
+            }),
+        ])))
+    }
+
+    async fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>, HarnessError> {
+        Ok(vec![])
+    }
+}
+
+#[tokio::test]
+async fn failed_turn_still_persists_prompt_and_partial_reply() {
+    let store = Arc::new(SqliteSessionStore::in_memory().expect("in-memory store"));
+    let agent = Agent::new(
+        Arc::new(DyingStreamProvider),
+        Arc::new(MockMemory),
+        Arc::new(MockNotes),
+        Arc::new(DefaultToolRegistry::new()),
+        AgentConfig::default(),
+    )
+    .with_session(SessionBinding {
+        store: store.clone(),
+        session_id: "s_failed".to_string(),
+        resume_max_messages: 200,
+    });
+
+    let err = agent
+        .run_turn("what happened", CancellationToken::new())
+        .await
+        .expect_err("the turn fails");
+    assert!(matches!(err, HarnessError::ProviderError { .. }));
+
+    let replay = store
+        .replay("s_failed", 100)
+        .await
+        .expect("the transcript replays");
+    let user_row = replay
+        .history
+        .iter()
+        .position(|stored| {
+            stored.message.role == Role::User
+                && stored.message.content.as_deref() == Some("what happened")
+        })
+        .expect("the prompt was persisted even though the turn failed");
+    let partial_row = replay
+        .history
+        .iter()
+        .position(|stored| {
+            stored.message.role == Role::Assistant
+                && stored
+                    .message
+                    .content
+                    .as_deref()
+                    .is_some_and(|c| c.contains("[reply cut off: model request failed]"))
+        })
+        .expect("the partial reply was persisted, marked as cut off");
+    assert!(replay.history[partial_row]
+        .message
+        .content
+        .as_deref()
+        .unwrap()
+        .starts_with("partial answer"));
+    assert!(partial_row > user_row, "the partial follows its prompt");
+}

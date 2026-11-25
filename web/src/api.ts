@@ -378,7 +378,7 @@ class ApiClient {
   }
 
   public async askApprovalQuestion(
-    toolName: string,
+    toolName: string | null,
     target: string | null,
     question: string
   ): Promise<string> {

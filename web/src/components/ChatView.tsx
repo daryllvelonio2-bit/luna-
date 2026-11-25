@@ -98,7 +98,7 @@ interface ChatViewProps {
   pendingClarify: ClarifyRequestPayload | null;
   onResolveClarify: (answers: Array<string | string[]>) => void;
   onAskApprovalQuestion: (
-    toolName: string,
+    toolName: string | null,
     target: string | null,
     question: string
   ) => Promise<string>;
@@ -622,6 +622,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
   // Clarify state
   const [clarifyAnswers, setClarifyAnswers] = useState<Record<number, string>>({});
   const [clarifyCustom, setClarifyCustom] = useState<Record<number, string>>({});
+  const [clarifyQuestion, setClarifyQuestion] = useState('');
+  const [clarifyQa, setClarifyQa] = useState<Array<{ q: string; a: string }>>([]);
+  const [askingClarify, setAskingClarify] = useState(false);
 
   const messagesAreaRef = useRef<HTMLDivElement>(null);
   const prevTurnRunningRef = useRef(turnRunning);
@@ -663,7 +666,12 @@ export const ChatView: React.FC<ChatViewProps> = ({
       setDenyingWithFeedback(false);
       setDenyFeedback('');
     }
-  }, [pendingApproval]);
+    if (pendingClarify) {
+      setClarifyQuestion('');
+      setClarifyQa([]);
+      setAskingClarify(false);
+    }
+  }, [pendingApproval, pendingClarify]);
 
   // Keep viewport anchored to bottom during live turns without laggy smooth-scroll fighting tokens
   useEffect(() => {
@@ -729,6 +737,24 @@ export const ChatView: React.FC<ChatViewProps> = ({
       ]);
     } finally {
       setAskingApproval(false);
+    }
+  };
+
+  const handleAskClarify = async () => {
+    const q = clarifyQuestion.trim();
+    if (!q || !pendingClarify) return;
+    setAskingClarify(true);
+    try {
+      const a = await onAskApprovalQuestion(null, null, q);
+      setClarifyQa((prev) => [...prev, { q, a }]);
+      setClarifyQuestion('');
+    } catch (e) {
+      setClarifyQa((prev) => [
+        ...prev,
+        { q, a: `Failed to query model: ${String(e)}` },
+      ]);
+    } finally {
+      setAskingClarify(false);
     }
   };
 
@@ -1562,6 +1588,42 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   />
                 </div>
               ))}
+
+              {clarifyQa.length > 0 && (
+                <div className="form-group">
+                  <span className="form-label">Model explanations</span>
+                  <div className="qa-list">
+                    {clarifyQa.map((item, i) => (
+                      <div key={i} className="qa-item">
+                        <div className="qa-question">Q: {item.q}</div>
+                        <div className="qa-answer">{item.a}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div className="form-group">
+                <span className="form-label">Ask what this is while deciding</span>
+                <div className="inline-input-row">
+                  <input
+                    type="text"
+                    className="form-input"
+                    placeholder="Ask the agent a question…"
+                    value={clarifyQuestion}
+                    onChange={(e) => setClarifyQuestion(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && handleAskClarify()}
+                  />
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    onClick={handleAskClarify}
+                    disabled={askingClarify || !clarifyQuestion.trim()}
+                  >
+                    {askingClarify ? 'Asking…' : 'Ask'}
+                  </button>
+                </div>
+              </div>
             </div>
 
             <div className="modal-footer">
