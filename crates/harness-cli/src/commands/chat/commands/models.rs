@@ -350,14 +350,16 @@ pub(crate) async fn handle_default_model_switch(
         None
     };
 
-    let new_provider = Arc::new(GenericProviderClient::new(
-        chosen_provider.clone(),
-        chosen_model.clone(),
-        cred_manager.clone(),
-        discovery.clone(),
-        config.providers.get(&chosen_provider),
-    )?
-    .with_session_id(session_id));
+    let new_provider = Arc::new(
+        GenericProviderClient::new(
+            chosen_provider.clone(),
+            chosen_model.clone(),
+            cred_manager.clone(),
+            discovery.clone(),
+            config.providers.get(&chosen_provider),
+        )?
+        .with_session_id(session_id),
+    );
 
     {
         let mut ag = agent.lock().await;
@@ -577,8 +579,7 @@ async fn apply_default_model_live(
         .map(|client| match session_id {
             Some(sid) => client.with_session_id(sid),
             None => client,
-        })
-        {
+        }) {
             agent
                 .lock()
                 .await

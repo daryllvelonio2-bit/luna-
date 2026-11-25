@@ -780,13 +780,8 @@ fn copy_markdown_store(
     if !source_dir.is_dir() {
         return Ok(0);
     }
-    std::fs::create_dir_all(dest_dir).map_err(|e| {
-        HarnessError::Io(format!(
-            "failed to create {}: {}",
-            dest_dir.display(),
-            e
-        ))
-    })?;
+    std::fs::create_dir_all(dest_dir)
+        .map_err(|e| HarnessError::Io(format!("failed to create {}: {}", dest_dir.display(), e)))?;
 
     let Some(arg) = selection else {
         return Ok(0);
@@ -1256,7 +1251,10 @@ mod tests {
             "the root note is copied"
         );
         assert!(
-            dest.notes_dir.join("project-alpha").join("nested.md").is_file(),
+            dest.notes_dir
+                .join("project-alpha")
+                .join("nested.md")
+                .is_file(),
             "the project note keeps its folder"
         );
         assert!(
@@ -1325,13 +1323,11 @@ mod tests {
         let staging_left: Vec<_> = std::fs::read_dir(&profiles_dir)
             .unwrap()
             .filter_map(|entry| entry.ok())
-            .filter(|entry| {
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with(".staging-")
-            })
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(".staging-"))
             .collect();
-        assert!(staging_left.is_empty(), "the staging directory was left behind");
+        assert!(
+            staging_left.is_empty(),
+            "the staging directory was left behind"
+        );
     }
 }

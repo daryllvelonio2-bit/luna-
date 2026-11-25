@@ -529,7 +529,9 @@ mod tests {
         let mut grandchild = None;
         for _ in 0..100 {
             tokio::time::sleep(Duration::from_millis(50)).await;
-            let Ok(polled) = queue.poll(&id, 40) else { continue };
+            let Ok(polled) = queue.poll(&id, 40) else {
+                continue;
+            };
             if let Some(pid) = polled
                 .output_tail
                 .lines()
@@ -567,7 +569,9 @@ mod tests {
         let mut tail = String::new();
         for _ in 0..100 {
             tokio::time::sleep(Duration::from_millis(50)).await;
-            let Ok(polled) = queue.poll(&id, 40) else { continue };
+            let Ok(polled) = queue.poll(&id, 40) else {
+                continue;
+            };
             if polled.status.starts_with("completed") {
                 tail = polled.output_tail;
                 break;

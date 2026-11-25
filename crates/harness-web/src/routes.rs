@@ -316,8 +316,8 @@ async fn auth_status(
     if !state.auth.verify_trust_fence(&headers) {
         return Err((StatusCode::FORBIDDEN, "Trust fence violation".into()));
     }
-    let authenticated = session_cookie(&headers)
-        .is_some_and(|token| state.auth.is_session_authorized(token));
+    let authenticated =
+        session_cookie(&headers).is_some_and(|token| state.auth.is_session_authorized(token));
     Ok(Json(serde_json::json!({
         "authenticated": authenticated,
         "user": "local"

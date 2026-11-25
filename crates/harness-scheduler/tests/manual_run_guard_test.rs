@@ -11,7 +11,7 @@ use std::time::Duration;
 use harness_scheduler::{
     CancellableDeliveryHandler, DeliveryReceipt, DeliveryTarget, ScheduleStore, SchedulerService,
 };
-use tokio::sync::{Semaphore, Notify};
+use tokio::sync::{Notify, Semaphore};
 
 #[tokio::test]
 async fn a_second_manual_run_of_a_live_task_is_refused_and_records_one_receipt() {

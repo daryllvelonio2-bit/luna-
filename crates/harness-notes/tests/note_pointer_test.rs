@@ -248,7 +248,8 @@ async fn test_renaming_a_note_does_not_destroy_the_note_it_names() {
 /// retries it instead of losing it behind a `.imported` rename.
 #[tokio::test]
 async fn test_partial_legacy_import_keeps_the_source_database() {
-    let temp_dir = std::env::temp_dir().join(format!("luna-notes-partial-{}", uuid::Uuid::new_v4()));
+    let temp_dir =
+        std::env::temp_dir().join(format!("luna-notes-partial-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&temp_dir).unwrap();
 
     let legacy_db = temp_dir.join("notes.db");

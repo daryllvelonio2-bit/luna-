@@ -35,7 +35,13 @@ const PLUGIN_CALL_TIMEOUT_MS: u64 = 5_000;
 
 fn now_millis() -> u64 {
     static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-    u64::try_from(START.get_or_init(std::time::Instant::now).elapsed().as_millis()).unwrap_or(u64::MAX)
+    u64::try_from(
+        START
+            .get_or_init(std::time::Instant::now)
+            .elapsed()
+            .as_millis(),
+    )
+    .unwrap_or(u64::MAX)
 }
 
 /// Install the deadline QuickJS polls during execution. Zero means no call is in progress.
@@ -718,40 +724,40 @@ fn run_plugin_actor(
 
     let startup_res = with_call_deadline(&call_deadline, PLUGIN_STARTUP_TIMEOUT_MS, || {
         context.with(|ctx| -> Result<(), String> {
-        install_host_bindings(
-            &ctx,
-            &manifest,
-            &plugin_dir,
-            workspace_root.as_deref(),
-            registrations.clone(),
-            live_panels.clone(),
-            live_custom_html.clone(),
-            storage.clone(),
-            tokio_handle.clone(),
-        )
-        .map_err(|e| format!("failed to install host bindings: {e}"))?;
+            install_host_bindings(
+                &ctx,
+                &manifest,
+                &plugin_dir,
+                workspace_root.as_deref(),
+                registrations.clone(),
+                live_panels.clone(),
+                live_custom_html.clone(),
+                storage.clone(),
+                tokio_handle.clone(),
+            )
+            .map_err(|e| format!("failed to install host bindings: {e}"))?;
 
-        ctx.eval::<(), _>(SDK_PRELUDE)
-            .map_err(|e| format!("SDK prelude failed: {e}"))?;
+            ctx.eval::<(), _>(SDK_PRELUDE)
+                .map_err(|e| format!("SDK prelude failed: {e}"))?;
 
-        let module = Module::declare(ctx.clone(), manifest.id.as_str(), js_code)
-            .map_err(|e| format!("plugin module parse error: {e}"))?;
-        let (evaluated, promise) = module
-            .eval()
-            .map_err(|e| format!("plugin module eval error: {e}"))?;
-        let _ = promise;
+            let module = Module::declare(ctx.clone(), manifest.id.as_str(), js_code)
+                .map_err(|e| format!("plugin module parse error: {e}"))?;
+            let (evaluated, promise) = module
+                .eval()
+                .map_err(|e| format!("plugin module eval error: {e}"))?;
+            let _ = promise;
 
-        if let Ok(apply_fn) = evaluated.get::<_, Function>("apply") {
-            let start_apply: Function = ctx
-                .globals()
-                .get("__luna_start_apply")
-                .map_err(|e| format!("missing apply starter: {e}"))?;
-            start_apply
-                .call::<_, ()>((apply_fn, manifest.id.as_str()))
-                .map_err(|e| format!("plugin apply(ctx) threw: {e}"))?;
-        }
+            if let Ok(apply_fn) = evaluated.get::<_, Function>("apply") {
+                let start_apply: Function = ctx
+                    .globals()
+                    .get("__luna_start_apply")
+                    .map_err(|e| format!("missing apply starter: {e}"))?;
+                start_apply
+                    .call::<_, ()>((apply_fn, manifest.id.as_str()))
+                    .map_err(|e| format!("plugin apply(ctx) threw: {e}"))?;
+            }
 
-        Ok(())
+            Ok(())
         })
     });
 
@@ -832,7 +838,8 @@ fn run_plugin_actor(
                 // and every handle that joins it — alive forever.
                 let _ = with_call_deadline(&call_deadline, PLUGIN_CALL_TIMEOUT_MS, || {
                     context.with(|ctx| {
-                        if let Ok(disposer) = ctx.globals().get::<_, Function>("__luna_dispose_all") {
+                        if let Ok(disposer) = ctx.globals().get::<_, Function>("__luna_dispose_all")
+                        {
                             let _ = disposer.call::<_, ()>(());
                         }
                     });

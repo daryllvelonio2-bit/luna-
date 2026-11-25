@@ -356,11 +356,7 @@ pub fn copy_markdown_files(
         let dest = dest_root.join(&relative);
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent).map_err(|error| {
-                HarnessError::Io(format!(
-                    "failed to create {}: {}",
-                    parent.display(),
-                    error
-                ))
+                HarnessError::Io(format!("failed to create {}: {}", parent.display(), error))
             })?;
         }
         std::fs::copy(&path, &dest).map_err(|error| {

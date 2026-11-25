@@ -817,7 +817,10 @@ fn list_memories(memory_dir: &Path, db: &Path) -> Vec<MemoryChoice> {
         let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
             continue;
         };
-        if choices.iter().any(|choice| choice.id.eq_ignore_ascii_case(id)) {
+        if choices
+            .iter()
+            .any(|choice| choice.id.eq_ignore_ascii_case(id))
+        {
             continue;
         }
         choices.push(MemoryChoice {
@@ -913,11 +916,7 @@ fn copy_notes(
         let dest = dest_dir.join(relative);
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent).map_err(|error| {
-                HarnessError::Io(format!(
-                    "failed to create {}: {}",
-                    parent.display(),
-                    error
-                ))
+                HarnessError::Io(format!("failed to create {}: {}", parent.display(), error))
             })?;
         }
         std::fs::copy(source, &dest).map_err(|error| {

@@ -137,11 +137,7 @@ mod tests {
 
     #[test]
     fn trust_fence_rejects_an_origin_it_cannot_parse() {
-        let auth = WebAuthState::new(
-            "127.0.0.1".into(),
-            Vec::new(),
-            Some("launch-token".into()),
-        );
+        let auth = WebAuthState::new("127.0.0.1".into(), Vec::new(), Some("launch-token".into()));
         let mut headers = HeaderMap::new();
         headers.insert("host", "localhost:8080".parse().unwrap());
 
