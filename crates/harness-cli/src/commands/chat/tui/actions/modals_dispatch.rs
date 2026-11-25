@@ -357,42 +357,42 @@ pub async fn run_select_action(
         } => {
             match choice {
                 0 => {
-                    // This session only
-                    env.cred_manager.set_session_priority_credential(
-                        env.session_id,
-                        &provider,
-                        &id,
-                    );
-                    let _ = env
+                    // This session only. Persist before touching memory so a rejected write
+                    // cannot leave a pin that vanishes on restart.
+                    match env
                         .store
                         .set_credential_priority(env.session_id, &provider, &id)
-                        .await;
-                    let current = env.cred_manager.get_rotation_strategy(&provider).await;
-                    if current != RotationStrategy::FillFirst && current != RotationStrategy::Never
+                        .await
                     {
-                        let _ = env
-                            .cred_manager
-                            .set_rotation_strategy(&provider, RotationStrategy::FillFirst)
-                            .await;
+                        Ok(()) => {
+                            env.cred_manager.set_session_priority_credential(
+                                env.session_id,
+                                &provider,
+                                &id,
+                            );
+                            env.ui.emit_above(&format!(
+                                "✔ Priority credential set for this session ({provider})"
+                            ));
+                            let ui_bg = env.ui.clone();
+                            let prov_bg = env.current_provider.clone();
+                            let mod_bg = env.current_model.clone();
+                            let cred_bg = env.cred_manager.clone();
+                            let sid_bg = env.session_id.clone();
+                            tokio::spawn(async move {
+                                refresh_antigravity_status_if_needed(
+                                    &ui_bg,
+                                    &prov_bg,
+                                    &mod_bg,
+                                    &cred_bg,
+                                    Some(&sid_bg),
+                                )
+                                .await;
+                            });
+                        }
+                        Err(error) => env.ui.set_transient_error(Some(format!(
+                            "Priority failed for this session: {error}"
+                        ))),
                     }
-                    env.ui.emit_above(&format!(
-                        "✔ Priority credential set for this session ({provider})"
-                    ));
-                    let ui_bg = env.ui.clone();
-                    let prov_bg = env.current_provider.clone();
-                    let mod_bg = env.current_model.clone();
-                    let cred_bg = env.cred_manager.clone();
-                    let sid_bg = env.session_id.clone();
-                    tokio::spawn(async move {
-                        refresh_antigravity_status_if_needed(
-                            &ui_bg,
-                            &prov_bg,
-                            &mod_bg,
-                            &cred_bg,
-                            Some(&sid_bg),
-                        )
-                        .await;
-                    });
                 }
                 1 => {
                     // Globally (all sessions)
@@ -446,30 +446,37 @@ pub async fn run_select_action(
                 }
                 2 if has_override => {
                     // Clear session priority
-                    env.cred_manager
-                        .clear_session_priority_credential(env.session_id, &provider);
-                    let _ = env
+                    match env
                         .store
                         .clear_credential_priority(env.session_id, &provider)
-                        .await;
-                    env.ui.emit_above(&format!(
-                        "✔ Cleared session priority override for {provider} (following global default)"
-                    ));
-                    let ui_bg = env.ui.clone();
-                    let prov_bg = env.current_provider.clone();
-                    let mod_bg = env.current_model.clone();
-                    let cred_bg = env.cred_manager.clone();
-                    let sid_bg = env.session_id.clone();
-                    tokio::spawn(async move {
-                        refresh_antigravity_status_if_needed(
-                            &ui_bg,
-                            &prov_bg,
-                            &mod_bg,
-                            &cred_bg,
-                            Some(&sid_bg),
-                        )
-                        .await;
-                    });
+                        .await
+                    {
+                        Ok(()) => {
+                            env.cred_manager
+                                .clear_session_priority_credential(env.session_id, &provider);
+                            env.ui.emit_above(&format!(
+                                "✔ Cleared session priority override for {provider} (following global default)"
+                            ));
+                            let ui_bg = env.ui.clone();
+                            let prov_bg = env.current_provider.clone();
+                            let mod_bg = env.current_model.clone();
+                            let cred_bg = env.cred_manager.clone();
+                            let sid_bg = env.session_id.clone();
+                            tokio::spawn(async move {
+                                refresh_antigravity_status_if_needed(
+                                    &ui_bg,
+                                    &prov_bg,
+                                    &mod_bg,
+                                    &cred_bg,
+                                    Some(&sid_bg),
+                                )
+                                .await;
+                            });
+                        }
+                        Err(error) => env.ui.set_transient_error(Some(format!(
+                            "Clearing the session priority failed: {error}"
+                        ))),
+                    }
                 }
                 _ => {}
             }
@@ -1226,6 +1233,7 @@ pub(crate) async fn apply_memory_mode_choice(
             notes_dyn,
             provider,
             model,
+            env.session_id,
             env.cred_manager.clone(),
             env.discovery.clone(),
         )?;

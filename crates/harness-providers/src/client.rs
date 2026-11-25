@@ -212,7 +212,15 @@ const HTTP_POOL_IDLE_SECS: u64 = 15;
 pub fn build_http_client(timeout_secs: u64) -> Result<reqwest::Client, HarnessError> {
     reqwest::Client::builder()
         .user_agent("luna-harness/0.1.0")
-        .timeout(std::time::Duration::from_secs(timeout_secs.max(600)))
+        // Honour `providers.<id>.timeout_secs` as configured. Anything below 600 used to be raised
+        // to 600, so a provider set to 30 seconds could hold a session — and a scheduled task — for
+        // ten minutes while a stalled route said nothing. Only 0 (unset or invalid) keeps the
+        // catalog default rather than becoming a one-second timeout.
+        .timeout(std::time::Duration::from_secs(if timeout_secs == 0 {
+            crate::catalog::DEFAULT_TIMEOUT_SECS
+        } else {
+            timeout_secs
+        }))
         .connect_timeout(std::time::Duration::from_secs(HTTP_CONNECT_TIMEOUT_SECS))
         .tcp_keepalive(Some(std::time::Duration::from_secs(HTTP_KEEPALIVE_SECS)))
         .pool_idle_timeout(Some(std::time::Duration::from_secs(HTTP_POOL_IDLE_SECS)))

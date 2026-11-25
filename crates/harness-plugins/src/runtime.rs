@@ -18,6 +18,80 @@ use crate::manifest::{
 };
 use crate::storage::{load_settings, save_settings, PluginStorage};
 
+/// How long one plugin call may run before QuickJS is interrupted.
+///
+/// Every plugin shares one actor thread: a plugin that never returns from `while (true) {}` would
+/// wedge that thread, and every later tool, command and event call would queue behind it forever.
+/// QuickJS polls the interrupt handler while it executes, so a wall-clock deadline stops the call
+/// and leaves the actor able to serve the next one.
+/// How long a plugin's `apply(ctx)` and module evaluation may run during startup.
+///
+/// Longer than a call: a plugin legitimately reads files and seeds data here. It is still bounded,
+/// because `PluginRuntimeHandle::spawn` waits on the actor's handshake: a plugin whose top-level
+/// code never returns would otherwise hang the caller, not just itself.
+const PLUGIN_STARTUP_TIMEOUT_MS: u64 = 15_000;
+
+const PLUGIN_CALL_TIMEOUT_MS: u64 = 5_000;
+
+fn now_millis() -> u64 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    u64::try_from(START.get_or_init(std::time::Instant::now).elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+/// Install the deadline QuickJS polls during execution. Zero means no call is in progress.
+fn install_call_deadline(runtime: &JsRuntime) -> Arc<std::sync::atomic::AtomicU64> {
+    let deadline = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let watched = deadline.clone();
+    runtime.set_interrupt_handler(Some(Box::new(move || {
+        let limit = watched.load(std::sync::atomic::Ordering::Relaxed);
+        limit != 0 && now_millis() >= limit
+    })));
+    deadline
+}
+
+/// Run one plugin call under the deadline.
+fn with_call_deadline<T>(
+    deadline: &std::sync::atomic::AtomicU64,
+    budget_ms: u64,
+    call: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let limit = now_millis().saturating_add(budget_ms);
+    deadline.store(limit, std::sync::atomic::Ordering::Relaxed);
+    let outcome = call();
+    deadline.store(0, std::sync::atomic::Ordering::Relaxed);
+    // An interruption surfaces as an ordinary JS exception, so report the deadline itself when it
+    // is what stopped the call.
+    match outcome {
+        Err(error) if now_millis() >= limit => Err(format!(
+            "plugin call exceeded {budget_ms}ms and was interrupted: {error}"
+        )),
+        other => other,
+    }
+}
+
+/// Invoke one `globals`-level plugin function under the call deadline, draining any jobs it queued.
+fn invoke_plugin_fn(
+    runtime: &JsRuntime,
+    context: &JsContext,
+    global: &str,
+    arg_a: &str,
+    arg_b: &str,
+    deadline: &std::sync::atomic::AtomicU64,
+) -> Result<String, String> {
+    with_call_deadline(deadline, PLUGIN_CALL_TIMEOUT_MS, || {
+        let start = context.with(|ctx| -> Result<(), String> {
+            let invoker: Function = ctx.globals().get(global).map_err(|e| e.to_string())?;
+            invoker
+                .call::<_, ()>((arg_a, arg_b))
+                .map_err(|e| e.to_string())
+        });
+        match start.and_then(|()| drain_pending_jobs(runtime)) {
+            Ok(()) => context.with(|ctx| take_async_result(&ctx)),
+            Err(e) => Err(e),
+        }
+    })
+}
+
 /// Tool metadata registered by a plugin via `ctx.tools.register(...)`.
 #[derive(Debug, Clone)]
 pub struct RegisteredPluginTool {
@@ -624,6 +698,7 @@ fn run_plugin_actor(
         },
         PluginModuleLoader,
     );
+    let call_deadline = install_call_deadline(&runtime);
     let context = match JsContext::full(&runtime) {
         Ok(ctx) => ctx,
         Err(e) => {
@@ -641,7 +716,8 @@ fn run_plugin_actor(
         }
     };
 
-    let startup_res = context.with(|ctx| -> Result<(), String> {
+    let startup_res = with_call_deadline(&call_deadline, PLUGIN_STARTUP_TIMEOUT_MS, || {
+        context.with(|ctx| -> Result<(), String> {
         install_host_bindings(
             &ctx,
             &manifest,
@@ -676,6 +752,7 @@ fn run_plugin_actor(
         }
 
         Ok(())
+        })
     });
 
     if let Err(err) = startup_res {
@@ -683,11 +760,13 @@ fn run_plugin_actor(
         return;
     }
 
-    if let Err(err) = drain_pending_jobs(&runtime) {
-        let _ = init_tx.send(Err(err));
-        return;
-    }
-    if let Err(err) = context.with(|ctx| take_async_result(&ctx)) {
+    // The async half of `apply(ctx)` is startup too: an unhandled promise that never settles must
+    // fail the plugin rather than block the handshake the caller is waiting on.
+    let settled = with_call_deadline(&call_deadline, PLUGIN_STARTUP_TIMEOUT_MS, || {
+        drain_pending_jobs(&runtime)?;
+        context.with(|ctx| take_async_result(&ctx))
+    });
+    if let Err(err) = settled {
         let _ = init_tx.send(Err(format!("plugin apply(ctx) failed: {err}")));
         return;
     }
@@ -708,19 +787,14 @@ fn run_plugin_actor(
                 args_json,
                 reply,
             } => {
-                let start = context.with(|ctx| -> Result<(), String> {
-                    let invoker: Function = ctx
-                        .globals()
-                        .get("__luna_invoke_tool")
-                        .map_err(|e| e.to_string())?;
-                    invoker
-                        .call::<_, ()>((name, args_json))
-                        .map_err(|e| e.to_string())
-                });
-                let res = match start.and_then(|()| drain_pending_jobs(&runtime)) {
-                    Ok(()) => context.with(|ctx| take_async_result(&ctx)),
-                    Err(e) => Err(e),
-                };
+                let res = invoke_plugin_fn(
+                    &runtime,
+                    &context,
+                    "__luna_invoke_tool",
+                    &name,
+                    &args_json,
+                    &call_deadline,
+                );
                 let _ = reply.send(res);
             }
             ActorCmd::CallCommand {
@@ -728,19 +802,14 @@ fn run_plugin_actor(
                 args_json,
                 reply,
             } => {
-                let start = context.with(|ctx| -> Result<(), String> {
-                    let invoker: Function = ctx
-                        .globals()
-                        .get("__luna_invoke_command")
-                        .map_err(|e| e.to_string())?;
-                    invoker
-                        .call::<_, ()>((name, args_json))
-                        .map_err(|e| e.to_string())
-                });
-                let res = match start.and_then(|()| drain_pending_jobs(&runtime)) {
-                    Ok(()) => context.with(|ctx| take_async_result(&ctx)),
-                    Err(e) => Err(e),
-                };
+                let res = invoke_plugin_fn(
+                    &runtime,
+                    &context,
+                    "__luna_invoke_command",
+                    &name,
+                    &args_json,
+                    &call_deadline,
+                );
                 let _ = reply.send(res);
             }
             ActorCmd::EmitEvent {
@@ -748,26 +817,26 @@ fn run_plugin_actor(
                 payload_json,
                 reply,
             } => {
-                let start = context.with(|ctx| -> Result<(), String> {
-                    let invoker: Function = ctx
-                        .globals()
-                        .get("__luna_dispatch_event")
-                        .map_err(|e| e.to_string())?;
-                    invoker
-                        .call::<_, ()>((event, payload_json))
-                        .map_err(|e| e.to_string())
-                });
-                let res = match start.and_then(|()| drain_pending_jobs(&runtime)) {
-                    Ok(()) => context.with(|ctx| take_async_result(&ctx)).map(|_| ()),
-                    Err(e) => Err(e),
-                };
-                let _ = reply.send(res);
+                let res = invoke_plugin_fn(
+                    &runtime,
+                    &context,
+                    "__luna_dispatch_event",
+                    &event,
+                    &payload_json,
+                    &call_deadline,
+                );
+                let _ = reply.send(res.map(|_| ()));
             }
             ActorCmd::Dispose { reply } => {
-                context.with(|ctx| {
-                    if let Ok(disposer) = ctx.globals().get::<_, Function>("__luna_dispose_all") {
-                        let _ = disposer.call::<_, ()>(());
-                    }
+                // Also bounded: a plugin whose disposer hangs must not keep the actor thread —
+                // and every handle that joins it — alive forever.
+                let _ = with_call_deadline(&call_deadline, PLUGIN_CALL_TIMEOUT_MS, || {
+                    context.with(|ctx| {
+                        if let Ok(disposer) = ctx.globals().get::<_, Function>("__luna_dispose_all") {
+                            let _ = disposer.call::<_, ()>(());
+                        }
+                    });
+                    Ok(())
                 });
                 let _ = reply.send(());
                 break;
@@ -1432,4 +1501,49 @@ fn install_host_bindings<'js>(
 
     ctx.globals().set("__luna_host", host)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+
+    /// The finding: one non-terminating plugin call used to wedge the shared actor thread forever,
+    /// so every later call queued behind it. QuickJS polls the interrupt handler while it executes;
+    /// this asserts the deadline stops the call and leaves the runtime usable.
+    #[test]
+    fn a_non_terminating_call_is_interrupted_and_the_runtime_survives() {
+        let runtime = JsRuntime::new().expect("runtime");
+        let deadline = install_call_deadline(&runtime);
+        let context = JsContext::full(&runtime).expect("context");
+
+        context.with(|ctx| {
+            ctx.eval::<(), _>("globalThis.__luna_spin = () => { while (true) {} };")
+                .expect("declare the spinning function");
+        });
+
+        let outcome = with_call_deadline(&deadline, 50, || {
+            context.with(|ctx| -> Result<(), String> {
+                let spin: Function = ctx
+                    .globals()
+                    .get("__luna_spin")
+                    .map_err(|e| e.to_string())?;
+                spin.call::<_, ()>(()).map_err(|e| e.to_string())
+            })
+        });
+
+        let error = outcome.expect_err("a non-terminating call must not return");
+        assert!(
+            error.contains("exceeded 50ms"),
+            "the error names the deadline: {error}"
+        );
+        assert_eq!(
+            deadline.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "the deadline is cleared once the call is over"
+        );
+
+        // The next call runs normally: the death was the call's, not the actor's.
+        let value: i32 = context.with(|ctx| ctx.eval("40 + 2").expect("eval"));
+        assert_eq!(value, 42);
+    }
 }

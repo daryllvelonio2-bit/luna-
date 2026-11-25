@@ -40,6 +40,7 @@ pub(crate) async fn handle_bgsaver_model_command(
     toggles: &FeatureToggles,
     current_provider: &str,
     current_model: &str,
+    session_id: &str,
     arg: Option<&str>,
 ) -> Result<(), HarnessError> {
     if arg.is_some_and(|value| {
@@ -64,6 +65,7 @@ pub(crate) async fn handle_bgsaver_model_command(
                 notes,
                 current_provider,
                 current_model,
+                session_id,
                 cred_manager.clone(),
                 discovery.clone(),
             )?;
@@ -116,6 +118,7 @@ pub(crate) async fn handle_bgsaver_model_command(
         notes,
         &provider,
         &model,
+        session_id,
         cred_manager.clone(),
         discovery.clone(),
     )?;
@@ -197,6 +200,7 @@ pub(crate) async fn apply_bgsaver_model_choice(
     toggles: &FeatureToggles,
     current_provider: &str,
     current_model: &str,
+    session_id: &str,
     provider: String,
     model: String,
 ) -> Result<(), HarnessError> {
@@ -207,6 +211,7 @@ pub(crate) async fn apply_bgsaver_model_choice(
         notes,
         &provider,
         &model,
+        session_id,
         cred_manager.clone(),
         discovery.clone(),
     )?;

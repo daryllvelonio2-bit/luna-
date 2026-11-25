@@ -31,6 +31,7 @@ pub(crate) async fn handle_model_switch(
     current_provider: &mut String,
     current_model: &mut String,
     compact_model: &Option<String>,
+    delegate: Option<&harness_core::tools::DelegateTaskTool>,
 ) -> Result<(), HarnessError> {
     let Some((chosen_provider, chosen_model)) = pick_provider_and_model(
         key_rx.as_deref_mut(),
@@ -63,6 +64,7 @@ pub(crate) async fn handle_model_switch(
         &chosen_provider,
         &chosen_model,
         chosen_effort,
+        delegate,
     )
     .await?;
 
@@ -173,6 +175,7 @@ async fn apply_model_switch(
     chosen_provider: &str,
     chosen_model: &str,
     chosen_effort: Option<ReasoningEffort>,
+    delegate: Option<&harness_core::tools::DelegateTaskTool>,
 ) -> Result<(), HarnessError> {
     let new_provider = Arc::new(
         GenericProviderClient::new(
@@ -187,11 +190,16 @@ async fn apply_model_switch(
 
     {
         let mut ag = agent.lock().await;
-        ag.set_provider(new_provider);
+        ag.set_provider(new_provider.clone());
         ag.set_reasoning_effort(chosen_effort);
         ag.set_context_window(Some(
             context_window(config, discovery, chosen_provider, chosen_model) as usize,
         ));
+    }
+    // Children spawned after this point must run on the model the user just chose, not the one the
+    // delegate tool was built with.
+    if let Some(delegate) = delegate {
+        delegate.set_provider(new_provider);
     }
     Ok(())
 }
@@ -298,6 +306,7 @@ pub(crate) async fn handle_default_model_switch(
     current_model: &mut String,
     compact_model: &Option<String>,
     arg: Option<&str>,
+    delegate: Option<&harness_core::tools::DelegateTaskTool>,
 ) -> Result<(), HarnessError> {
     let scope = arg.map(|a| a.trim().to_ascii_lowercase());
     let explicit_global = scope
@@ -347,17 +356,22 @@ pub(crate) async fn handle_default_model_switch(
         cred_manager.clone(),
         discovery.clone(),
         config.providers.get(&chosen_provider),
-    )?);
+    )?
+    .with_session_id(session_id));
 
     {
         let mut ag = agent.lock().await;
-        ag.set_provider(new_provider);
+        ag.set_provider(new_provider.clone());
         ag.set_context_window(Some(context_window(
             config,
             discovery,
             &chosen_provider,
             &chosen_model,
         ) as usize));
+    }
+    // Delegated children follow the live model, not the one the tool was built with.
+    if let Some(delegate) = delegate {
+        delegate.set_provider(new_provider);
     }
 
     *current_provider = chosen_provider.clone();
@@ -559,7 +573,12 @@ async fn apply_default_model_live(
             cred_manager.clone(),
             discovery.clone(),
             config.providers.get(&chosen_provider),
-        ) {
+        )
+        .map(|client| match session_id {
+            Some(sid) => client.with_session_id(sid),
+            None => client,
+        })
+        {
             agent
                 .lock()
                 .await
@@ -880,6 +899,7 @@ pub(crate) async fn apply_default_model_choice(
     chosen_provider: String,
     chosen_model: String,
     is_global: bool,
+    delegate: Option<&harness_core::tools::DelegateTaskTool>,
 ) -> Result<(), HarnessError> {
     let layers = if is_global {
         Some(harness_core::config::process_layers(
@@ -902,13 +922,17 @@ pub(crate) async fn apply_default_model_choice(
 
     {
         let mut ag = agent.lock().await;
-        ag.set_provider(new_provider);
+        ag.set_provider(new_provider.clone());
         ag.set_context_window(Some(context_window(
             config,
             discovery,
             &chosen_provider,
             &chosen_model,
         ) as usize));
+    }
+    // Delegated children follow the live model, not the one the tool was built with.
+    if let Some(delegate) = delegate {
+        delegate.set_provider(new_provider);
     }
 
     *current_provider = chosen_provider.clone();

@@ -353,7 +353,7 @@ pub async fn apply_model_selection(
         ));
         return Ok(());
     };
-    ag.set_provider(client);
+    ag.set_provider(client.clone());
     ag.set_context_window(Some(ctx_max as usize));
     if env.compact_model.is_none() {
         if let Ok(comp_client) = GenericProviderClient::new(
@@ -370,6 +370,8 @@ pub async fn apply_model_selection(
         }
     }
     drop(ag);
+    // Children spawned after the switch must run on the new model, not the startup one.
+    env.delegate_tool.set_provider(client);
     *env.current_provider = provider.to_string();
     *env.current_model = model.to_string();
     let used = env.ui.current_context_used();
@@ -464,6 +466,7 @@ pub async fn apply_model_target(
                 env.feature_toggles,
                 env.current_provider,
                 env.current_model,
+                env.session_id,
                 provider.to_string(),
                 model.to_string(),
             )

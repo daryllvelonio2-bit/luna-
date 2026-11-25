@@ -126,7 +126,13 @@ impl JobRun {
         let mut cmd = crate::tools::shell::shell_command(&self.cmd_str);
         cmd.current_dir(&self.workdir)
             .stdout(stdout)
-            .stderr(log_file);
+            .stderr(log_file)
+            // Never leak the cached sudo password into a background child.
+            .env_remove("SUDO_PASSWORD");
+
+        // Lead a fresh process group so a kill takes the whole tree with it, not just the shell.
+        #[cfg(unix)]
+        cmd.process_group(0);
 
         if let Err(error) = crate::tools::netguard::apply(&mut cmd, self.network) {
             self.finish(format!(
@@ -146,7 +152,8 @@ impl JobRun {
 
         tokio::select! {
             _ = kill_rx => {
-                #[cfg(windows)]
+                // Kill the whole process group first: the direct child is a shell and its
+                // descendants would otherwise survive a reported kill.
                 crate::tools::shell::kill_process_group(child.id());
                 let _ = child.kill().await;
                 self.finish("killed".to_string());
@@ -508,6 +515,66 @@ mod tests {
             !queue.kill(&id).expect("second kill"),
             "a stopped job is no longer killable"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_killed_job_takes_its_grandchildren_with_it() {
+        let (_dir, queue) = test_queue();
+        let id = queue
+            .spawn("sleep 60 & echo grandchild:$!; wait", Path::new("."))
+            .expect("spawn");
+
+        // Wait until the shell has printed the grandchild pid.
+        let mut grandchild = None;
+        for _ in 0..100 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let Ok(polled) = queue.poll(&id, 40) else { continue };
+            if let Some(pid) = polled
+                .output_tail
+                .lines()
+                .find_map(|line| line.strip_prefix("grandchild:"))
+                .and_then(|pid| pid.trim().parse::<i32>().ok())
+            {
+                grandchild = Some(pid);
+                break;
+            }
+        }
+        let grandchild = grandchild.expect("grandchild pid");
+
+        assert!(queue.kill(&id).expect("kill"));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        // Signal 0 probes existence without sending anything.
+        let alive = unsafe { libc::kill(grandchild, 0) == 0 };
+        assert!(!alive, "grandchild {grandchild} survived the job kill");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_background_job_does_not_inherit_the_sudo_password() {
+        // SAFETY: tests in this crate run in one process; this only adds an env var that every
+        // background command is expected to strip, so it cannot change another test's result.
+        std::env::set_var("SUDO_PASSWORD", "luna-test-sentinel");
+        let (_dir, queue) = test_queue();
+        let id = queue
+            .spawn(
+                "if [ -z \"${SUDO_PASSWORD:-}\" ]; then echo absent; else echo leaked; fi",
+                Path::new("."),
+            )
+            .expect("spawn");
+        std::env::remove_var("SUDO_PASSWORD");
+
+        let mut tail = String::new();
+        for _ in 0..100 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let Ok(polled) = queue.poll(&id, 40) else { continue };
+            if polled.status.starts_with("completed") {
+                tail = polled.output_tail;
+                break;
+            }
+        }
+        assert!(tail.contains("absent"), "tail: {tail:?}");
+        assert!(!tail.contains("leaked"), "tail: {tail:?}");
     }
 
     #[test]

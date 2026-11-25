@@ -21,6 +21,7 @@ impl<'a> SlashContext<'a> {
             self.current_model,
             self.compact_model,
             arg,
+            self.delegate_tool,
         )
         .await
         {
@@ -47,6 +48,7 @@ impl<'a> SlashContext<'a> {
             self.current_provider,
             self.current_model,
             self.compact_model,
+            self.delegate_tool,
         )
         .await
         {
@@ -105,6 +107,7 @@ impl<'a> SlashContext<'a> {
             self.toggles,
             self.current_provider.as_str(),
             self.current_model.as_str(),
+            self.session_id,
             arg,
         )
         .await

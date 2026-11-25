@@ -2,9 +2,10 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, Query, Request, State};
 use axum::http::header::{HeaderMap, SET_COOKIE};
 use axum::http::{StatusCode, Uri};
+use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::Json;
@@ -94,7 +95,6 @@ pub struct TranscriptMessageDto {
 
 pub fn create_router(state: Arc<WebState>) -> Router {
     Router::new()
-        // WebSocket stream
         .route("/api/remote.mux", get(ws_handler))
         .route("/api/ws", get(ws_handler))
         // API routes
@@ -148,6 +148,13 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .merge(crate::knowledge_routes::knowledge_router())
         .merge(crate::plugin_routes::plugin_router())
         .merge(crate::extra_routes::extra_router())
+        // Authenticate every privileged API call (HTTP and WebSocket) before the
+        // handler runs. Only the launch-token exchange, static assets, and the
+        // honest auth-status probe stay public.
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_api_auth,
+        ))
         // Static assets fallback
         .fallback(static_handler)
         .with_state(state)
@@ -156,6 +163,47 @@ pub fn create_router(state: Arc<WebState>) -> Router {
 // ---------------------------------------------------------------------------
 // Static file & Auth middleware
 // ---------------------------------------------------------------------------
+
+const SESSION_COOKIE: &str = "luna_session";
+
+/// Extract the session cookie value from request headers.
+fn session_cookie(headers: &HeaderMap) -> Option<&str> {
+    for value in headers.get_all("cookie") {
+        let Ok(raw) = value.to_str() else { continue };
+        for part in raw.split(';') {
+            if let Some((name, token)) = part.trim().split_once('=') {
+                if name.trim() == SESSION_COOKIE {
+                    let token = token.trim();
+                    if !token.is_empty() {
+                        return Some(token);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+async fn require_api_auth(
+    State(state): State<Arc<WebState>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    if !state.auth.verify_trust_fence(req.headers()) {
+        return (StatusCode::FORBIDDEN, "Trust fence violation").into_response();
+    }
+
+    let path = req.uri().path();
+    let public = !path.starts_with("/api/") || path == "/api/auth/status";
+    if public {
+        return next.run(req).await;
+    }
+
+    match session_cookie(req.headers()) {
+        Some(token) if state.auth.is_session_authorized(token) => next.run(req).await,
+        _ => (StatusCode::UNAUTHORIZED, "Unauthorized").into_response(),
+    }
+}
 
 #[derive(Deserialize)]
 struct TokenQuery {
@@ -268,8 +316,10 @@ async fn auth_status(
     if !state.auth.verify_trust_fence(&headers) {
         return Err((StatusCode::FORBIDDEN, "Trust fence violation".into()));
     }
+    let authenticated = session_cookie(&headers)
+        .is_some_and(|token| state.auth.is_session_authorized(token));
     Ok(Json(serde_json::json!({
-        "authenticated": true,
+        "authenticated": authenticated,
         "user": "local"
     })))
 }
@@ -1181,6 +1231,7 @@ async fn set_default_model(
                             notes_dyn,
                             &payload.provider,
                             &payload.model,
+                            sid,
                             rt.cred_manager.clone(),
                             rt.discovery.clone(),
                         ) {
@@ -1217,8 +1268,12 @@ async fn set_default_model(
                         rt.current_provider = payload.provider.clone();
                         rt.current_model = payload.model.clone();
                         let mut ag = rt.agent.lock().await;
-                        ag.set_provider(client);
+                        ag.set_provider(client.clone());
                         ag.set_context_window(Some(window));
+                        drop(ag);
+                        // Delegated children follow the live model, not the one the tool was
+                        // built with.
+                        rt.delegate_tool.set_provider(client);
                     }
                 }
                 state.emit_event(AppEvent::ModelChanged {
@@ -1660,33 +1715,43 @@ async fn run_schedule_task(
         .get(&task_id)
         .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
 
-    let session_id = state
-        .resolve_schedule_session(&task)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    // The in-flight mark is what keeps a double click — or a due tick racing this call — from
+    // running the same automation twice and overwriting each other's delivery receipt.
+    if state.scheduler.is_running(&task_id) {
+        return Err((
+            StatusCode::CONFLICT,
+            format!("automation '{}' is already running", task.name),
+        ));
+    }
+
+    // A session the target already names is echoed back; one that still has to be created is left
+    // to the delivery handler, so a refused run leaves no stray empty session behind.
+    let session_id = match &task.delivery_target {
+        DeliveryTarget::ExistingSession { session_id } if !session_id.trim().is_empty() => {
+            Some(session_id.clone())
+        }
+        DeliveryTarget::SingleNewSession {
+            session_id: Some(sid),
+        } if !sid.trim().is_empty() => Some(sid.clone()),
+        _ => None,
+    };
 
     let bg_state = Arc::clone(&state);
-    let bg_session_id = session_id.clone();
     let bg_task_id = task_id.clone();
     tokio::spawn(async move {
-        let receipt = match bg_state
-            .execute_schedule_in_session(&task, bg_session_id.clone())
-            .await
-        {
-            Ok(r) => r,
-            Err(err) => harness_scheduler::DeliveryReceipt {
-                delivered_at: chrono::Utc::now(),
-                session_id: bg_session_id,
-                status: "failed".to_string(),
-                summary: err,
-            },
-        };
+        // The scheduler's own path marks the task in flight, records exactly one receipt, and
+        // registers the cancellation token the pause and delete routes need to wake a sleep.
+        let handler = bg_state.cancellable_schedule_delivery_handler();
         if let Err(err) = bg_state
             .scheduler
-            .store()
-            .record_delivery(&bg_task_id, receipt)
+            .run_now_cancellable(&bg_task_id, &handler)
+            .await
         {
-            tracing::warn!("failed to record schedule delivery receipt: {}", err);
+            tracing::warn!(
+                "manual schedule run '{}' did not complete: {}",
+                bg_task_id,
+                err
+            );
         }
     });
 

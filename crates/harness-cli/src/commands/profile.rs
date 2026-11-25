@@ -528,6 +528,7 @@ pub(crate) fn create_profile_with(
     let paths = ProfilePaths {
         root: staging.clone(),
         memory_db: staging.join("memory.db"),
+        memory_dir: staging.join("memory"),
         notes_db: staging.join("notes.db"),
         notes_dir: staging.join("notes"),
         sessions_db: staging.join("sessions.db"),
@@ -587,7 +588,17 @@ pub(crate) fn create_profile_with(
     // Create the destination schema now so the profile opens without a first-write delay.
     // Sessions are never carried into a new profile.
     harness_core::session::SqliteSessionStore::new(Some(paths.sessions_db.clone()))?;
-    copy_notes(notes, &paths.notes_dir)?;
+    copy_notes(&source.paths.notes_dir, notes, &paths.notes_dir)?;
+    if !memories.is_empty() {
+        // The active memory store is the Markdown tree under `paths.memory_dir`; `memory.db` is
+        // only the legacy migration source, so both are copied.
+        let copied = profiles::copy_markdown_files(
+            &source.paths.memory_dir,
+            &paths.memory_dir,
+            &|_relative, stem| memories.iter().any(|id| id.eq_ignore_ascii_case(stem)),
+        )?;
+        tracing::debug!("copied {} memory record(s) into the new profile", copied);
+    }
     copy_memories(&source.paths.memory_db, &paths.memory_db, memories)?;
 
     if dest.exists() {
@@ -667,7 +678,7 @@ pub(crate) fn notes_for_copy(source: &Config) -> Vec<(String, PathBuf)> {
 
 /// The memories a new profile can inherit, as `(label, id)` pairs. Shared with the chat wizard.
 pub(crate) fn memories_for_copy(source: &Config) -> Vec<(String, String)> {
-    list_memories(&source.paths.memory_db)
+    list_memories(&source.paths.memory_dir, &source.paths.memory_db)
         .into_iter()
         .map(|choice| (choice.label, choice.id))
         .collect()
@@ -724,18 +735,13 @@ fn pick_notes(source: &Config) -> Result<Vec<PathBuf>, HarnessError> {
 }
 
 fn list_notes(dir: &Path) -> Vec<NoteChoice> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut notes: Vec<NoteChoice> = entries
-        .flatten()
-        .filter_map(|entry| {
-            let path = entry.path();
-            if !path.is_file() || path.extension().and_then(|ext| ext.to_str()) != Some("md") {
-                return None;
-            }
+    // Notes live in project subfolders, so the picker has to walk the whole tree: a flat listing
+    // would offer the user a handful of files and quietly hide the rest.
+    let mut notes: Vec<NoteChoice> = profiles::markdown_files_under(dir)
+        .into_iter()
+        .map(|(path, _relative)| {
             let title = note_title(&path);
-            Some(NoteChoice { label: title, path })
+            NoteChoice { label: title, path }
         })
         .collect();
     notes.sort_by(|a, b| a.label.cmp(&b.label));
@@ -767,7 +773,7 @@ fn pick_memories(source: &Config) -> Result<Vec<String>, HarnessError> {
     if !std::io::stdin().is_terminal() {
         return Ok(Vec::new());
     }
-    let choices = list_memories(&source.paths.memory_db);
+    let choices = list_memories(&source.paths.memory_dir, &source.paths.memory_db);
     if choices.is_empty() {
         println!("{}", "No memories to copy; starting fresh.".dimmed());
         return Ok(Vec::new());
@@ -803,7 +809,27 @@ fn pick_memories(source: &Config) -> Result<Vec<String>, HarnessError> {
     }
 }
 
-fn list_memories(db: &Path) -> Vec<MemoryChoice> {
+fn list_memories(memory_dir: &Path, db: &Path) -> Vec<MemoryChoice> {
+    let mut choices = legacy_memory_choices(db);
+    // Active records: `<domain>/<topic>/<id>.md`, so the id the picker returns is the file stem,
+    // which is what `copy_markdown_files` matches on.
+    for (path, relative) in profiles::markdown_files_under(memory_dir) {
+        let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if choices.iter().any(|choice| choice.id.eq_ignore_ascii_case(id)) {
+            continue;
+        }
+        choices.push(MemoryChoice {
+            id: id.to_string(),
+            label: relative.display().to_string(),
+        });
+    }
+    choices.sort_by(|a, b| a.label.cmp(&b.label));
+    choices
+}
+
+fn legacy_memory_choices(db: &Path) -> Vec<MemoryChoice> {
     if !db.exists() {
         return Vec::new();
     }
@@ -867,7 +893,11 @@ fn set_private(path: &Path) {
 #[cfg(not(unix))]
 fn set_private(_path: &Path) {}
 
-fn copy_notes(selected: &[PathBuf], dest_dir: &Path) -> Result<(), HarnessError> {
+fn copy_notes(
+    source_root: &Path,
+    selected: &[PathBuf],
+    dest_dir: &Path,
+) -> Result<(), HarnessError> {
     std::fs::create_dir_all(dest_dir).map_err(|error| {
         HarnessError::Io(format!(
             "failed to create {}: {}",
@@ -876,10 +906,20 @@ fn copy_notes(selected: &[PathBuf], dest_dir: &Path) -> Result<(), HarnessError>
         ))
     })?;
     for source in selected {
-        let Some(name) = source.file_name() else {
+        // Keep the project folder: flattening two projects into one directory would collide.
+        let Ok(relative) = source.strip_prefix(source_root) else {
             continue;
         };
-        let dest = dest_dir.join(name);
+        let dest = dest_dir.join(relative);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| {
+                HarnessError::Io(format!(
+                    "failed to create {}: {}",
+                    parent.display(),
+                    error
+                ))
+            })?;
+        }
         std::fs::copy(source, &dest).map_err(|error| {
             HarnessError::Io(format!(
                 "failed to copy note {}: {}",

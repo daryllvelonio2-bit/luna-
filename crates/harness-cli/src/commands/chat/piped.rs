@@ -119,6 +119,7 @@ async fn handle_model_commands(rt: &mut ChatRuntime, query: &str) -> Result<bool
             &mut rt.current_provider,
             &mut rt.current_model,
             &rt.compact_model,
+            Some(rt.delegate_tool.as_ref()),
         )
         .await?;
         return Ok(true);
@@ -168,6 +169,7 @@ async fn handle_model_commands(rt: &mut ChatRuntime, query: &str) -> Result<bool
             &mut rt.current_model,
             &rt.compact_model,
             arg_opt,
+            Some(rt.delegate_tool.as_ref()),
         )
         .await?;
         return Ok(true);
@@ -208,6 +210,7 @@ async fn handle_session_commands(
             process_expanded,
             &rt.todo_scope,
             arg,
+            Some(rt.delegate_tool.as_ref()),
         )
         .await
         {

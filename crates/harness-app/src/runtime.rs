@@ -210,6 +210,7 @@ impl AppRuntime {
             notes.clone(),
             &current_provider,
             &current_model,
+            &session_id,
             cred_manager.clone(),
             discovery.clone(),
         );

@@ -457,6 +457,17 @@ impl CredentialManager {
     async fn persist_state(&self) {
         let memory = self.state.read().await.clone();
 
+        // Hold the same file lock as every mutation for the whole read-merge-write. Without it a
+        // usage write can land after a deletion elsewhere and resurrect the removed credential,
+        // and concurrent acquires lose each other's counters.
+        let _lock = match self.acquire_store_lock() {
+            Ok(lock) => lock,
+            Err(e) => {
+                warn!(error = %e, "cannot lock the credential store; skipping rotation persist");
+                return;
+            }
+        };
+
         let mut disk = match Self::load_from_disk(&self.storage_path) {
             Ok(disk) => disk,
             Err(e) => {
@@ -1200,6 +1211,28 @@ mod tests {
             "only 1 credential should survive on disk"
         );
         assert_eq!(remaining[0].label, "keep@gmail.com");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn persist_state_waits_for_the_store_lock() {
+        let path = temp_store_path();
+        let mgr = Arc::new(CredentialManager::new(Some(path)).expect("manager"));
+        mgr.add_credential("antigravity", "one@gmail.com", "key-1", false)
+            .await
+            .expect("add");
+
+        // Holding the mutation lock must block a usage persist, not let it slip past.
+        let held = mgr.acquire_store_lock().expect("lock");
+        let for_persist = mgr.clone();
+        let persist = tokio::spawn(async move { for_persist.persist_state().await });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(!persist.is_finished(), "persist ran without the store lock");
+
+        drop(held);
+        tokio::time::timeout(std::time::Duration::from_secs(5), persist)
+            .await
+            .expect("persist should finish once the lock is released")
+            .expect("join");
     }
 
     fn temp_store_path() -> std::path::PathBuf {

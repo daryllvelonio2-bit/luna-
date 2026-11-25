@@ -4,6 +4,20 @@ use futures_util::stream::{BoxStream, StreamExt};
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 
+/// Two batches that start in the same second must not share a child ID: a shared ID would
+/// overwrite the task record, the cancellation token and the log path, and leave two children
+/// running in one child session.
+#[test]
+fn child_session_ids_are_unique_across_batches_within_one_second() {
+    let ids: Vec<String> = (0..64).map(|_| new_child_session_id()).collect();
+    let unique: std::collections::HashSet<&String> = ids.iter().collect();
+    assert_eq!(unique.len(), ids.len(), "duplicate child ID: {ids:?}");
+    assert!(
+        ids.iter().all(|id| id.starts_with("sub_")),
+        "the prefix is kept: {ids:?}"
+    );
+}
+
 #[tokio::test]
 async fn the_inactivity_watchdog_stops_a_silent_child() {
     let tracker =
@@ -171,6 +185,88 @@ impl NotesEngine for EmptyNotes {
     async fn delete_note(&self, _id: &str) -> Result<bool, HarnessError> {
         unreachable!("not used by this test")
     }
+}
+
+/// A provider whose identity is visible, so a test can tell which one a child actually used.
+struct NamedProvider(&'static str);
+
+#[async_trait]
+impl ModelProvider for NamedProvider {
+    fn provider_id(&self) -> &str {
+        self.0
+    }
+
+    async fn fetch_models(&self) -> Result<Vec<String>, HarnessError> {
+        Ok(Vec::new())
+    }
+
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _options: &CompletionOptions,
+    ) -> Result<Message, HarnessError> {
+        Ok(Message::assistant(self.0))
+    }
+
+    async fn stream(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _options: &CompletionOptions,
+    ) -> Result<BoxStream<'static, Result<StreamEvent, HarnessError>>, HarnessError> {
+        let events: Vec<Result<StreamEvent, HarnessError>> = vec![
+            Ok(StreamEvent::ContentDelta(self.0.to_string())),
+            Ok(StreamEvent::Completed {
+                finish_reason: Some("stop".to_string()),
+                usage: None,
+            }),
+        ];
+        Ok(Box::pin(futures_util::stream::iter(events)))
+    }
+
+    async fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>, HarnessError> {
+        Ok(Vec::new())
+    }
+}
+
+/// The finding: the tool kept the provider it was built with, so a child spawned after `/model`
+/// billed the startup model. Children must follow the live binding.
+#[tokio::test]
+async fn children_run_on_the_provider_the_tool_was_rebound_to() {
+    let tmp = tempfile::tempdir().expect("temporary directory");
+    let mut config = Config::default();
+    config.paths.workspace_root = tmp.path().to_path_buf();
+    config.paths.todos_dir = tmp.path().join("todos");
+    config.paths.jobs_dir = tmp.path().join("jobs");
+
+    let delegate = DelegateTaskTool::new(
+        Arc::new(NamedProvider("startup")),
+        Arc::new(EmptyMemory),
+        Arc::new(EmptyNotes),
+        None,
+        config,
+    );
+    delegate.set_provider(Arc::new(NamedProvider("switched")));
+
+    assert_eq!(delegate.provider().provider_id(), "switched");
+
+    let cancel = CancellationToken::new();
+    let result = delegate
+        .execute(
+            "call_rebound",
+            &json!({ "tasks": [{ "goal": "Report which model you are" }], "background": false }),
+            &cancel,
+        )
+        .await
+        .expect("blocking spawn succeeds");
+
+    assert!(!result.is_error, "{}", result.content);
+    assert!(
+        result.content.contains("switched"),
+        "the child replied through the rebound provider: {}",
+        result.content
+    );
 }
 
 #[tokio::test]

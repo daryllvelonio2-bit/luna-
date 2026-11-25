@@ -222,6 +222,7 @@ pub(crate) async fn apply_default_target(
         provider.to_string(),
         model.to_string(),
         is_global,
+        Some(env.delegate_tool.as_ref()),
     )
     .await
 }

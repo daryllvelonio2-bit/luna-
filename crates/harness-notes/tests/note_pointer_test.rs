@@ -219,6 +219,79 @@ async fn test_legacy_notes_db_import_and_rename() {
 }
 
 #[tokio::test]
+async fn test_renaming_a_note_does_not_destroy_the_note_it_names() {
+    let engine = FileNotesEngine::in_memory().unwrap();
+    let a = engine
+        .save_note("Alpha Document", "Alpha body.", &[])
+        .await
+        .unwrap();
+    let b = engine
+        .save_note("Bravo Document", "Bravo body.", &[])
+        .await
+        .unwrap();
+
+    // Renaming A onto B's title must not delete B: both bodies have to survive.
+    let renamed = engine
+        .update_note(&a.id, Some("Bravo Document"), None, None)
+        .await
+        .unwrap();
+    assert_eq!(renamed.title, "Bravo Document");
+    assert_eq!(renamed.content, "Alpha body.");
+
+    let b_after = engine.read_note(&b.id).await.unwrap();
+    assert_eq!(b_after.content, "Bravo body.");
+    assert_eq!(b_after.title, "Bravo Document");
+    assert_eq!(engine.list_notes(10, 0).await.unwrap().len(), 2);
+}
+
+/// A row the importer cannot write must keep the legacy database active, so the next start
+/// retries it instead of losing it behind a `.imported` rename.
+#[tokio::test]
+async fn test_partial_legacy_import_keeps_the_source_database() {
+    let temp_dir = std::env::temp_dir().join(format!("luna-notes-partial-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+
+    let legacy_db = temp_dir.join("notes.db");
+    {
+        let conn = rusqlite::Connection::open(&legacy_db).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE notes (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                content TEXT NOT NULL,
+                summary_pointer TEXT NOT NULL,
+                tags TEXT NOT NULL DEFAULT '[]',
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            INSERT INTO notes (id, title, content, summary_pointer, tags)
+            VALUES ('good-doc', 'Good Document', 'Importable.', 'Good', '[]');
+            INSERT INTO notes (id, title, content, summary_pointer, tags)
+            VALUES ('../escape', 'Escaping Document', 'Not importable.', 'Escaping', '[]');
+            "#,
+        )
+        .unwrap();
+    }
+
+    let notes_dir = temp_dir.join("notes");
+    let engine = FileNotesEngine::new(notes_dir, Some(legacy_db.clone())).unwrap();
+
+    // The importable row is written; the unsafe one is refused.
+    assert_eq!(
+        engine.read_note("good-doc").await.unwrap().content,
+        "Importable."
+    );
+    assert!(
+        legacy_db.exists(),
+        "a partial import must leave the legacy store in place for a retry"
+    );
+    assert!(!temp_dir.join("notes.db.imported").exists());
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
 async fn test_path_traversal_prevention() {
     let temp_dir = std::env::temp_dir().join(format!("luna-traversal-{}", uuid::Uuid::new_v4()));
     let notes_dir = temp_dir.join("notes");

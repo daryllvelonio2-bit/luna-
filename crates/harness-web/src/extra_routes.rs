@@ -15,7 +15,8 @@ use harness_core::config::{
 };
 use harness_core::profiles::{
     catalog as profile_catalog, default_profile, load as load_profile, paths_for, profile_dir,
-    validate_name as validate_profile_name, DEFAULT_PROFILE, PROFILE_FILE,
+    resolve_custom_profile_dir, validate_name as validate_profile_name, DEFAULT_PROFILE,
+    PROFILE_FILE,
 };
 use harness_core::tools::todo::{read_snapshot as read_todo_snapshot, TodoListTool};
 use harness_core::usage::{GroupBy, UsageFilter, UsageLedger};
@@ -326,13 +327,23 @@ async fn set_priority_credential(
             return Err((StatusCode::NOT_FOUND, "Credential not found".into()));
         }
     } else if let Some(sid) = payload.session_id.as_deref() {
+        // Persist first: a pin that only lives in memory disappears on restart and the UI
+        // would otherwise show a success the store never accepted.
+        state
+            .store
+            .set_credential_priority(sid, &provider, cred_id)
+            .await
+            .map_err(|e| {
+                let status = if e.to_string().contains("not found") {
+                    StatusCode::NOT_FOUND
+                } else {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                };
+                (status, e.to_string())
+            })?;
         state
             .cred_manager
             .set_session_priority_credential(sid, &provider, cred_id);
-        let _ = state
-            .store
-            .set_credential_priority(sid, &provider, cred_id)
-            .await;
     } else {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -359,9 +370,20 @@ async fn clear_priority_credential(
         }
     } else if let Some(sid) = payload.session_id.as_deref() {
         state
+            .store
+            .clear_credential_priority(sid, &provider)
+            .await
+            .map_err(|e| {
+                let status = if e.to_string().contains("not found") {
+                    StatusCode::NOT_FOUND
+                } else {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                };
+                (status, e.to_string())
+            })?;
+        state
             .cred_manager
             .clear_session_priority_credential(sid, &provider);
-        let _ = state.store.clear_credential_priority(sid, &provider).await;
     }
     Ok(StatusCode::OK)
 }
@@ -1178,7 +1200,8 @@ async fn run_worker(
         state.discovery.clone(),
         cfg_snap.providers.get(&profile.provider),
     )
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .with_session_id(&session_id);
 
     let rt = handle.runtime.lock().await;
     if profile.reasoning_effort.is_none() {
@@ -1428,6 +1451,7 @@ async fn update_settings(
                         notes_dyn,
                         &prov,
                         &modl,
+                        sid,
                         rt.cred_manager.clone(),
                         rt.discovery.clone(),
                     ) {
@@ -1629,14 +1653,9 @@ async fn delete_profile(
     State(state): State<Arc<WebState>>,
     Path(name): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    if name == DEFAULT_PROFILE {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Cannot delete the built-in default profile".into(),
-        ));
-    }
     let profiles_dir = state.config.read().await.paths.profiles_dir.clone();
-    let dir = profile_dir(&profiles_dir, &name);
+    let dir = resolve_custom_profile_dir(&profiles_dir, &name)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     if dir.exists() {
         std::fs::remove_dir_all(&dir)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;

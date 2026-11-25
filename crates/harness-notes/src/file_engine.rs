@@ -161,6 +161,7 @@ impl FileNotesEngine {
         };
 
         let mut imported = 0usize;
+        let mut failed = 0usize;
         let rows = conn.prepare(
             "SELECT id, title, content, summary_pointer, tags, created_at, updated_at FROM notes",
         );
@@ -206,7 +207,10 @@ impl FileNotesEngine {
                             .unwrap_or_else(|_| dir.to_path_buf());
                         match write_note(&target, &note, true) {
                             Ok(_) => imported += 1,
-                            Err(error) => warn!("could not import note '{}': {}", note.id, error),
+                            Err(error) => {
+                                failed += 1;
+                                warn!("could not import note '{}': {}", note.id, error);
+                            }
                         }
                     }
                 }
@@ -215,6 +219,20 @@ impl FileNotesEngine {
                 warn!("legacy note store has no usable notes table: {}", error);
                 return;
             }
+        }
+
+        // A partial import must not retire the source: renaming it to `.imported` would hide the
+        // rows that failed and leave no automatic retry. Keeping the database makes the next start
+        // retry only the missing rows — `write_note(.., true)` skips the ones already written.
+        if failed > 0 {
+            warn!(
+                "imported {} note(s) from '{}' but {} failed; keeping the legacy store so the next \
+                 start retries them",
+                imported,
+                db_path.display(),
+                failed
+            );
+            return;
         }
 
         let retired = db_path.with_extension("db.imported");

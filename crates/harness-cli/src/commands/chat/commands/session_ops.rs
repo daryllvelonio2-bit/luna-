@@ -509,6 +509,7 @@ pub(crate) async fn handle_sessions_switch(
     process_expanded: &mut bool,
     todo_scope: &harness_core::tools::TodoScope,
     arg: Option<&str>,
+    delegate: Option<&harness_core::tools::DelegateTaskTool>,
 ) -> Result<(), HarnessError> {
     let Some(target_id) = pick_session_target(key_rx, ui, store, session_id, arg).await? else {
         return Ok(());
@@ -551,6 +552,7 @@ pub(crate) async fn handle_sessions_switch(
         &record,
         current_provider,
         current_model,
+        delegate,
     )
     .await;
     restore_session_compaction(
@@ -720,6 +722,7 @@ async fn restore_session_model(
     record: &harness_core::SessionRecord,
     current_provider: &mut String,
     current_model: &mut String,
+    delegate: Option<&harness_core::tools::DelegateTaskTool>,
 ) {
     if let Some((ref prov, ref mdl)) = record.model {
         if prov != current_provider || mdl != current_model {
@@ -731,7 +734,12 @@ async fn restore_session_model(
                 config.providers.get(prov),
             ) {
                 Ok(client) => {
-                    agent.lock().await.set_provider(Arc::new(client));
+                    let client = Arc::new(client.with_session_id(&record.id));
+                    agent.lock().await.set_provider(client.clone());
+                    // Children spawned in the restored session bill to that session's model.
+                    if let Some(delegate) = delegate {
+                        delegate.set_provider(client);
+                    }
                     *current_provider = prov.clone();
                     *current_model = mdl.clone();
                 }

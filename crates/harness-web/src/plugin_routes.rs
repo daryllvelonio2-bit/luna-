@@ -535,6 +535,46 @@ export function apply(ctx: Context): void {
         let client = reqwest::Client::new();
         let base = format!("http://{addr}");
 
+        // Every privileged route requires the exchanged session cookie.
+        assert_eq!(
+            client
+                .get(format!("{base}/api/plugins"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            reqwest::StatusCode::UNAUTHORIZED
+        );
+        let status: serde_json::Value = client
+            .get(format!("{base}/api/auth/status"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(status["authenticated"], false);
+
+        let session_token = state.auth.exchange_launch_token("tok").unwrap();
+        let mut auth_headers = reqwest::header::HeaderMap::new();
+        auth_headers.insert(
+            reqwest::header::COOKIE,
+            format!("luna_session={session_token}").parse().unwrap(),
+        );
+        let client = reqwest::Client::builder()
+            .default_headers(auth_headers)
+            .build()
+            .unwrap();
+        let status: serde_json::Value = client
+            .get(format!("{base}/api/auth/status"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(status["authenticated"], true);
+
         // 1. Fetch plugin summary
         let summary: PluginSummary = client
             .get(format!("{base}/api/plugins/task-board"))

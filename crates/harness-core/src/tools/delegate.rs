@@ -376,6 +376,22 @@ fn monotonic_millis() -> u64 {
     u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
 }
 
+/// A child ID unique to one child, whether or not another batch started in the same second.
+///
+/// The second alone is not enough: two `delegate_task` calls in the same second each start at
+/// index 1, and a shared ID would overwrite the task record, the cancellation token and the log
+/// path, leaving two children sharing one child session. The pid separates processes and the
+/// counter separates children within one.
+fn new_child_session_id() -> String {
+    static SEQ: AtomicU64 = AtomicU64::new(1);
+    format!(
+        "sub_{}_{}_{}",
+        Utc::now().format("%Y%m%d_%H%M%S%3f"),
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
 /// Tracks whether a delegated child is still making progress.
 #[derive(Clone)]
 struct SubagentActivityTracker {
@@ -612,7 +628,9 @@ fn session_steer_handle(fallback: &SteerQueueHandle) -> SteerQueueHandle {
 }
 
 pub struct DelegateTaskTool {
-    provider: Arc<dyn ModelProvider>,
+    /// The provider a child runs on. Swappable: the session's model can change after the tool is
+    /// built, and a child must use the model the user selected, not the startup one.
+    provider: std::sync::RwLock<Arc<dyn ModelProvider>>,
     memory: Arc<dyn MemoryEngine>,
     notes: Arc<dyn NotesEngine>,
     store: Option<Arc<SqliteSessionStore>>,
@@ -637,7 +655,7 @@ impl DelegateTaskTool {
         config: Config,
     ) -> Self {
         Self {
-            provider,
+            provider: std::sync::RwLock::new(provider),
             memory,
             notes,
             store,
@@ -654,6 +672,20 @@ impl DelegateTaskTool {
 
     pub async fn set_workspace_root(&self, root: std::path::PathBuf) {
         self.config.write().await.paths.workspace_root = root;
+    }
+
+    /// Rebind this session's children to a new provider, called wherever the live agent's
+    /// provider is swapped so `/model` and `/default_model` reach delegated children too.
+    pub fn set_provider(&self, provider: Arc<dyn ModelProvider>) {
+        *self.provider.write().unwrap_or_else(|e| e.into_inner()) = provider;
+    }
+
+    /// The provider a newly spawned child runs on.
+    fn provider(&self) -> Arc<dyn ModelProvider> {
+        self.provider
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     pub fn set_notifier(&self, notifier: SubagentCompletionNotifier) {
@@ -1393,7 +1425,7 @@ impl DelegateTaskTool {
         let mut join_set = JoinSet::new();
         let current_cfg = self.config.read().await.clone();
         for (idx, task) in tasks_to_run.into_iter().enumerate() {
-            let provider = self.provider.clone();
+            let provider = self.provider();
             let memory = self.memory.clone();
             let notes = self.notes.clone();
             let store = self.store.clone();
@@ -1401,8 +1433,7 @@ impl DelegateTaskTool {
             let sub_cancel = cancel_token.child_token();
             let sub_idx = idx + 1;
             let started_at = Utc::now();
-            let child_session_id =
-                format!("sub_{}_{}", started_at.format("%Y%m%d_%H%M%S"), sub_idx);
+            let child_session_id = new_child_session_id();
             let goal = task.goal.clone();
             let context = task.context.clone();
             let child_event_notifier = event_notifier.clone();
@@ -1526,9 +1557,9 @@ impl DelegateTaskTool {
         let now = Utc::now();
         let current_cfg = self.config.read().await.clone();
 
-        for (idx, task) in tasks_to_run.into_iter().enumerate() {
+        for task in tasks_to_run {
             let dispatched_task = self
-                .dispatch_background_task(task, idx + 1, now, &current_cfg, event_notifier.as_ref())
+                .dispatch_background_task(task, now, &current_cfg, event_notifier.as_ref())
                 .await;
             dispatched.push(dispatched_task);
         }
@@ -1552,12 +1583,11 @@ impl DelegateTaskTool {
     async fn dispatch_background_task(
         &self,
         task: SubagentTaskSpec,
-        sub_idx: usize,
         now: DateTime<Utc>,
         current_cfg: &Config,
         event_notifier: Option<&SubagentTaskEventNotifier>,
     ) -> (String, String) {
-        let child_session_id = format!("sub_{}_{}", now.format("%Y%m%d_%H%M%S"), sub_idx);
+        let child_session_id = new_child_session_id();
         let parent_session = crate::session_context::current();
         let log_path_str = current_cfg
             .paths
@@ -1590,7 +1620,7 @@ impl DelegateTaskTool {
             },
         );
 
-        let provider = self.provider.clone();
+        let provider = self.provider();
         let memory = self.memory.clone();
         let notes = self.notes.clone();
         let store = self.store.clone();

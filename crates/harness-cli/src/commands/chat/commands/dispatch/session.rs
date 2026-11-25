@@ -49,6 +49,7 @@ impl<'a> SlashContext<'a> {
             self.process_expanded,
             self.todo_scope,
             arg,
+            self.delegate_tool,
         )
         .await
         {

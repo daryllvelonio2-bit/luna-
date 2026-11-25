@@ -104,6 +104,7 @@ pub struct ProfileSummary {
 pub struct ProfilePaths {
     pub root: PathBuf,
     pub memory_db: PathBuf,
+    pub memory_dir: PathBuf,
     pub notes_db: PathBuf,
     pub notes_dir: PathBuf,
     pub sessions_db: PathBuf,
@@ -120,6 +121,10 @@ pub fn paths_for(root: &Path) -> ProfilePaths {
     ProfilePaths {
         root: root.to_path_buf(),
         memory_db: root.join("memory.db"),
+        // The active memory store is the Markdown tree under `paths.memory_dir`; `memory.db` is
+        // only the legacy migration source. Both are redirected so a profile cannot read or write
+        // the global memory store.
+        memory_dir: root.join("memory"),
         notes_db: root.join("notes.db"),
         notes_dir: root.join("notes"),
         sessions_db: root.join("sessions.db"),
@@ -138,6 +143,7 @@ impl ProfilePaths {
     pub fn ensure_dirs(&self) -> Result<(), HarnessError> {
         for dir in [
             &self.root,
+            &self.memory_dir,
             &self.notes_dir,
             &self.checkpoints_dir,
             &self.todos_dir,
@@ -278,6 +284,91 @@ pub fn load(name: &str, profiles_dir: &Path) -> Result<Profile, HarnessError> {
 /// The directory a custom profile owns.
 pub fn profile_dir(profiles_dir: &Path, name: &str) -> PathBuf {
     profiles_dir.join(name)
+}
+
+/// Resolve a custom profile directory that may be deleted. Every delete path (CLI,
+/// tool, web route) goes through this so a name can never escape `profiles_dir`.
+pub fn resolve_custom_profile_dir(
+    profiles_dir: &Path,
+    name: &str,
+) -> Result<PathBuf, HarnessError> {
+    validate_name(name)?;
+    let dir = profile_dir(profiles_dir, name);
+    if dir.parent() != Some(profiles_dir) {
+        return Err(HarnessError::ConfigurationError(format!(
+            "profile '{}' does not resolve to a direct child of {}",
+            name,
+            profiles_dir.display()
+        )));
+    }
+    Ok(dir)
+}
+
+/// Every `*.md` file under `root` as `(absolute path, path relative to root)`.
+///
+/// Notes and Markdown memory records both live in a tree of project/domain subfolders, so a copy
+/// that only reads the top level silently misses most of what the user has.
+pub fn markdown_files_under(root: &Path) -> Vec<(PathBuf, PathBuf)> {
+    let mut out = Vec::new();
+    collect_markdown(root, root, &mut out);
+    out.sort_by(|a, b| a.1.cmp(&b.1));
+    out
+}
+
+fn collect_markdown(root: &Path, dir: &Path, out: &mut Vec<(PathBuf, PathBuf)>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        // Dot-directories hold archives and scratch state, not user notes.
+        if name.to_string_lossy().starts_with('.') {
+            continue;
+        }
+        let path = entry.path();
+        match entry.file_type() {
+            Ok(kind) if kind.is_dir() => collect_markdown(root, &path, out),
+            Ok(_) if path.extension().and_then(|e| e.to_str()) == Some("md") => {
+                if let Ok(relative) = path.strip_prefix(root) {
+                    out.push((path.clone(), relative.to_path_buf()));
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Copy the `.md` files under `source_root` into `dest_root`, keeping each file's path.
+///
+/// `keep` receives the path relative to `source_root` and the file's bare stem, so a caller can
+/// filter by project, by note id, or by reading the file's own title.
+pub fn copy_markdown_files(
+    source_root: &Path,
+    dest_root: &Path,
+    keep: &dyn Fn(&Path, &str) -> bool,
+) -> Result<usize, HarnessError> {
+    let mut copied = 0;
+    for (path, relative) in markdown_files_under(source_root) {
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        if !keep(&relative, stem) {
+            continue;
+        }
+        let dest = dest_root.join(&relative);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| {
+                HarnessError::Io(format!(
+                    "failed to create {}: {}",
+                    parent.display(),
+                    error
+                ))
+            })?;
+        }
+        std::fs::copy(&path, &dest).map_err(|error| {
+            HarnessError::Io(format!("failed to copy {}: {}", path.display(), error))
+        })?;
+        copied += 1;
+    }
+    Ok(copied)
 }
 
 /// The default profile plus every readable custom profile, default first and custom sorted by
@@ -424,6 +515,7 @@ pub fn apply_to_config(config: &mut Config, profile: &Profile) -> Result<(), Har
         let paths = paths_for(dir);
         paths.ensure_dirs()?;
         config.paths.memory_db = paths.memory_db;
+        config.paths.memory_dir = paths.memory_dir;
         config.paths.notes_db = paths.notes_db;
         config.paths.notes_dir = paths.notes_dir;
         config.paths.sessions_db = paths.sessions_db;
@@ -631,6 +723,18 @@ mod tests {
         assert!(validate_name("-terra").is_err());
         assert!(validate_name("exec").is_err());
         assert!(validate_name("default").is_err());
+    }
+
+    #[test]
+    fn delete_target_stays_inside_profiles_dir() {
+        let root = std::env::temp_dir().join("luna-profiles-test");
+        assert!(resolve_custom_profile_dir(&root, "terra").is_ok());
+        for bad in ["..", "../terra", "default", "/etc", "a/b", ""] {
+            assert!(
+                resolve_custom_profile_dir(&root, bad).is_err(),
+                "{bad} should be rejected"
+            );
+        }
     }
 
     #[test]

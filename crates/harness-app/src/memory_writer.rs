@@ -14,6 +14,7 @@ pub fn build_saver(
     notes: Arc<dyn NotesEngine>,
     session_provider: &str,
     session_model: &str,
+    session_id: &str,
     cred_manager: Arc<CredentialManager>,
     discovery: Arc<ModelDiscovery>,
 ) -> Option<Arc<MemorySaver>> {
@@ -36,6 +37,7 @@ pub fn build_saver(
         notes,
         &provider_id,
         &model,
+        session_id,
         cred_manager,
         discovery,
     ) {
@@ -52,12 +54,14 @@ pub fn build_saver(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_saver_for(
     config: &Config,
     memory: &Arc<dyn MemoryEngine>,
     notes: Arc<dyn NotesEngine>,
     provider_id: &str,
     model: &str,
+    session_id: &str,
     cred_manager: Arc<CredentialManager>,
     discovery: Arc<ModelDiscovery>,
 ) -> Result<MemorySaver, HarnessError> {
@@ -67,7 +71,8 @@ pub fn build_saver_for(
         cred_manager,
         discovery,
         config.providers.get(provider_id),
-    )?;
+    )?
+    .with_session_id(session_id);
 
     let mut policy = SaverPolicy::new(model.to_string());
     policy.every_turns = config.memory.background_every_turns;

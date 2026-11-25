@@ -334,6 +334,7 @@ async fn build_tooling(
         notes.clone(),
         &session.current_provider,
         &session.current_model,
+        &session.session_id,
         cred_manager.clone(),
         discovery.clone(),
     );

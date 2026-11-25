@@ -619,10 +619,17 @@ async fn set_priority(
             0 => Some(true),
             1 => Some(false),
             _ => {
-                cred_manager.clear_session_priority_credential(sid, &provider);
                 if let Some(store) = store {
-                    let _ = store.clear_credential_priority(sid, &provider).await;
+                    if let Err(error) = store.clear_credential_priority(sid, &provider).await {
+                        ui.emit_above(&format!(
+                            "{} Clearing the session priority failed: {}",
+                            "✖".red().bold(),
+                            error
+                        ));
+                        return Ok(());
+                    }
                 }
+                cred_manager.clear_session_priority_credential(sid, &provider);
                 ui.emit_above(&format!(
                     "{} Cleared session priority override for {} (following global default)",
                     "✔".green().bold(),
@@ -636,19 +643,20 @@ async fn set_priority(
     };
 
     if let (Some(true), Some(sid)) = (is_session, session_id) {
-        cred_manager.set_session_priority_credential(sid, &provider, &target.id);
         if let Some(store) = store {
-            let _ = store
+            if let Err(error) = store
                 .set_credential_priority(sid, &provider, &target.id)
-                .await;
+                .await
+            {
+                ui.emit_above(&format!(
+                    "{} Setting the session priority failed: {}",
+                    "✖".red().bold(),
+                    error
+                ));
+                return Ok(());
+            }
         }
-        let current_strat = cred_manager.get_rotation_strategy(&provider).await;
-        if current_strat != RotationStrategy::FillFirst && current_strat != RotationStrategy::Never
-        {
-            let _ = cred_manager
-                .set_rotation_strategy(&provider, RotationStrategy::FillFirst)
-                .await;
-        }
+        cred_manager.set_session_priority_credential(sid, &provider, &target.id);
         ui.emit_above(&format!(
             "{} Credential '{}' set as priority for this session ({})",
             "✔".green().bold(),
@@ -657,10 +665,17 @@ async fn set_priority(
         ));
     } else {
         if let Some(sid) = session_id {
-            cred_manager.clear_session_priority_credential(sid, &provider);
             if let Some(store) = store {
-                let _ = store.clear_credential_priority(sid, &provider).await;
+                if let Err(error) = store.clear_credential_priority(sid, &provider).await {
+                    ui.emit_above(&format!(
+                        "{} Clearing the session priority failed: {}",
+                        "✖".red().bold(),
+                        error
+                    ));
+                    return Ok(());
+                }
             }
+            cred_manager.clear_session_priority_credential(sid, &provider);
         }
         let updated = cred_manager
             .set_priority_credential(&provider, &target.id)

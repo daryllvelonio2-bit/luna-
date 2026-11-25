@@ -351,6 +351,7 @@ pub(crate) fn instantiate_session_runtime(
             notes_dyn,
             saver_provider,
             saver_model,
+            session_id,
             env.cred_manager.clone(),
             env.discovery.clone(),
         ) {

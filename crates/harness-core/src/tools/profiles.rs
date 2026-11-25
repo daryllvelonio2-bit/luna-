@@ -27,6 +27,8 @@ pub struct ProfileToolContext {
     pub credentials_path: PathBuf,
     pub notes_dir: PathBuf,
     pub memory_db: PathBuf,
+    /// The active Markdown memory store. `memory_db` is only the legacy migration source.
+    pub memory_dir: PathBuf,
     pub allow_mutation: bool,
 }
 
@@ -37,6 +39,7 @@ impl ProfileToolContext {
             credentials_path: config.paths.credentials.clone(),
             notes_dir: config.paths.notes_dir.clone(),
             memory_db: config.paths.memory_db.clone(),
+            memory_dir: config.paths.memory_dir.clone(),
             allow_mutation,
         }
     }
@@ -483,14 +486,22 @@ impl Tool for ProfileCreateTool {
             }
         }
 
-        let notes_copied = copy_selected_notes(
+        let notes_copied = copy_markdown_store(
             &self.ctx.notes_dir,
             &paths.notes_dir,
             arguments.get("notes"),
         )
         .unwrap_or(0);
 
-        let memories_copied = copy_selected_memories(
+        // The active memory store is the Markdown tree; `memory.db` is the legacy source a profile
+        // created before the migration still needs, so both are copied.
+        let mut memories_copied = copy_markdown_store(
+            &self.ctx.memory_dir,
+            &paths.memory_dir,
+            arguments.get("memories"),
+        )
+        .unwrap_or(0);
+        memories_copied += copy_selected_memories(
             &self.ctx.memory_db,
             &paths.memory_db,
             arguments.get("memories"),
@@ -726,13 +737,10 @@ impl Tool for ProfileDeleteTool {
             return Ok(ToolResult::error(call_id, "Missing 'name'"));
         };
         let name = raw_name.trim().to_ascii_lowercase();
-        if name == DEFAULT_PROFILE {
-            return Ok(ToolResult::error(
-                call_id,
-                "Cannot delete the built-in 'default' profile.",
-            ));
-        }
-        let dir = profile_dir(&self.ctx.profiles_dir, &name);
+        let dir = match crate::profiles::resolve_custom_profile_dir(&self.ctx.profiles_dir, &name) {
+            Ok(dir) => dir,
+            Err(e) => return Ok(ToolResult::error(call_id, e.to_string())),
+        };
         if !dir.exists() {
             return Ok(ToolResult::error(
                 call_id,
@@ -753,98 +761,73 @@ impl Tool for ProfileDeleteTool {
     }
 }
 
-fn copy_selected_notes(
+/// Copy one Markdown store — the notes tree, or the active memory records — into a new profile.
+///
+/// Both stores nest files in project/domain subfolders, so a flat listing of the top directory
+/// would report success while copying almost nothing. Each file keeps its relative path, and the
+/// selection filter is applied while walking the whole tree.
+fn copy_markdown_store(
     source_dir: &Path,
     dest_dir: &Path,
-    notes_arg: Option<&serde_json::Value>,
+    selection: Option<&serde_json::Value>,
 ) -> Result<usize, HarnessError> {
     if !source_dir.is_dir() {
         return Ok(0);
     }
     std::fs::create_dir_all(dest_dir).map_err(|e| {
         HarnessError::Io(format!(
-            "failed to create notes dir {}: {}",
+            "failed to create {}: {}",
             dest_dir.display(),
             e
         ))
     })?;
 
-    let Some(arg) = notes_arg else {
+    let Some(arg) = selection else {
         return Ok(0);
     };
 
-    let all_notes: Vec<PathBuf> = std::fs::read_dir(source_dir)
-        .map_err(|e| HarnessError::Io(format!("failed to read notes dir: {e}")))?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|p| p.is_file() && p.extension().and_then(|e| e.to_str()) == Some("md"))
-        .collect();
-
-    let mut to_copy = Vec::new();
-
-    if let Some(s) = arg.as_str() {
-        let lower = s.trim().to_ascii_lowercase();
-        if lower == "all" || lower == "same" {
-            to_copy = all_notes;
-        } else if lower == "none" || lower == "fresh" {
-            return Ok(0);
-        } else {
-            for note_path in all_notes {
-                let stem = note_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-                let title = read_note_title(&note_path);
-                let file_name = note_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if stem.eq_ignore_ascii_case(&lower)
-                    || title.to_ascii_lowercase().contains(&lower)
-                    || file_name.eq_ignore_ascii_case(&lower)
-                {
-                    to_copy.push(note_path);
-                }
+    // `None` means "everything"; `Some(items)` is the explicit allow-list.
+    let wanted: Option<Vec<String>> = match arg {
+        serde_json::Value::Bool(true) => None,
+        serde_json::Value::Bool(false) => return Ok(0),
+        serde_json::Value::String(s) => {
+            let lower = s.trim().to_ascii_lowercase();
+            match lower.as_str() {
+                "all" | "same" => None,
+                "none" | "fresh" => return Ok(0),
+                _ => Some(vec![lower]),
             }
         }
-    } else if let Some(b) = arg.as_bool() {
-        if b {
-            to_copy = all_notes;
-        } else {
-            return Ok(0);
-        }
-    } else if let Some(arr) = arg.as_array() {
-        let items: Vec<String> = arr
-            .iter()
-            .filter_map(|v| v.as_str())
-            .map(|s| s.trim().to_ascii_lowercase())
-            .filter(|s| !s.is_empty())
-            .collect();
-        for note_path in all_notes {
-            let stem = note_path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-                .to_ascii_lowercase();
-            let title = read_note_title(&note_path).to_ascii_lowercase();
-            let file_name = note_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("")
-                .to_ascii_lowercase();
-            if items
+        serde_json::Value::Array(items) => {
+            let items: Vec<String> = items
                 .iter()
-                .any(|item| stem == *item || title.contains(item) || file_name == *item)
-            {
-                to_copy.push(note_path);
+                .filter_map(|v| v.as_str())
+                .map(|s| s.trim().to_ascii_lowercase())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if items.is_empty() {
+                return Ok(0);
             }
+            Some(items)
         }
-    }
+        _ => return Ok(0),
+    };
 
-    let mut copied = 0;
-    for note in to_copy {
-        if let Some(file_name) = note.file_name() {
-            let dest = dest_dir.join(file_name);
-            if std::fs::copy(&note, &dest).is_ok() {
-                copied += 1;
-            }
-        }
-    }
-    Ok(copied)
+    profiles::copy_markdown_files(source_dir, dest_dir, &|relative, stem| {
+        let Some(wanted) = wanted.as_ref() else {
+            return true;
+        };
+        let title = read_note_title(&source_dir.join(relative)).to_ascii_lowercase();
+        let stem = stem.to_ascii_lowercase();
+        let file_name = relative
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        wanted
+            .iter()
+            .any(|item| stem == *item || title.contains(item.as_str()) || file_name == *item)
+    })
 }
 
 fn read_note_title(path: &Path) -> String {
@@ -1211,5 +1194,82 @@ mod tests {
         assert!(cfg.paths.profiles_dir.join("astra/memory.db").is_file());
         assert!(created.content.contains("notes_copied\": 1"));
         assert!(created.content.contains("memories_copied\": 1"));
+    }
+
+    /// The current defaults keep notes in project folders and memories as Markdown records, so a
+    /// copy that only reads the top of each directory reports a count while copying almost nothing.
+    #[tokio::test]
+    async fn profile_create_copies_project_notes_and_markdown_memories() {
+        let dir = tempfile::tempdir().unwrap();
+        let notes_dir = dir.path().join("notes");
+        std::fs::create_dir_all(notes_dir.join("project-alpha")).unwrap();
+        std::fs::write(
+            notes_dir.join("top-level.md"),
+            "---\ntitle: Top Level\n---\nroot note",
+        )
+        .unwrap();
+        std::fs::write(
+            notes_dir.join("project-alpha").join("nested.md"),
+            "---\ntitle: Nested Note\n---\nnested note",
+        )
+        .unwrap();
+
+        let memory_dir = dir.path().join("memory");
+        let record_dir = memory_dir.join("project-alpha").join("decisions");
+        std::fs::create_dir_all(&record_dir).unwrap();
+        std::fs::write(record_dir.join("mem-1.md"), "a memory record").unwrap();
+
+        let ctx = ProfileToolContext {
+            profiles_dir: dir.path().join("profiles"),
+            credentials_path: dir.path().join("credentials.json"),
+            notes_dir,
+            memory_db: dir.path().join("memory.db"),
+            memory_dir,
+            allow_mutation: true,
+        };
+        let cancel = CancellationToken::new();
+        let created = ProfileCreateTool { ctx }
+            .execute(
+                "call-1",
+                &json!({
+                    "name": "copied",
+                    "summary": "Copy the active stores",
+                    "notes": "same",
+                    "memories": "same",
+                    "copy_credentials": false
+                }),
+                &cancel,
+            )
+            .await
+            .unwrap();
+        assert!(!created.is_error, "{}", created.content);
+
+        let dest = profiles::paths_for(&dir.path().join("profiles").join("copied"));
+        assert!(
+            dest.notes_dir.join("top-level.md").is_file(),
+            "the root note is copied"
+        );
+        assert!(
+            dest.notes_dir.join("project-alpha").join("nested.md").is_file(),
+            "the project note keeps its folder"
+        );
+        assert!(
+            dest.memory_dir
+                .join("project-alpha")
+                .join("decisions")
+                .join("mem-1.md")
+                .is_file(),
+            "the Markdown memory record is copied"
+        );
+        assert!(
+            created.content.contains("notes_copied\": 2"),
+            "the readout counts both notes: {}",
+            created.content
+        );
+        assert!(
+            created.content.contains("memories_copied\": 1"),
+            "the readout counts the memory record: {}",
+            created.content
+        );
     }
 }
