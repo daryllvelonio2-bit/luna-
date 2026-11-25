@@ -1162,6 +1162,8 @@ mod tests {
         std::fs::write(&cfg.paths.credentials, "{}").unwrap();
         cfg.paths.notes_dir = notes_dir;
         cfg.paths.memory_db = mem_db;
+        // Keep the active Markdown store isolated: the default path is shared with other tests.
+        cfg.paths.memory_dir = dir.path().join("memory");
 
         let reg: Arc<dyn ToolRegistry> = Arc::new(DefaultToolRegistry::new());
         register_profile_tools(&reg, &cfg, true).await.unwrap();
