@@ -1,6 +1,7 @@
 //! modals
 
 use super::*;
+use crate::commands::chat::tui::theme::accent_auto;
 
 pub(crate) fn render_modal(
     frame: &mut Frame,

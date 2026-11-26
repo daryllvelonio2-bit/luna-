@@ -41,8 +41,8 @@ async fn load_usage_counts(
     for bucket in buckets {
         if let Some((prov, model)) = bucket.key.split_once('/') {
             let prov_l = prov.to_lowercase();
-            *by_provider.entry(prov_l.clone()).or_insert(0) += bucket.turns;
-            *by_model.entry((prov_l, model.to_string())).or_insert(0) += bucket.turns;
+            *by_provider.entry(prov_l.clone()).or_insert(0) += bucket.totals.turns;
+            *by_model.entry((prov_l, model.to_string())).or_insert(0) += bucket.totals.turns;
         }
     }
     (by_provider, by_model)
@@ -117,11 +117,10 @@ pub async fn build_provider_items_with_usage(
     if let Some(cfgs) = config_providers {
         for (id, ov) in cfgs {
             let is_custom_non_catalog = harness_providers::catalog::find_provider(id).is_none();
-            let has_endpoint_or_key = ov.base_url.as_deref().is_some_and(|u| !u.trim().is_empty())
-                || ov.api_key.as_deref().is_some_and(|k| !k.trim().is_empty());
+            let has_endpoint = ov.base_url.as_deref().is_some_and(|u| !u.trim().is_empty());
             if id != "custom"
                 && is_custom_non_catalog
-                && has_endpoint_or_key
+                && has_endpoint
                 && !custom_ids.contains(id)
                 && !configured.iter().any(|p| p.id.eq_ignore_ascii_case(id))
             {

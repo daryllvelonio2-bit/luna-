@@ -8,7 +8,7 @@ use harness_core::{
 };
 use harness_providers::GenericProviderClient;
 
-use super::pickers::{apply_model_selection, apply_thinking_selection};
+use super::pickers::apply_model_selection;
 use super::*;
 use crate::commands::chat::tui::state::{InputAction, OrchestratorDraftState, SelectAction};
 
