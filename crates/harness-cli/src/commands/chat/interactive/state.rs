@@ -56,13 +56,18 @@ pub(in crate::commands::chat) struct Env<'a> {
     pub(in crate::commands::chat) skills_arc: Option<Arc<Vec<harness_plugins::Skill>>>,
     pub(in crate::commands::chat) skills_readout: Option<String>,
     pub(in crate::commands::chat) approval_rx: &'a mut mpsc::UnboundedReceiver<(
+        Option<String>,
         harness_core::ApprovalRequest,
         oneshot::Sender<harness_core::ApprovalDecision>,
     )>,
     pub(in crate::commands::chat) approval_activity: Arc<tokio::sync::Notify>,
-    pub(in crate::commands::chat) sudo_rx:
-        &'a mut mpsc::UnboundedReceiver<(String, oneshot::Sender<Option<String>>)>,
+    pub(in crate::commands::chat) sudo_rx: &'a mut mpsc::UnboundedReceiver<(
+        Option<String>,
+        String,
+        oneshot::Sender<Option<String>>,
+    )>,
     pub(in crate::commands::chat) clarify_rx: &'a mut mpsc::UnboundedReceiver<(
+        Option<String>,
         crate::commands::clarify::ClarifyRequest,
         oneshot::Sender<crate::commands::clarify::ClarifyResponse>,
     )>,

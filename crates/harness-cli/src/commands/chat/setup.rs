@@ -64,12 +64,15 @@ pub(super) struct ChatRuntime {
     pub(super) is_attended: bool,
     pub(super) ui: Arc<ChatUi>,
     pub(super) approval_rx: mpsc::UnboundedReceiver<(
+        Option<String>,
         ApprovalRequest,
         oneshot::Sender<harness_core::ApprovalDecision>,
     )>,
     pub(super) approval_activity: Arc<tokio::sync::Notify>,
-    pub(super) sudo_rx: mpsc::UnboundedReceiver<(String, oneshot::Sender<Option<String>>)>,
+    pub(super) sudo_rx:
+        mpsc::UnboundedReceiver<(Option<String>, String, oneshot::Sender<Option<String>>)>,
     pub(super) clarify_rx: mpsc::UnboundedReceiver<(
+        Option<String>,
         crate::commands::clarify::ClarifyRequest,
         oneshot::Sender<crate::commands::clarify::ClarifyResponse>,
     )>,
@@ -90,7 +93,7 @@ struct ToolSetup {
     bg_queue: Arc<harness_core::tasks::BackgroundTaskQueue>,
     delegate_tool: Arc<harness_core::tools::DelegateTaskTool>,
     checkpoints: Arc<CheckpointController>,
-    sudo_rx: mpsc::UnboundedReceiver<(String, oneshot::Sender<Option<String>>)>,
+    sudo_rx: mpsc::UnboundedReceiver<(Option<String>, String, oneshot::Sender<Option<String>>)>,
     skills_arc: Option<Arc<Vec<harness_plugins::Skill>>>,
     skills_readout: Option<String>,
 }
@@ -123,10 +126,12 @@ struct Tooling {
 
 struct ApprovalState {
     approval_tx: mpsc::UnboundedSender<(
+        Option<String>,
         ApprovalRequest,
         oneshot::Sender<harness_core::ApprovalDecision>,
     )>,
     approval_rx: mpsc::UnboundedReceiver<(
+        Option<String>,
         ApprovalRequest,
         oneshot::Sender<harness_core::ApprovalDecision>,
     )>,
@@ -389,6 +394,7 @@ fn start_job_notifications(
 
 fn build_approval_state(config: &Config, is_attended: bool) -> ApprovalState {
     let (approval_tx, approval_rx) = mpsc::unbounded_channel::<(
+        Option<String>,
         ApprovalRequest,
         oneshot::Sender<harness_core::ApprovalDecision>,
     )>();
@@ -427,10 +433,12 @@ async fn register_clarify_tool(
 ) -> Result<
     (
         mpsc::UnboundedSender<(
+            Option<String>,
             crate::commands::clarify::ClarifyRequest,
             oneshot::Sender<crate::commands::clarify::ClarifyResponse>,
         )>,
         mpsc::UnboundedReceiver<(
+            Option<String>,
             crate::commands::clarify::ClarifyRequest,
             oneshot::Sender<crate::commands::clarify::ClarifyResponse>,
         )>,
@@ -438,6 +446,7 @@ async fn register_clarify_tool(
     HarnessError,
 > {
     let (clarify_tx, clarify_rx) = mpsc::unbounded_channel::<(
+        Option<String>,
         crate::commands::clarify::ClarifyRequest,
         oneshot::Sender<crate::commands::clarify::ClarifyResponse>,
     )>();
@@ -990,7 +999,8 @@ async fn register_task_and_core_tools(
 
     // Register core filesystem and shell tools (§2.2)
     let sudo_cache = Arc::new(std::sync::Mutex::new(std::env::var("SUDO_PASSWORD").ok()));
-    let (sudo_tx, sudo_rx) = mpsc::unbounded_channel::<(String, oneshot::Sender<Option<String>>)>();
+    let (sudo_tx, sudo_rx) =
+        mpsc::unbounded_channel::<(Option<String>, String, oneshot::Sender<Option<String>>)>();
     let sudo_prompter = Arc::new(ChatSudoPrompter::new(sudo_tx));
 
     let read_cache = harness_core::tools::ReadCache::new();

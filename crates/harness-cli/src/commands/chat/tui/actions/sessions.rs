@@ -117,6 +117,37 @@ pub fn apply_agent_mode(env: &Env<'_>, st: &mut TuiState, mode: AgentMode) {
 pub(crate) fn park_current_session(env: &Env<'_>, st: &mut TuiState) {
     let old_id = env.session_id.clone();
     let fresh_idle = IdleMemoryPass::new(0);
+    let mut pending_modals = std::mem::take(&mut st.pending_modals);
+    if matches!(
+        st.modal,
+        ActiveModal::Approval { .. } | ActiveModal::Clarify { .. } | ActiveModal::Sudo { .. }
+    ) {
+        let modal = std::mem::replace(&mut st.modal, ActiveModal::None);
+        match modal {
+            ActiveModal::Approval { req, resp_tx, .. } => {
+                pending_modals.push_front(crate::commands::chat::tui::state::PendingModal::Approval {
+                    req,
+                    resp_tx,
+                });
+            }
+            ActiveModal::Clarify { req, resp_tx, .. } => {
+                pending_modals.push_front(crate::commands::chat::tui::state::PendingModal::Clarify {
+                    req,
+                    resp_tx,
+                });
+            }
+            ActiveModal::Sudo {
+                prompt, resp_tx, ..
+            } => {
+                pending_modals.push_front(crate::commands::chat::tui::state::PendingModal::Sudo {
+                    prompt,
+                    resp_tx,
+                });
+            }
+            _ => {}
+        }
+    }
+
     let slot = BackgroundSession {
         session_id: old_id.clone(),
         agent: env.agent.clone(),
@@ -159,6 +190,8 @@ pub(crate) fn park_current_session(env: &Env<'_>, st: &mut TuiState) {
         compacted_deleted: st.compacted_deleted,
         session_max_added: st.session_max_added,
         session_max_deleted: st.session_max_deleted,
+        pending_modals,
+        has_unread_done: false,
     };
     st.background_sessions.insert(old_id, slot);
 }
@@ -238,6 +271,8 @@ pub(crate) fn restore_background_session(
     st.session_max_deleted = slot.session_max_deleted;
     st.diff_anim_target_added = slot.session_max_added;
     st.diff_anim_target_deleted = slot.session_max_deleted;
+    st.pending_modals = slot.pending_modals;
+    st.promote_pending_modal();
     st.diff_anim_from_added = slot.session_max_added;
     st.diff_anim_from_deleted = slot.session_max_deleted;
     st.diff_anim_start = None;

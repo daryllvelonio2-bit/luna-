@@ -929,6 +929,66 @@ pub struct LiveReasoningCache {
     pub lines: Vec<Line<'static>>,
 }
 
+/// A deferred interactive prompt (approval, clarify, or sudo) belonging to a session that is
+/// either parked in the background or waiting behind another open modal.
+pub enum PendingModal {
+    Approval {
+        req: ApprovalRequest,
+        resp_tx: oneshot::Sender<ApprovalDecision>,
+    },
+    Clarify {
+        req: ClarifyRequest,
+        resp_tx: oneshot::Sender<ClarifyResponse>,
+    },
+    Sudo {
+        prompt: String,
+        resp_tx: oneshot::Sender<Option<String>>,
+    },
+}
+
+impl PendingModal {
+    pub fn is_closed(&self) -> bool {
+        match self {
+            Self::Approval { resp_tx, .. } => resp_tx.is_closed(),
+            Self::Clarify { resp_tx, .. } => resp_tx.is_closed(),
+            Self::Sudo { resp_tx, .. } => resp_tx.is_closed(),
+        }
+    }
+
+    pub fn into_active_modal(self) -> ActiveModal {
+        match self {
+            Self::Approval { req, resp_tx } => ActiveModal::Approval {
+                req,
+                resp_tx,
+                selected: 0,
+                diff_scroll: 0,
+                editing_input: false,
+                input: String::new(),
+                asking: false,
+                reply: None,
+                reply_scroll: 0,
+                error: None,
+            },
+            Self::Clarify { req, resp_tx } => ActiveModal::Clarify {
+                req,
+                resp_tx,
+                question_idx: 0,
+                answers: Vec::new(),
+                selected: 0,
+                custom: String::new(),
+                editing_custom: false,
+                scroll: 0,
+                follow_selection: true,
+            },
+            Self::Sudo { prompt, resp_tx } => ActiveModal::Sudo {
+                prompt,
+                resp_tx,
+                input: String::new(),
+            },
+        }
+    }
+}
+
 /// Parked state for a session that is not currently displayed (and may still be running a turn).
 pub struct BackgroundSession {
     pub session_id: String,
@@ -972,6 +1032,8 @@ pub struct BackgroundSession {
     pub compacted_deleted: usize,
     pub session_max_added: usize,
     pub session_max_deleted: usize,
+    pub pending_modals: VecDeque<PendingModal>,
+    pub has_unread_done: bool,
 }
 
 /// A transient notice in the TUI transcript (compaction reports, queue notices, goal updates).
@@ -1018,6 +1080,10 @@ impl std::ops::Deref for SystemNotice {
 }
 
 impl BackgroundSession {
+    pub fn has_pending_popup(&self) -> bool {
+        self.pending_modals.iter().any(|m| !m.is_closed())
+    }
+
     pub fn prune_stale_notices(&mut self) {
         let now = std::time::Instant::now();
         let queue_empty = self.queue.is_empty();
@@ -1499,6 +1565,8 @@ pub struct TuiState {
     pub template_agent: Arc<ChatAgent>,
     /// Other sessions kept live in memory (including any running background turns).
     pub background_sessions: HashMap<String, BackgroundSession>,
+    /// Deferred approval/clarify/sudo prompts queued for the active session.
+    pub pending_modals: VecDeque<PendingModal>,
     /// Active project filter for memories in this session (`None` = all memories passed).
     pub memory_project_filter: Option<String>,
     /// Preserved code changes from compacted turns
@@ -1518,6 +1586,22 @@ pub struct TuiState {
 
 /// How long a changed digit takes to roll to its new value.
 const DIFF_ROLL_MS: f64 = 640.0;
+
+impl TuiState {
+    /// Open the next queued modal for the active session when no modal is currently visible.
+    pub fn promote_pending_modal(&mut self) -> bool {
+        if !matches!(self.modal, ActiveModal::None) {
+            return false;
+        }
+        while let Some(next) = self.pending_modals.pop_front() {
+            if !next.is_closed() {
+                self.modal = next.into_active_modal();
+                return true;
+            }
+        }
+        false
+    }
+}
 
 impl TuiState {
     /// Update the target code changes, rolling the counter forward when a count grows.

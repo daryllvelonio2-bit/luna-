@@ -178,7 +178,8 @@ pub fn render_approval_box(
 
 /// Approver for interactive Chat mode: routes approval requests through a channel to the UI loop.
 pub struct ChatApprover {
-    request_tx: mpsc::UnboundedSender<(ApprovalRequest, oneshot::Sender<ApprovalDecision>)>,
+    request_tx:
+        mpsc::UnboundedSender<(Option<String>, ApprovalRequest, oneshot::Sender<ApprovalDecision>)>,
     allow_all: Arc<AtomicBool>,
     plan_mode: Arc<AtomicBool>,
     activity: Arc<Notify>,
@@ -186,7 +187,11 @@ pub struct ChatApprover {
 
 impl ChatApprover {
     pub fn new(
-        request_tx: mpsc::UnboundedSender<(ApprovalRequest, oneshot::Sender<ApprovalDecision>)>,
+        request_tx: mpsc::UnboundedSender<(
+            Option<String>,
+            ApprovalRequest,
+            oneshot::Sender<ApprovalDecision>,
+        )>,
         allow_all: Arc<AtomicBool>,
         plan_mode: Arc<AtomicBool>,
     ) -> Self {
@@ -220,9 +225,10 @@ impl Approver for ChatApprover {
             return Ok(ApprovalDecision::Run);
         }
         let (decision_tx, decision_rx) = oneshot::channel();
+        let session_id = harness_core::session_context::current();
         if self
             .request_tx
-            .send((request.clone(), decision_tx))
+            .send((session_id, request.clone(), decision_tx))
             .is_err()
         {
             return Ok(ApprovalDecision::Deny);
@@ -333,7 +339,7 @@ mod tests {
         // Initial request should ask
         let req = ApprovalRequest::default();
         tokio::spawn(async move {
-            if let Some((_request, decision_tx)) = rx.recv().await {
+            if let Some((_sid, _request, decision_tx)) = rx.recv().await {
                 let _ = decision_tx.send(ApprovalDecision::Run);
             }
         });
@@ -356,7 +362,7 @@ mod tests {
 
         let req = ApprovalRequest::default();
         tokio::spawn(async move {
-            if let Some((_request, decision_tx)) = rx.recv().await {
+            if let Some((_sid, _request, decision_tx)) = rx.recv().await {
                 // Drop decision_tx without sending
                 drop(decision_tx);
             }

@@ -112,12 +112,16 @@ pub(super) async fn prompt_approval_choice(
 }
 
 pub struct ChatSudoPrompter {
-    request_tx: mpsc::UnboundedSender<(String, oneshot::Sender<Option<String>>)>,
+    request_tx: mpsc::UnboundedSender<(Option<String>, String, oneshot::Sender<Option<String>>)>,
 }
 
 impl ChatSudoPrompter {
     pub fn new(
-        request_tx: mpsc::UnboundedSender<(String, oneshot::Sender<Option<String>>)>,
+        request_tx: mpsc::UnboundedSender<(
+            Option<String>,
+            String,
+            oneshot::Sender<Option<String>>,
+        )>,
     ) -> Self {
         Self { request_tx }
     }
@@ -127,7 +131,12 @@ impl ChatSudoPrompter {
 impl harness_core::tools::SudoPrompter for ChatSudoPrompter {
     async fn prompt_sudo_password(&self, command: &str) -> Result<Option<String>, HarnessError> {
         let (tx, rx) = oneshot::channel();
-        if self.request_tx.send((command.to_string(), tx)).is_err() {
+        let session_id = harness_core::session_context::current();
+        if self
+            .request_tx
+            .send((session_id, command.to_string(), tx))
+            .is_err()
+        {
             return Ok(None);
         }
         match rx.await {

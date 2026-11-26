@@ -203,6 +203,7 @@ pub(super) async fn approval(
     env: &Env<'_>,
     key_rx: &mut KeyRx,
     maybe_approval: Option<(
+        Option<String>,
         harness_core::ApprovalRequest,
         oneshot::Sender<harness_core::ApprovalDecision>,
     )>,
@@ -213,7 +214,7 @@ pub(super) async fn approval(
         in_flight_tools,
         ..
     } = env;
-    let (request, mut decision_tx) = match maybe_approval {
+    let (_sid, request, mut decision_tx) = match maybe_approval {
         Some(pair) => pair,
         None => return,
     };
@@ -268,10 +269,10 @@ pub(super) async fn approval(
 pub(super) async fn sudo(
     env: &Env<'_>,
     key_rx: &mut KeyRx,
-    maybe_sudo: Option<(String, oneshot::Sender<Option<String>>)>,
+    maybe_sudo: Option<(Option<String>, String, oneshot::Sender<Option<String>>)>,
 ) {
     let Env { ui, .. } = env;
-    let (command, decision_tx) = match maybe_sudo {
+    let (_sid, command, decision_tx) = match maybe_sudo {
         Some(pair) => pair,
         None => return,
     };
@@ -287,12 +288,13 @@ pub(super) async fn clarify(
     env: &Env<'_>,
     key_rx: &mut KeyRx,
     maybe_clarify: Option<(
+        Option<String>,
         crate::commands::clarify::ClarifyRequest,
         oneshot::Sender<crate::commands::clarify::ClarifyResponse>,
     )>,
 ) {
     let Env { ui, .. } = env;
-    let (request, response_tx) = match maybe_clarify {
+    let (_sid, request, response_tx) = match maybe_clarify {
         Some(pair) => pair,
         None => return,
     };

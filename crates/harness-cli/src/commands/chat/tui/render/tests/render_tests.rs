@@ -878,6 +878,7 @@ fn ensure_settled_transcript_caches_and_appends_incrementally() {
             ))
         },
         background_sessions: std::collections::HashMap::new(),
+        pending_modals: std::collections::VecDeque::new(),
         memory_project_filter: None,
         compacted_added: 0,
         compacted_deleted: 0,
@@ -1752,4 +1753,160 @@ fn settled_turn_registers_copy_hit_target_on_code_block_header() {
         header_row.contains("rust") && header_row.contains("copy"),
         "hit target row should be the code block header: {header_row:?}"
     );
+}
+
+fn make_bg_slot(
+    st: &TuiState,
+    session_id: &str,
+    pending_modals: std::collections::VecDeque<crate::commands::chat::tui::state::PendingModal>,
+    has_unread_done: bool,
+) -> crate::commands::chat::tui::state::BackgroundSession {
+    use std::collections::{HashSet, VecDeque};
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{Arc, Mutex};
+    crate::commands::chat::tui::state::BackgroundSession {
+        session_id: session_id.to_string(),
+        agent: st.template_agent.clone(),
+        ui: Arc::new(crate::commands::chat::ui::ChatUi::new(false)),
+        in_flight_tools: Arc::new(Mutex::new(Vec::new())),
+        interruptions: Arc::new(Mutex::new(Vec::new())),
+        steer_handle: Arc::new(Mutex::new(VecDeque::new())),
+        interrupt_handle: Arc::new(harness_core::InterruptHandle::default()),
+        compacting: Arc::new(AtomicBool::new(false)),
+        provider: "openai".to_string(),
+        model: "gpt-4o".to_string(),
+        reasoning_effort: None,
+        mode: Default::default(),
+        turns: Vec::new(),
+        turn_meta: Vec::new(),
+        settled_cache: Default::default(),
+        system_notices: Vec::new(),
+        expanded_thinking: HashSet::new(),
+        expanded_tools: HashSet::new(),
+        expanded_turns: HashSet::new(),
+        collapsed_turns: HashSet::new(),
+        expanded_live_thinking: HashSet::new(),
+        expanded_live_tools: HashSet::new(),
+        live_thinking_view: Default::default(),
+        process_expanded: false,
+        scroll_from_bottom: 0,
+        scroll_anchor_top: None,
+        queue: VecDeque::new(),
+        current_cancel: tokio_util::sync::CancellationToken::new(),
+        active_turn: None,
+        active_goal: None,
+        current_query: String::new(),
+        turn_start: std::time::Instant::now(),
+        idle_pass: crate::commands::chat::helpers::IdleMemoryPass::new(0),
+        pending_images: Arc::new(Mutex::new(Vec::new())),
+        pending_job_turn: None,
+        memory_project_filter: None,
+        feature_toggles: (true, true, true, true),
+        compacted_added: 0,
+        compacted_deleted: 0,
+        session_max_added: 0,
+        session_max_deleted: 0,
+        pending_modals,
+        has_unread_done,
+    }
+}
+
+#[test]
+fn tab_bar_colors_background_pending_popup_yellow_done_green_and_inactive_plain() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use std::collections::VecDeque;
+
+    let mut st = test_dummy_tui_state();
+    st.tabs = vec![
+        crate::commands::chat::tui::state::SessionTab {
+            id: "s_active".to_string(),
+            title: "active".to_string(),
+        },
+        crate::commands::chat::tui::state::SessionTab {
+            id: "s_ask".to_string(),
+            title: "needs-ok".to_string(),
+        },
+        crate::commands::chat::tui::state::SessionTab {
+            id: "s_done".to_string(),
+            title: "finished".to_string(),
+        },
+        crate::commands::chat::tui::state::SessionTab {
+            id: "s_idle".to_string(),
+            title: "idle".to_string(),
+        },
+    ];
+
+    let (tx, _rx) = tokio::sync::oneshot::channel();
+    let mut ask_queue = VecDeque::new();
+    ask_queue.push_back(crate::commands::chat::tui::state::PendingModal::Approval {
+        req: harness_core::ApprovalRequest::default(),
+        resp_tx: tx,
+    });
+    st.background_sessions
+        .insert("s_ask".to_string(), make_bg_slot(&st, "s_ask", ask_queue, false));
+    st.background_sessions.insert(
+        "s_done".to_string(),
+        make_bg_slot(&st, "s_done", VecDeque::new(), true),
+    );
+    st.background_sessions.insert(
+        "s_idle".to_string(),
+        make_bg_slot(&st, "s_idle", VecDeque::new(), false),
+    );
+
+    let backend = TestBackend::new(100, 3);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|f| {
+            let area = Rect::new(0, 0, 100, 1);
+            render_tab_bar(f, area, &mut st, "s_active");
+        })
+        .unwrap();
+
+    let buf = terminal.backend().buffer();
+    let row_str: String = (0..100).map(|x| buf[(x, 0)].symbol()).collect();
+    assert!(row_str.contains("needs-ok"), "tab bar: {row_str}");
+    assert!(row_str.contains("finished"), "tab bar: {row_str}");
+    assert!(row_str.contains("idle"), "tab bar: {row_str}");
+
+    let find_col = |needle: &str| row_str.find(needle).expect("tab present") as u16;
+    let ask_x = find_col("needs-ok");
+    let done_x = find_col("finished");
+    let idle_x = find_col("idle");
+
+    // Yellow indicator dot + yellow label for `needs-ok`.
+    assert_eq!(buf[(ask_x - 2, 0)].symbol(), "●");
+    assert_eq!(buf[(ask_x - 2, 0)].fg, yellow_warn());
+    assert_eq!(buf[(ask_x, 0)].fg, yellow_warn());
+
+    // Green dot for `finished`.
+    assert_eq!(buf[(done_x - 2, 0)].symbol(), "●");
+    assert_eq!(buf[(done_x - 2, 0)].fg, green_ok());
+
+    // Inactive `idle` has no dot or spinner before its label.
+    assert_eq!(buf[(idle_x - 1, 0)].symbol(), " ");
+    assert_ne!(buf[(idle_x - 2, 0)].symbol(), "●");
+}
+
+#[test]
+fn promote_pending_modal_skips_closed_and_waits_while_modal_open() {
+    let mut st = test_dummy_tui_state();
+    let (closed_tx, closed_rx) = tokio::sync::oneshot::channel();
+    drop(closed_rx);
+    let (open_tx, _open_rx) = tokio::sync::oneshot::channel();
+
+    st.pending_modals
+        .push_back(crate::commands::chat::tui::state::PendingModal::Sudo {
+            prompt: "ls".to_string(),
+            resp_tx: closed_tx,
+        });
+    st.pending_modals
+        .push_back(crate::commands::chat::tui::state::PendingModal::Approval {
+            req: harness_core::ApprovalRequest::default(),
+            resp_tx: open_tx,
+        });
+
+    assert!(st.promote_pending_modal());
+    assert!(matches!(st.modal, ActiveModal::Approval { .. }));
+    assert!(st.pending_modals.is_empty());
 }

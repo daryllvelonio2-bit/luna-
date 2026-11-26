@@ -248,6 +248,9 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
                         if input::handle_event(&mut env, &mut st, &mut terminal, ev).await? == Flow::Break {
                             break;
                         }
+                        if st.promote_pending_modal() {
+                            needs_redraw = true;
+                        }
                         if should_redraw {
                             needs_redraw = true;
                         }
@@ -299,6 +302,7 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
             bg_done = poll_any_background_turn(&mut st.background_sessions), if has_bg_active => {
                 if let Some((bg_id, turn_res)) = bg_done {
                     handle_background_turn_end(&env, &mut st, &bg_id, turn_res).await;
+                    needs_redraw = true;
                 }
             }
 
@@ -473,6 +477,7 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
                         && !slot.compacting.load(Ordering::SeqCst)
                         && !slot.queue.is_empty()
                     {
+                        slot.has_unread_done = false;
                         drain_queue(
                             &mut slot.queue,
                             &slot.ui,
@@ -552,53 +557,55 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
             }
 
             maybe_approval = env.approval_rx.recv() => {
-                if let Some((req, resp_tx)) = maybe_approval {
+                if let Some((sid, req, resp_tx)) = maybe_approval {
                     if !resp_tx.is_closed() {
-                        st.modal = ActiveModal::Approval {
-                            req,
-                            resp_tx,
-                            selected: 0,
-                            diff_scroll: 0,
-                            editing_input: false,
-                            input: String::new(),
-                            asking: false,
-                            reply: None,
-                            reply_scroll: 0,
-                            error: None,
-                        };
-                        needs_redraw = true;
+                        let modal = state::PendingModal::Approval { req, resp_tx };
+                        let origin = sid.as_deref().unwrap_or(env.session_id.as_str());
+                        if origin == env.session_id.as_str() {
+                            st.pending_modals.push_back(modal);
+                            if st.promote_pending_modal() {
+                                needs_redraw = true;
+                            }
+                        } else if let Some(slot) = st.background_sessions.get_mut(origin) {
+                            slot.pending_modals.push_back(modal);
+                            needs_redraw = true;
+                        }
                     }
                 }
             }
 
             maybe_sudo = env.sudo_rx.recv() => {
-                if let Some((prompt, resp_tx)) = maybe_sudo {
+                if let Some((sid, prompt, resp_tx)) = maybe_sudo {
                     if !resp_tx.is_closed() {
-                        st.modal = ActiveModal::Sudo {
-                            prompt,
-                            resp_tx,
-                            input: String::new(),
-                        };
-                        needs_redraw = true;
+                        let modal = state::PendingModal::Sudo { prompt, resp_tx };
+                        let origin = sid.as_deref().unwrap_or(env.session_id.as_str());
+                        if origin == env.session_id.as_str() {
+                            st.pending_modals.push_back(modal);
+                            if st.promote_pending_modal() {
+                                needs_redraw = true;
+                            }
+                        } else if let Some(slot) = st.background_sessions.get_mut(origin) {
+                            slot.pending_modals.push_back(modal);
+                            needs_redraw = true;
+                        }
                     }
                 }
             }
 
             maybe_clarify = env.clarify_rx.recv() => {
-                if let Some((req, resp_tx)) = maybe_clarify {
+                if let Some((sid, req, resp_tx)) = maybe_clarify {
                     if !resp_tx.is_closed() {
-                        st.modal = ActiveModal::Clarify {
-                            req,
-                            resp_tx,
-                            question_idx: 0,
-                            answers: Vec::new(),
-                            selected: 0,
-                            custom: String::new(),
-                            editing_custom: false,
-                            scroll: 0,
-                            follow_selection: true,
-                        };
-                        needs_redraw = true;
+                        let modal = state::PendingModal::Clarify { req, resp_tx };
+                        let origin = sid.as_deref().unwrap_or(env.session_id.as_str());
+                        if origin == env.session_id.as_str() {
+                            st.pending_modals.push_back(modal);
+                            if st.promote_pending_modal() {
+                                needs_redraw = true;
+                            }
+                        } else if let Some(slot) = st.background_sessions.get_mut(origin) {
+                            slot.pending_modals.push_back(modal);
+                            needs_redraw = true;
+                        }
                     }
                 }
             }
@@ -888,6 +895,7 @@ async fn init_tui_state(env: &mut Env<'_>) -> Result<TuiState, HarnessError> {
         live_reasoning_cache: state::LiveReasoningCache::default(),
         template_agent,
         background_sessions: HashMap::new(),
+        pending_modals: VecDeque::new(),
         memory_project_filter: None,
         compacted_added: 0,
         compacted_deleted: 0,

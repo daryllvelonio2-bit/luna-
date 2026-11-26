@@ -14,12 +14,16 @@ pub use harness_core::{ClarifyAnswer, ClarifyItem, ClarifyRequest, ClarifyRespon
 /// ClarifyTool enables the assistant to ask interactive multiple-choice
 /// and free-text questions to the user during conversation turns.
 pub struct ClarifyTool {
-    tx: mpsc::UnboundedSender<(ClarifyRequest, oneshot::Sender<ClarifyResponse>)>,
+    tx: mpsc::UnboundedSender<(Option<String>, ClarifyRequest, oneshot::Sender<ClarifyResponse>)>,
 }
 
 impl ClarifyTool {
     pub fn new(
-        tx: mpsc::UnboundedSender<(ClarifyRequest, oneshot::Sender<ClarifyResponse>)>,
+        tx: mpsc::UnboundedSender<(
+            Option<String>,
+            ClarifyRequest,
+            oneshot::Sender<ClarifyResponse>,
+        )>,
     ) -> Self {
         Self { tx }
     }
@@ -124,8 +128,9 @@ impl Tool for ClarifyTool {
 
         let request = ClarifyRequest { questions: items };
         let (response_tx, response_rx) = oneshot::channel();
+        let session_id = harness_core::session_context::current();
 
-        if self.tx.send((request, response_tx)).is_err() {
+        if self.tx.send((session_id, request, response_tx)).is_err() {
             return Ok(ToolResult::error(
                 call_id,
                 "interactive UI channel unavailable",
@@ -857,7 +862,7 @@ mod tests {
         let tool = ClarifyTool::new(tx);
 
         tokio::spawn(async move {
-            if let Some((req, resp_tx)) = rx.recv().await {
+            if let Some((_sid, req, resp_tx)) = rx.recv().await {
                 assert_eq!(req.questions.len(), 1);
                 assert_eq!(req.questions[0].question, "Favorite color?");
                 assert_eq!(req.questions[0].choices, vec!["Blue", "Red"]);
@@ -891,7 +896,7 @@ mod tests {
         let tool = ClarifyTool::new(tx);
 
         tokio::spawn(async move {
-            if let Some((req, resp_tx)) = rx.recv().await {
+            if let Some((_sid, req, resp_tx)) = rx.recv().await {
                 assert_eq!(req.questions.len(), 2);
                 let resp = ClarifyResponse {
                     answer: Some("Rust".to_string()),

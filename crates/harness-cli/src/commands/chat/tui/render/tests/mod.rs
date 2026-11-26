@@ -123,6 +123,7 @@ pub(crate) fn test_dummy_tui_state() -> TuiState {
         live_reasoning_cache: crate::commands::chat::tui::state::LiveReasoningCache::default(),
         template_agent: agent,
         background_sessions: std::collections::HashMap::new(),
+        pending_modals: std::collections::VecDeque::new(),
         memory_project_filter: None,
         compacted_added: 0,
         compacted_deleted: 0,

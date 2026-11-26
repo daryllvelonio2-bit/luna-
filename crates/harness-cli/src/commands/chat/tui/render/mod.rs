@@ -376,23 +376,57 @@ pub(crate) fn render_tab_bar(
         .position(|(_, t)| t.id == active_session_id)
         .unwrap_or(visible_tabs.len().saturating_sub(1));
 
-    let tab_is_busy = |tab_id: &str| -> bool {
-        (tab_id == active_session_id && st.active_turn.is_some())
-            || st
-                .background_sessions
-                .get(tab_id)
-                .is_some_and(|s| s.active_turn.is_some())
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum TabIndicator {
+        None,
+        NeedsAttention,
+        Busy,
+        Done,
+    }
+
+    let tab_indicator = |tab_id: &str| -> TabIndicator {
+        if tab_id == active_session_id {
+            let active_popup = matches!(
+                st.modal,
+                ActiveModal::Approval { .. }
+                    | ActiveModal::Clarify { .. }
+                    | ActiveModal::Sudo { .. }
+            ) || st.pending_modals.iter().any(|m| !m.is_closed());
+            if active_popup {
+                TabIndicator::NeedsAttention
+            } else if st.active_turn.is_some() {
+                TabIndicator::Busy
+            } else {
+                TabIndicator::None
+            }
+        } else if let Some(slot) = st.background_sessions.get(tab_id) {
+            if slot.has_pending_popup() {
+                TabIndicator::NeedsAttention
+            } else if slot.active_turn.is_some() {
+                TabIndicator::Busy
+            } else if slot.has_unread_done {
+                TabIndicator::Done
+            } else {
+                TabIndicator::None
+            }
+        } else {
+            TabIndicator::None
+        }
     };
 
     // Estimate widths and drop earliest tabs if overflowing.
     let tab_display_width =
         |tab: &crate::commands::chat::tui::state::SessionTab, is_active: bool| -> u16 {
             let truncated = truncate_str(&tab.title, 18);
-            let busy_w = if tab_is_busy(&tab.id) { 2 } else { 0 };
-            if is_active {
-                (truncated.width() + busy_w + 4) as u16
+            let indicator_w = if tab_indicator(&tab.id) != TabIndicator::None {
+                2
             } else {
-                (truncated.width() + busy_w + 3) as u16
+                0
+            };
+            if is_active {
+                (truncated.width() + indicator_w + 4) as u16
+            } else {
+                (truncated.width() + indicator_w + 3) as u16
             }
         };
 
@@ -413,14 +447,14 @@ pub(crate) fn render_tab_bar(
     let slice_len = slice.len();
     for (rel_idx, (_, tab)) in slice.iter().enumerate() {
         let is_active = tab.id == active_session_id;
-        let busy = tab_is_busy(&tab.id);
+        let indicator = tab_indicator(&tab.id);
         let truncated = truncate_str(&tab.title, 18);
         let w = tab_display_width(tab, is_active);
         if cursor_x + w > max_tabs_x {
             break;
         }
 
-        let style = if is_active {
+        let mut style = if is_active {
             Style::default()
                 .fg(text_primary())
                 .bg(bg_surface())
@@ -430,6 +464,9 @@ pub(crate) fn render_tab_bar(
         } else {
             Style::default().fg(text_muted()).bg(bg_canvas())
         };
+        if indicator == TabIndicator::NeedsAttention {
+            style = style.fg(yellow_warn());
+        }
         let bg = if is_active { bg_surface() } else { bg_canvas() };
 
         st.hit_boxes.push(TabHitBox {
@@ -439,11 +476,23 @@ pub(crate) fn render_tab_bar(
         });
         let lead = if is_active { "  " } else { " " };
         spans.push(Span::styled(lead, style));
-        if busy {
-            spans.push(Span::styled(
-                format!("{spinner} "),
-                Style::default().fg(accent_coral()).bg(bg),
-            ));
+        match indicator {
+            TabIndicator::NeedsAttention => {
+                spans.push(Span::styled(
+                    "● ",
+                    Style::default().fg(yellow_warn()).bg(bg),
+                ));
+            }
+            TabIndicator::Busy => {
+                spans.push(Span::styled(
+                    format!("{spinner} "),
+                    Style::default().fg(accent_coral()).bg(bg),
+                ));
+            }
+            TabIndicator::Done => {
+                spans.push(Span::styled("● ", Style::default().fg(green_ok()).bg(bg)));
+            }
+            TabIndicator::None => {}
         }
         spans.push(Span::styled(format!("{truncated}  "), style));
         cursor_x += w;

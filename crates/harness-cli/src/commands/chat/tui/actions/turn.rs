@@ -428,6 +428,8 @@ pub async fn handle_background_turn_end(
         return;
     };
     slot.active_turn = None;
+    slot.pending_modals.clear();
+    slot.has_unread_done = true;
     if slot
         .pending_job_turn
         .as_ref()
