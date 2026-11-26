@@ -1984,9 +1984,10 @@ fn orchestrator_editor_renders_main_subagents_and_effort_slider() {
         in_flight_tools: &in_flight,
         features: Default::default(),
     };
+    let snap = TuiLiveSnapshot::default();
     terminal
         .draw(|f| {
-            render_tui(f, &mut st, &info);
+            draw(f, &mut st, &snap, &info);
         })
         .unwrap();
 
@@ -2012,13 +2013,12 @@ fn orchestrator_editor_renders_main_subagents_and_effort_slider() {
 #[tokio::test]
 async fn build_provider_items_filters_unconfigured_catalog_overrides_and_sorts_by_usage() {
     use harness_core::config::ProviderOverride;
-    use harness_core::usage::{UsageLedger, UsageRecord, SOURCE_CHAT};
+    use harness_core::usage::{PriceTable, UsageLedger, UsageRecord};
     use std::collections::BTreeMap;
-    use std::sync::Arc;
 
     let tmp = tempfile::tempdir().unwrap();
     let cred_path = tmp.path().join("creds.json");
-    let creds = Arc::new(harness_providers::CredentialManager::new(Some(cred_path)).unwrap());
+    let creds = harness_providers::CredentialManager::new(Some(cred_path)).unwrap();
     creds
         .add_credential("openai", "k1", "sk-1", false)
         .await
@@ -2042,19 +2042,24 @@ async fn build_provider_items_filters_unconfigured_catalog_overrides_and_sorts_b
 
     let usage_db = tmp.path().join("usage.db");
     let ledger = UsageLedger::open(Some(usage_db.clone())).unwrap();
+    let prices = PriceTable::default();
+    let tok = harness_core::TokenUsage::default();
     for _ in 0..3 {
         ledger
-            .record(&UsageRecord::new(
-                "s1",
+            .record(&UsageRecord::for_turn(
                 "anthropic",
                 "claude-sonnet-4",
-                SOURCE_CHAT,
+                &tok,
+                100,
+                &prices,
             ))
             .await
             .unwrap();
     }
     ledger
-        .record(&UsageRecord::new("s1", "openai", "gpt-4o", SOURCE_CHAT))
+        .record(&UsageRecord::for_turn(
+            "openai", "gpt-4o", &tok, 100, &prices,
+        ))
         .await
         .unwrap();
 

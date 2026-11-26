@@ -285,25 +285,6 @@ pub async fn open_models_for_provider(
     open_models_for_target(env, st, ModelTarget::Session, provider, query).await;
 }
 
-/// Load the model rows for one provider, sorted from most used to least used.
-pub async fn load_model_items(
-    discovery: &harness_providers::ModelDiscovery,
-    cred_manager: &harness_providers::CredentialManager,
-    provider: &str,
-    current_provider: &str,
-    current_model: &str,
-) -> Vec<ModelPickerItem> {
-    load_model_items_with_usage(
-        discovery,
-        cred_manager,
-        provider,
-        current_provider,
-        current_model,
-        None,
-    )
-    .await
-}
-
 pub async fn load_model_items_with_usage(
     discovery: &harness_providers::ModelDiscovery,
     cred_manager: &harness_providers::CredentialManager,
