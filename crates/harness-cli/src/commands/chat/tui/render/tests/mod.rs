@@ -90,6 +90,7 @@ pub(crate) fn test_dummy_tui_state() -> TuiState {
         pending_images: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         history_path: None,
         ctrl_c_armed: None,
+        esc_armed: None,
         spinner_tick: 0,
         cwd_label: "/workspace".to_string(),
         session_pinned_skills: Vec::new(),

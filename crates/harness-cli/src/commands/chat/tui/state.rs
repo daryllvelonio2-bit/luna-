@@ -1536,6 +1536,8 @@ pub struct TuiState {
     pub pending_images: Arc<Mutex<Vec<String>>>,
     pub history_path: Option<std::path::PathBuf>,
     pub ctrl_c_armed: Option<std::time::Instant>,
+    /// First Esc while a turn runs; a second one within two seconds interrupts it.
+    pub esc_armed: Option<std::time::Instant>,
     pub spinner_tick: usize,
     pub cwd_label: String,
     pub session_pinned_skills: Vec<String>,

@@ -853,6 +853,7 @@ async fn init_tui_state(env: &mut Env<'_>) -> Result<TuiState, HarnessError> {
         pending_images: Arc::new(Mutex::new(Vec::new())),
         history_path,
         ctrl_c_armed: None,
+        esc_armed: None,
         spinner_tick: 0,
         cwd_label,
         session_pinned_skills: env

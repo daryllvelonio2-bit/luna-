@@ -175,6 +175,14 @@ pub(crate) fn build_chrome_lines(
             )));
         }
     }
+    if let Some(armed_at) = st.esc_armed {
+        if armed_at.elapsed().as_secs() < 2 {
+            lines.push(Line::from(Span::styled(
+                "Press Esc again to stop the agent",
+                Style::default().fg(yellow_warn()).bg(bg_canvas()),
+            )));
+        }
+    }
     if let Some((message, at)) = &st.selection_notice {
         if at.elapsed().as_secs() < 3 {
             lines.push(Line::from(vec![

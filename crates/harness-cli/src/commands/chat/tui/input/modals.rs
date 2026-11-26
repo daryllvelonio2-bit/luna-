@@ -247,11 +247,19 @@ pub async fn handle_modal_key(
             mut selected,
         } => {
             if key.code == KeyCode::Esc {
-                if matches!(
-                    target,
-                    ModelTarget::OrchestratorMain | ModelTarget::OrchestratorSubagent(_)
-                ) {
-                    super::super::actions::orchestrator::restore_orchestrator_editor_from_draft(st);
+                // Esc steps back one picker instead of closing the whole flow: the
+                // first press clears the search, the next returns to the providers.
+                if !query.is_empty() {
+                    st.modal = ActiveModal::ModelPicker {
+                        target,
+                        provider,
+                        provider_display,
+                        query: String::new(),
+                        items,
+                        selected: 0,
+                    };
+                } else {
+                    open_provider_picker_for(env, st, target.clone()).await;
                 }
                 return Ok(Flow::Continue);
             }
@@ -552,8 +560,11 @@ pub async fn handle_modal_key(
             ];
             match key.code {
                 KeyCode::Esc => {
-                    // Cancelling the chained picker cancels the model switch too.
-                    st.pending_model_choice = None;
+                    // Cancelling the chained thinking picker steps back to the model
+                    // list it came from; a standalone thinking picker just closes.
+                    if let Some((target, provider, _)) = st.pending_model_choice.take() {
+                        open_models_for_target(env, st, target, &provider, String::new()).await;
+                    }
                 }
                 KeyCode::Up => {
                     selected = if selected == 0 { 6 } else { selected - 1 };

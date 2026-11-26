@@ -57,8 +57,12 @@ pub async fn handle_key(
         return Ok(Flow::Continue);
     }
 
-    // Disarm Ctrl+C exit prompt on any other key.
+    // Disarm Ctrl+C exit prompt on any other key. The Esc arm must survive Esc itself,
+    // or the second press that confirms the interrupt is never seen.
     st.ctrl_c_armed = None;
+    if key.code != KeyCode::Esc {
+        st.esc_armed = None;
+    }
 
     // If a modal is active, it owns all keyboard input.
     if !matches!(st.modal, ActiveModal::None) {
@@ -206,7 +210,14 @@ pub async fn handle_key(
             return Ok(Flow::Continue);
         }
         if st.active_turn.is_some() {
-            interrupt_turn(env, st).await;
+            // A single Esc only arms the interrupt: a turn is expensive to lose, so the
+            // second Esc within two seconds is the one that stops it.
+            if st.esc_armed.is_some_and(|at| at.elapsed().as_secs() < 2) {
+                st.esc_armed = None;
+                interrupt_turn(env, st).await;
+            } else {
+                st.esc_armed = Some(std::time::Instant::now());
+            }
         } else if env.ui.transient_error().is_some() {
             env.ui.clear_transient_error();
         }
