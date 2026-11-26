@@ -627,6 +627,8 @@ fn session_steer_handle(fallback: &SteerQueueHandle) -> SteerQueueHandle {
     }
 }
 
+pub type SubagentPoolEntry = (Arc<dyn ModelProvider>, Option<ReasoningEffort>);
+
 pub struct DelegateTaskTool {
     /// The provider a child runs on. Swappable: the session's model can change after the tool is
     /// built, and a child must use the model the user selected, not the startup one.
@@ -646,7 +648,7 @@ pub struct DelegateTaskTool {
     worker_approver: Arc<RwLock<Option<Arc<dyn Approver>>>>,
     /// Optional pool of subagent `(provider, reasoning_effort)` pairs configured by an active
     /// orchestrator preset. When non-empty, delegated children draw from this pool.
-    subagent_pool: std::sync::RwLock<Vec<(Arc<dyn ModelProvider>, Option<ReasoningEffort>)>>,
+    subagent_pool: std::sync::RwLock<Vec<SubagentPoolEntry>>,
     subagent_cursor: std::sync::atomic::AtomicUsize,
 }
 
@@ -696,7 +698,7 @@ impl DelegateTaskTool {
 
     /// Replace the subagent provider pool used when an orchestrator preset is active.
     /// Passing an empty `Vec` reverts delegated children to the session's main provider.
-    pub fn set_subagent_pool(&self, pool: Vec<(Arc<dyn ModelProvider>, Option<ReasoningEffort>)>) {
+    pub fn set_subagent_pool(&self, pool: Vec<SubagentPoolEntry>) {
         *self
             .subagent_pool
             .write()
@@ -707,10 +709,7 @@ impl DelegateTaskTool {
 
     /// Pick `(provider, reasoning_effort)` for child `idx` from the orchestrator subagent pool
     /// if configured, otherwise fall back to the session provider.
-    fn subagent_provider_for(
-        &self,
-        idx: Option<usize>,
-    ) -> (Arc<dyn ModelProvider>, Option<ReasoningEffort>) {
+    fn subagent_provider_for(&self, idx: Option<usize>) -> SubagentPoolEntry {
         let pool = self.subagent_pool.read().unwrap_or_else(|e| e.into_inner());
         if pool.is_empty() {
             return (self.provider(), None);
