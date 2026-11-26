@@ -127,7 +127,8 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
     },
     SlashCommand {
         name: "/orchestrator",
-        details: "Create or edit orchestrator presets (/orchestrator create [name], /orchestrator edit)",
+        details:
+            "Create or edit orchestrator presets (/orchestrator create [name], /orchestrator edit)",
     },
     SlashCommand {
         name: "/default_model",

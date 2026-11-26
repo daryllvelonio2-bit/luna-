@@ -696,18 +696,21 @@ impl DelegateTaskTool {
 
     /// Replace the subagent provider pool used when an orchestrator preset is active.
     /// Passing an empty `Vec` reverts delegated children to the session's main provider.
-    pub fn set_subagent_pool(
-        &self,
-        pool: Vec<(Arc<dyn ModelProvider>, Option<ReasoningEffort>)>,
-    ) {
-        *self.subagent_pool.write().unwrap_or_else(|e| e.into_inner()) = pool;
+    pub fn set_subagent_pool(&self, pool: Vec<(Arc<dyn ModelProvider>, Option<ReasoningEffort>)>) {
+        *self
+            .subagent_pool
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = pool;
         self.subagent_cursor
             .store(0, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Pick `(provider, reasoning_effort)` for child `idx` from the orchestrator subagent pool
     /// if configured, otherwise fall back to the session provider.
-    fn subagent_provider_for(&self, idx: Option<usize>) -> (Arc<dyn ModelProvider>, Option<ReasoningEffort>) {
+    fn subagent_provider_for(
+        &self,
+        idx: Option<usize>,
+    ) -> (Arc<dyn ModelProvider>, Option<ReasoningEffort>) {
         let pool = self.subagent_pool.read().unwrap_or_else(|e| e.into_inner());
         if pool.is_empty() {
             return (self.provider(), None);

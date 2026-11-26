@@ -642,10 +642,7 @@ pub(crate) fn render_modal(
                 let stop_count = EFFORT_STOPS.len();
                 let seg_w = ((inner_w.saturating_sub(10)) / (stop_count - 1)).clamp(4, 12);
 
-                let mut track_spans = vec![Span::styled(
-                    "  ",
-                    Style::default().bg(bg_elevated()),
-                )];
+                let mut track_spans = vec![Span::styled("  ", Style::default().bg(bg_elevated()))];
                 for i in 0..stop_count {
                     let dot = if i <= active_idx { "●" } else { "○" };
                     let dot_fg = if i <= active_idx {
@@ -675,10 +672,7 @@ pub(crate) fn render_modal(
                 ));
                 lines.push(Line::from(track_spans));
 
-                let mut label_spans = vec![Span::styled(
-                    "  ",
-                    Style::default().bg(bg_elevated()),
-                )];
+                let mut label_spans = vec![Span::styled("  ", Style::default().bg(bg_elevated()))];
                 for (i, (_, lbl)) in EFFORT_STOPS.iter().enumerate() {
                     let is_cur = i == active_idx;
                     let fg = if is_cur { accent_auto() } else { text_muted() };

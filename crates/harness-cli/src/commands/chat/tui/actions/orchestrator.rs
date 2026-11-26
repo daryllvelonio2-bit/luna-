@@ -10,9 +10,7 @@ use harness_providers::GenericProviderClient;
 
 use super::pickers::{apply_model_selection, apply_thinking_selection};
 use super::*;
-use crate::commands::chat::tui::state::{
-    InputAction, OrchestratorDraftState, SelectAction,
-};
+use crate::commands::chat::tui::state::{InputAction, OrchestratorDraftState, SelectAction};
 
 /// Ordered thinking/effort stops shown on the horizontal slider inside the orchestrator editor.
 pub const EFFORT_STOPS: [(Option<ReasoningEffort>, &str); 5] = [
@@ -33,7 +31,10 @@ pub fn effort_stop_index(effort: Option<ReasoningEffort>) -> usize {
     }
 }
 
-pub fn step_thinking_effort(current: Option<ReasoningEffort>, delta: i8) -> Option<ReasoningEffort> {
+pub fn step_thinking_effort(
+    current: Option<ReasoningEffort>,
+    delta: i8,
+) -> Option<ReasoningEffort> {
     let idx = effort_stop_index(current) as i8;
     let next = (idx + delta).clamp(0, (EFFORT_STOPS.len() - 1) as i8) as usize;
     EFFORT_STOPS[next].0
@@ -85,7 +86,11 @@ pub fn open_orchestrator_edit_list(env: &Env<'_>, st: &mut TuiState) {
         .map(|name| {
             let orch = &env.config.orchestrators[name];
             let sub_count = orch.subagents.len();
-            let sub_word = if sub_count == 1 { "subagent" } else { "subagents" };
+            let sub_word = if sub_count == 1 {
+                "subagent"
+            } else {
+                "subagents"
+            };
             format!(
                 "{}  ({}/{} · {} {})",
                 name, orch.orchestrator.provider, orch.orchestrator.model, sub_count, sub_word
@@ -118,10 +123,19 @@ pub fn open_orchestrator_use_list(env: &Env<'_>, st: &mut TuiState) {
                 "  "
             };
             let sub_count = orch.subagents.len();
-            let sub_word = if sub_count == 1 { "subagent" } else { "subagents" };
+            let sub_word = if sub_count == 1 {
+                "subagent"
+            } else {
+                "subagents"
+            };
             format!(
                 "{}{}  ({}/{} · {} {})",
-                marker, name, orch.orchestrator.provider, orch.orchestrator.model, sub_count, sub_word
+                marker,
+                name,
+                orch.orchestrator.provider,
+                orch.orchestrator.model,
+                sub_count,
+                sub_word
             )
         })
         .collect();

@@ -167,9 +167,7 @@ pub async fn handle_modal_key(
                     target,
                     ModelTarget::OrchestratorMain | ModelTarget::OrchestratorSubagent(_)
                 ) {
-                    super::super::actions::orchestrator::restore_orchestrator_editor_from_draft(
-                        st,
-                    );
+                    super::super::actions::orchestrator::restore_orchestrator_editor_from_draft(st);
                 }
                 return Ok(Flow::Continue);
             }
@@ -253,9 +251,7 @@ pub async fn handle_modal_key(
                     target,
                     ModelTarget::OrchestratorMain | ModelTarget::OrchestratorSubagent(_)
                 ) {
-                    super::super::actions::orchestrator::restore_orchestrator_editor_from_draft(
-                        st,
-                    );
+                    super::super::actions::orchestrator::restore_orchestrator_editor_from_draft(st);
                 }
                 return Ok(Flow::Continue);
             }

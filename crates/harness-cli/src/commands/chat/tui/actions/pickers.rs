@@ -117,10 +117,7 @@ pub async fn build_provider_items_with_usage(
     if let Some(cfgs) = config_providers {
         for (id, ov) in cfgs {
             let is_custom_non_catalog = harness_providers::catalog::find_provider(id).is_none();
-            let has_endpoint_or_key = ov
-                .base_url
-                .as_deref()
-                .is_some_and(|u| !u.trim().is_empty())
+            let has_endpoint_or_key = ov.base_url.as_deref().is_some_and(|u| !u.trim().is_empty())
                 || ov.api_key.as_deref().is_some_and(|k| !k.trim().is_empty());
             if id != "custom"
                 && is_custom_non_catalog
@@ -157,9 +154,7 @@ pub async fn build_provider_items_with_usage(
     for (idx, p_id) in loaded.iter().enumerate() {
         // `get_loaded_providers()` is already ordered active-first, most-used-first.
         let rank_bonus = (loaded.len().saturating_sub(idx)) as u64;
-        cred_usage
-            .entry(p_id.to_lowercase())
-            .or_insert(rank_bonus);
+        cred_usage.entry(p_id.to_lowercase()).or_insert(rank_bonus);
     }
 
     let mut items_with_score: Vec<(u64, usize, ProviderPickerItem)> =
@@ -199,7 +194,10 @@ pub async fn build_provider_items_with_usage(
         ));
     }
     items_with_score.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-    items_with_score.into_iter().map(|(_, _, item)| item).collect()
+    items_with_score
+        .into_iter()
+        .map(|(_, _, item)| item)
+        .collect()
 }
 
 /// Open the provider picker immediately from the cached rows, then refresh them off-loop.
@@ -646,11 +644,14 @@ pub async fn apply_model_target(
                         draft.selected = idx + 1;
                     }
                     _ => {
-                        draft.config.subagents.push(harness_core::OrchestratorModelSpec {
-                            provider: provider.to_string(),
-                            model: model.to_string(),
-                            thinking: None,
-                        });
+                        draft
+                            .config
+                            .subagents
+                            .push(harness_core::OrchestratorModelSpec {
+                                provider: provider.to_string(),
+                                model: model.to_string(),
+                                thinking: None,
+                            });
                         draft.selected = draft.config.subagents.len();
                     }
                 }
