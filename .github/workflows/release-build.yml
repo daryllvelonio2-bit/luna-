@@ -57,43 +57,8 @@ jobs:
           path: target/release/luna
           retention-days: 1
 
-  build-windows:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.inputs.ref || github.ref_name }}
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-
-      - name: Build web frontend
-        working-directory: web
-        shell: bash
-        run: |
-          npm ci --no-audit --no-fund || npm install --no-audit --no-fund
-          npm run typecheck
-          npm run build
-
-      - name: Build release binary
-        run: cargo build --release --bin luna
-
-      - name: Verify built binary
-        run: .\target\release\luna.exe --version
-
-      - name: Upload luna Windows binary artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: luna-windows-x86_64
-          path: target/release/luna.exe
-          retention-days: 1
-
   publish-release:
-    needs: [build, build-windows]
+    needs: [build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -104,19 +69,12 @@ jobs:
         with:
           name: luna-binary
           path: dist-linux
-      - name: Download Windows binary
-        uses: actions/download-artifact@v4
-        with:
-          name: luna-windows-x86_64
-          path: dist-windows
       - name: Package release assets
         run: |
           mkdir -p release-assets
           chmod +x dist-linux/luna
           cp dist-linux/luna release-assets/luna-linux-x86_64
           tar -czf release-assets/luna-linux-x86_64.tar.gz -C dist-linux luna
-          cp dist-windows/luna.exe release-assets/luna-windows-x86_64.exe
-          zip -j release-assets/luna-windows-x86_64.zip dist-windows/luna.exe
       - name: Create or Update GitHub Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
