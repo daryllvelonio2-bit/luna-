@@ -275,8 +275,8 @@ pub(crate) fn restore_background_session(
     if let Some(ref name) = st.active_orchestrator {
         if let Some(orch) = env.config.orchestrators.get(name) {
             let mut pool: Vec<(
-                Arc<dyn harness_providers::ModelProvider>,
-                Option<harness_providers::ReasoningEffort>,
+                Arc<dyn harness_core::ModelProvider>,
+                Option<harness_core::ReasoningEffort>,
             )> = Vec::with_capacity(orch.subagents.len());
             for sub in &orch.subagents {
                 if let Ok(client) = harness_providers::GenericProviderClient::new(

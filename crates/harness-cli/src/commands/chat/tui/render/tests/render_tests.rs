@@ -2166,7 +2166,7 @@ fn composer_card_footer_renders_orchestrator_badge_when_active() {
         session_id: "s123",
         provider: "nvidia",
         model: "nemotron-3-ultra-550b-a55b",
-        reasoning_effort: Some(harness_providers::ReasoningEffort::XHigh),
+        reasoning_effort: Some(harness_core::ReasoningEffort::XHigh),
     };
     let snap = harness_core::usage::SessionSnapshot::default();
     let input = crate::commands::chat::tui::render::composer::wrap_composer_text("", 90);
