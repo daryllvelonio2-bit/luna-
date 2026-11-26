@@ -1756,7 +1756,7 @@ fn settled_turn_registers_copy_hit_target_on_code_block_header() {
 }
 
 fn make_bg_slot(
-    st: &TuiState,
+    _st: &TuiState,
     session_id: &str,
     pending_modals: std::collections::VecDeque<crate::commands::chat::tui::state::PendingModal>,
     has_unread_done: bool,
@@ -1764,9 +1764,39 @@ fn make_bg_slot(
     use std::collections::{HashSet, VecDeque};
     use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex};
+    let tmp = tempfile::tempdir().unwrap();
+    let memory = Arc::new(harness_memory::MemoryEngineKind::Sqlite(
+        harness_memory::SqliteMemoryEngine::in_memory().unwrap(),
+    ));
+    let notes =
+        Arc::new(harness_notes::FileNotesEngine::new(tmp.path().join("notes"), None).unwrap());
+    let registry = Arc::new(harness_core::DefaultToolRegistry::new());
+    let creds = harness_providers::CredentialManager::new(None).unwrap();
+    let discovery = Arc::new(harness_providers::ModelDiscovery::new(
+        None,
+        0,
+        Default::default(),
+    ));
+    let provider = Arc::new(
+        harness_providers::GenericProviderClient::new(
+            "openai".to_string(),
+            "gpt-4o".to_string(),
+            creds,
+            discovery,
+            None,
+        )
+        .unwrap(),
+    );
+    let agent = Arc::new(tokio::sync::Mutex::new(harness_core::Agent::new(
+        provider,
+        memory,
+        notes,
+        registry,
+        harness_core::AgentConfig::default(),
+    )));
     crate::commands::chat::tui::state::BackgroundSession {
         session_id: session_id.to_string(),
-        agent: Arc::new(tokio::sync::Mutex::new((*st.template_agent).clone())),
+        agent,
         ui: Arc::new(crate::commands::chat::ui::ChatUi::new(false)),
         in_flight_tools: Arc::new(Mutex::new(Vec::new())),
         interruptions: Arc::new(Mutex::new(Vec::new())),

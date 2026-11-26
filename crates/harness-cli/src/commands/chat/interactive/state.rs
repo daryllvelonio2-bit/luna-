@@ -29,6 +29,9 @@ pub(in crate::commands::chat) enum Flow {
     Break,
 }
 
+pub(in crate::commands::chat) type SudoRx =
+    mpsc::UnboundedReceiver<(Option<String>, String, oneshot::Sender<Option<String>>)>;
+
 /// The session the loop runs against.
 ///
 /// The shared handles are cloned, not borrowed: the loop needs to hand them to the agent, the
@@ -61,8 +64,7 @@ pub(in crate::commands::chat) struct Env<'a> {
         oneshot::Sender<harness_core::ApprovalDecision>,
     )>,
     pub(in crate::commands::chat) approval_activity: Arc<tokio::sync::Notify>,
-    pub(in crate::commands::chat) sudo_rx:
-        &'a mut mpsc::UnboundedReceiver<(Option<String>, String, oneshot::Sender<Option<String>>)>,
+    pub(in crate::commands::chat) sudo_rx: &'a mut SudoRx,
     pub(in crate::commands::chat) clarify_rx: &'a mut mpsc::UnboundedReceiver<(
         Option<String>,
         crate::commands::clarify::ClarifyRequest,
