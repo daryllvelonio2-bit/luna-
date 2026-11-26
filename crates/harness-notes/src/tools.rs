@@ -3,7 +3,7 @@ use serde_json::json;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-use harness_core::{HarnessError, NotesEngine, Tool, ToolPreview, ToolResult};
+use harness_core::{unified_diff, HarnessError, NotesEngine, Tool, ToolPreview, ToolResult};
 
 pub struct SaveNoteTool {
     engine: Arc<dyn NotesEngine>,
@@ -339,11 +339,35 @@ impl Tool for UpdateNoteTool {
         true
     }
 
-    /// The id of the note the call would overwrite.
+    /// The id of the note the call would overwrite, with the change it would make.
     async fn preview(&self, args: &serde_json::Value) -> Option<ToolPreview> {
+        let id = args
+            .get("id")
+            .or_else(|| args.get("note_id"))
+            .or_else(|| args.get("title"))
+            .and_then(|i| i.as_str())?;
+        // A body-only preview reads as a wall of additions, hiding everything the overwrite
+        // removes, so diff the stored body against the new one.
+        let diff = match args.get("content").and_then(|c| c.as_str()) {
+            Some(new) => {
+                let old = self
+                    .engine
+                    .read_note(id)
+                    .await
+                    .map(|note| note.content)
+                    .unwrap_or_default();
+                let udiff = unified_diff(&old, new, id);
+                Some(if udiff.trim().is_empty() {
+                    format!("(no changes to {id})")
+                } else {
+                    udiff
+                })
+            }
+            None => None,
+        };
         Some(ToolPreview {
-            target: args.get("id").and_then(|i| i.as_str()).map(str::to_string),
-            diff: None,
+            target: Some(id.to_string()),
+            diff,
         })
     }
 
