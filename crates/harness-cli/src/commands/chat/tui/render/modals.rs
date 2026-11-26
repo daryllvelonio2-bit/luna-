@@ -491,6 +491,235 @@ pub(crate) fn render_modal(
                 .collect();
             frame.render_widget(Paragraph::new(lines), inner);
         }
+        ActiveModal::OrchestratorEditor {
+            name,
+            draft,
+            selected,
+            ..
+        } => {
+            use crate::commands::chat::tui::actions::orchestrator::{
+                effort_stop_index, EFFORT_STOPS,
+            };
+
+            let add_row = draft.subagents.len() + 1;
+            let save_row = draft.subagents.len() + 2;
+            let desired_h = (draft.subagents.len() as u16 + 13).clamp(14, 26);
+            let (w, h) = responsive_modal_size(screen, 6, 4, 58, 80, desired_h, 28);
+            let rect = centered_rect(screen, w, h);
+            st.modal_rect = Some(rect);
+            let title = format!("Orchestrator · {name}");
+            let inner = draw_modal_frame(
+                frame,
+                rect,
+                &title,
+                "↑/↓ select · ←/→ thinking · enter pick · del remove · ctrl+s save · esc",
+            );
+
+            let inner_w = inner.width as usize;
+            let sel = (*selected).min(save_row);
+            let mut lines: Vec<Line<'static>> = Vec::new();
+
+            let push_row = |lines: &mut Vec<Line<'static>>,
+                            label: String,
+                            right: String,
+                            is_sel: bool,
+                            label_color: Color| {
+                let bg = if is_sel { bg_selected() } else { bg_elevated() };
+                let marker = if is_sel { "❯" } else { " " };
+                let right_disp = if right.is_empty() || inner_w < 28 {
+                    String::new()
+                } else {
+                    truncate_str(&format!(" {right} "), (inner_w / 2).min(30))
+                };
+                let max_left = inner_w.saturating_sub(right_disp.width() + 4);
+                let left = format!(" {marker} {}", truncate_str(&label, max_left));
+                let pad = inner_w.saturating_sub(left.width() + right_disp.width());
+                lines.push(Line::from(vec![
+                    Span::styled(left, Style::default().fg(label_color).bg(bg)),
+                    Span::styled(" ".repeat(pad), Style::default().bg(bg)),
+                    Span::styled(right_disp, Style::default().fg(text_muted()).bg(bg)),
+                ]));
+            };
+
+            lines.push(Line::from(Span::styled(
+                truncate_str(" Orchestrator", inner_w),
+                Style::default()
+                    .fg(text_muted())
+                    .bg(bg_elevated())
+                    .add_modifier(Modifier::BOLD),
+            )));
+            let orch_model = if draft.orchestrator.model.is_empty() {
+                "(not set — press Enter)".to_string()
+            } else {
+                format!(
+                    "{} / {}",
+                    friendly_provider_name(&draft.orchestrator.provider),
+                    draft.orchestrator.model
+                )
+            };
+            let orch_effort = draft
+                .orchestrator
+                .thinking
+                .map(|e| e.as_str().to_string())
+                .unwrap_or_else(|| "off".to_string());
+            push_row(
+                &mut lines,
+                format!("Main: {orch_model}"),
+                format!("thinking: {orch_effort}"),
+                sel == 0,
+                if sel == 0 {
+                    accent_coral()
+                } else {
+                    text_primary()
+                },
+            );
+
+            lines.push(Line::from(Span::styled(
+                " ".repeat(inner_w),
+                Style::default().bg(bg_elevated()),
+            )));
+            lines.push(Line::from(Span::styled(
+                truncate_str(" Subagents", inner_w),
+                Style::default()
+                    .fg(text_muted())
+                    .bg(bg_elevated())
+                    .add_modifier(Modifier::BOLD),
+            )));
+
+            for (idx, sub) in draft.subagents.iter().enumerate() {
+                let row_idx = idx + 1;
+                let sub_effort = sub
+                    .thinking
+                    .map(|e| e.as_str().to_string())
+                    .unwrap_or_else(|| "off".to_string());
+                let label = format!(
+                    "Subagent #{}: {} / {}",
+                    idx + 1,
+                    friendly_provider_name(&sub.provider),
+                    sub.model
+                );
+                push_row(
+                    &mut lines,
+                    label,
+                    format!("thinking: {sub_effort}"),
+                    sel == row_idx,
+                    if sel == row_idx {
+                        accent_coral()
+                    } else {
+                        text_primary()
+                    },
+                );
+            }
+
+            push_row(
+                &mut lines,
+                "+ Add subagent".to_string(),
+                String::new(),
+                sel == add_row,
+                if sel == add_row {
+                    accent_auto()
+                } else {
+                    text_muted()
+                },
+            );
+
+            lines.push(Line::from(Span::styled(
+                "─".repeat(inner_w),
+                Style::default().fg(border_subtle()).bg(bg_elevated()),
+            )));
+
+            // Effort/Thinking slider for the highlighted model (Orchestrator or a Subagent).
+            let highlighted_effort = if sel == 0 {
+                Some(draft.orchestrator.thinking)
+            } else if sel >= 1 && sel <= draft.subagents.len() {
+                Some(draft.subagents[sel - 1].thinking)
+            } else {
+                None
+            };
+
+            if let Some(effort) = highlighted_effort {
+                let active_idx = effort_stop_index(effort);
+                let stop_count = EFFORT_STOPS.len();
+                let seg_w = ((inner_w.saturating_sub(10)) / (stop_count - 1)).clamp(4, 12);
+
+                let mut track_spans = vec![Span::styled(
+                    "  ",
+                    Style::default().bg(bg_elevated()),
+                )];
+                for i in 0..stop_count {
+                    let dot = if i <= active_idx { "●" } else { "○" };
+                    let dot_fg = if i <= active_idx {
+                        accent_auto()
+                    } else {
+                        text_muted()
+                    };
+                    track_spans.push(Span::styled(
+                        dot,
+                        Style::default().fg(dot_fg).bg(bg_elevated()),
+                    ));
+                    if i + 1 < stop_count {
+                        let line_fg = if i < active_idx {
+                            accent_auto()
+                        } else {
+                            text_muted()
+                        };
+                        track_spans.push(Span::styled(
+                            "─".repeat(seg_w),
+                            Style::default().fg(line_fg).bg(bg_elevated()),
+                        ));
+                    }
+                }
+                track_spans.push(Span::styled(
+                    "  ◀ ▶",
+                    Style::default().fg(text_muted()).bg(bg_elevated()),
+                ));
+                lines.push(Line::from(track_spans));
+
+                let mut label_spans = vec![Span::styled(
+                    "  ",
+                    Style::default().bg(bg_elevated()),
+                )];
+                for (i, (_, lbl)) in EFFORT_STOPS.iter().enumerate() {
+                    let is_cur = i == active_idx;
+                    let fg = if is_cur { accent_auto() } else { text_muted() };
+                    let mut st_lbl = Style::default().fg(fg).bg(bg_elevated());
+                    if is_cur {
+                        st_lbl = st_lbl.add_modifier(Modifier::BOLD);
+                    }
+                    let cell_w = if i + 1 < stop_count {
+                        seg_w + 1
+                    } else {
+                        lbl.len()
+                    };
+                    let padded = format!("{:<width$}", lbl, width = cell_w);
+                    label_spans.push(Span::styled(padded, st_lbl));
+                }
+                lines.push(Line::from(label_spans));
+            } else {
+                lines.push(Line::from(Span::styled(
+                    truncate_str("  Highlight a model row to adjust thinking (←/→)", inner_w),
+                    Style::default().fg(text_muted()).bg(bg_elevated()),
+                )));
+            }
+
+            lines.push(Line::from(Span::styled(
+                " ".repeat(inner_w),
+                Style::default().bg(bg_elevated()),
+            )));
+            push_row(
+                &mut lines,
+                "[ Save Orchestrator ]".to_string(),
+                "ctrl+s".to_string(),
+                sel == save_row,
+                if sel == save_row {
+                    green_ok()
+                } else {
+                    text_primary()
+                },
+            );
+
+            frame.render_widget(Paragraph::new(lines), inner);
+        }
         ActiveModal::Approval {
             req,
             selected,

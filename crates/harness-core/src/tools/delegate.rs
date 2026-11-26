@@ -644,6 +644,10 @@ pub struct DelegateTaskTool {
     /// The interactive chat's approval gate, used by workers so their writes ask the same human
     /// as the main turn. Regular delegated children keep the fail-closed `NonInteractive` gate.
     worker_approver: Arc<RwLock<Option<Arc<dyn Approver>>>>,
+    /// Optional pool of subagent `(provider, reasoning_effort)` pairs configured by an active
+    /// orchestrator preset. When non-empty, delegated children draw from this pool.
+    subagent_pool: std::sync::RwLock<Vec<(Arc<dyn ModelProvider>, Option<ReasoningEffort>)>>,
+    subagent_cursor: std::sync::atomic::AtomicUsize,
 }
 
 impl DelegateTaskTool {
@@ -667,6 +671,8 @@ impl DelegateTaskTool {
             steer_handle: Arc::new(RwLock::new(None)),
             cancels: Arc::new(RwLock::new(HashMap::new())),
             worker_approver: Arc::new(RwLock::new(None)),
+            subagent_pool: std::sync::RwLock::new(Vec::new()),
+            subagent_cursor: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -686,6 +692,35 @@ impl DelegateTaskTool {
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+
+    /// Replace the subagent provider pool used when an orchestrator preset is active.
+    /// Passing an empty `Vec` reverts delegated children to the session's main provider.
+    pub fn set_subagent_pool(
+        &self,
+        pool: Vec<(Arc<dyn ModelProvider>, Option<ReasoningEffort>)>,
+    ) {
+        *self.subagent_pool.write().unwrap_or_else(|e| e.into_inner()) = pool;
+        self.subagent_cursor
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Pick `(provider, reasoning_effort)` for child `idx` from the orchestrator subagent pool
+    /// if configured, otherwise fall back to the session provider.
+    fn subagent_provider_for(&self, idx: Option<usize>) -> (Arc<dyn ModelProvider>, Option<ReasoningEffort>) {
+        let pool = self.subagent_pool.read().unwrap_or_else(|e| e.into_inner());
+        if pool.is_empty() {
+            return (self.provider(), None);
+        }
+        let slot = match idx {
+            Some(i) => i % pool.len(),
+            None => {
+                self.subagent_cursor
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    % pool.len()
+            }
+        };
+        pool[slot].clone()
     }
 
     pub fn set_notifier(&self, notifier: SubagentCompletionNotifier) {
@@ -1425,7 +1460,7 @@ impl DelegateTaskTool {
         let mut join_set = JoinSet::new();
         let current_cfg = self.config.read().await.clone();
         for (idx, task) in tasks_to_run.into_iter().enumerate() {
-            let provider = self.provider();
+            let (provider, sub_effort) = self.subagent_provider_for(Some(idx));
             let memory = self.memory.clone();
             let notes = self.notes.clone();
             let store = self.store.clone();
@@ -1460,7 +1495,7 @@ impl DelegateTaskTool {
                     sub_cancel,
                     child_event_notifier,
                     None,
-                    None,
+                    sub_effort,
                     parent_session.clone(),
                 )
                 .await;
@@ -1620,7 +1655,7 @@ impl DelegateTaskTool {
             },
         );
 
-        let provider = self.provider();
+        let (provider, sub_effort) = self.subagent_provider_for(None);
         let memory = self.memory.clone();
         let notes = self.notes.clone();
         let store = self.store.clone();
@@ -1657,7 +1692,7 @@ impl DelegateTaskTool {
                 sub_cancel,
                 child_event_notifier,
                 None,
-                None,
+                sub_effort,
                 parent_session.clone(),
             )
             .await;

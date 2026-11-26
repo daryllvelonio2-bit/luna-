@@ -562,6 +562,33 @@ pub async fn run_slash_command(
                 }
             }
         }
+        "/orchestrator" => {
+            let trimmed = arg.unwrap_or("").trim();
+            if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("edit") {
+                super::orchestrator::open_orchestrator_edit_list(env, st);
+            } else if let Some(rest) = trimmed.strip_prefix("create") {
+                let name = rest.trim();
+                let name_opt = if name.is_empty() {
+                    None
+                } else {
+                    Some(name.to_string())
+                };
+                super::orchestrator::open_orchestrator_create(env, st, name_opt).await;
+            } else if let Some(rest) = trimmed.strip_prefix("use") {
+                let name = rest.trim();
+                if name.is_empty() {
+                    super::orchestrator::open_orchestrator_use_list(env, st);
+                } else if let Err(e) = super::orchestrator::apply_orchestrator(env, st, name).await
+                {
+                    env.ui.set_transient_error(Some(e.to_string()));
+                }
+            } else {
+                env.ui.set_transient_error(Some(
+                    "Usage: /orchestrator create [name] | /orchestrator edit | /orchestrator use <name>".into(),
+                ));
+            }
+            return Ok(Flow::Continue);
+        }
         "/plan" => {
             let next = if st.mode == AgentMode::Plan {
                 AgentMode::Build

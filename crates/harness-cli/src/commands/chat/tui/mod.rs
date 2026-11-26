@@ -863,10 +863,11 @@ async fn init_tui_state(env: &mut Env<'_>) -> Result<TuiState, HarnessError> {
         version: env!("CARGO_PKG_VERSION").to_string(),
         update_notice: None,
         last_rendered_rect: (120, 34),
-        provider_items: actions::build_provider_items(
+        provider_items: actions::build_provider_items_with_usage(
             env.cred_manager.clone(),
             Some(&env.config.providers),
             env.current_provider.as_str(),
+            Some(&env.config.paths.usage_db),
         )
         .await,
         picker_loading: None,
@@ -896,6 +897,8 @@ async fn init_tui_state(env: &mut Env<'_>) -> Result<TuiState, HarnessError> {
         template_agent,
         background_sessions: HashMap::new(),
         pending_modals: VecDeque::new(),
+        orchestrator_draft: None,
+        active_orchestrator: None,
         memory_project_filter: None,
         compacted_added: 0,
         compacted_deleted: 0,

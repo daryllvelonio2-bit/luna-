@@ -879,6 +879,8 @@ fn ensure_settled_transcript_caches_and_appends_incrementally() {
         },
         background_sessions: std::collections::HashMap::new(),
         pending_modals: std::collections::VecDeque::new(),
+        orchestrator_draft: None,
+        active_orchestrator: None,
         memory_project_filter: None,
         compacted_added: 0,
         compacted_deleted: 0,
@@ -1838,6 +1840,7 @@ fn make_bg_slot(
         session_max_deleted: 0,
         pending_modals,
         has_unread_done,
+        active_orchestrator: None,
     }
 }
 
@@ -1944,4 +1947,138 @@ fn promote_pending_modal_skips_closed_and_waits_while_modal_open() {
     assert!(st.promote_pending_modal());
     assert!(matches!(st.modal, ActiveModal::Approval { .. }));
     assert!(st.pending_modals.is_empty());
+}
+
+#[test]
+fn orchestrator_editor_renders_main_subagents_and_effort_slider() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    let mut st = test_dummy_tui_state();
+    st.modal = ActiveModal::OrchestratorEditor {
+        name: "coder".to_string(),
+        draft: harness_core::OrchestratorConfig {
+            orchestrator: harness_core::OrchestratorModelSpec {
+                provider: "openai".to_string(),
+                model: "gpt-4o".to_string(),
+                thinking: Some(harness_core::ReasoningEffort::Medium),
+            },
+            subagents: vec![harness_core::OrchestratorModelSpec {
+                provider: "anthropic".to_string(),
+                model: "claude-sonnet-4".to_string(),
+                thinking: Some(harness_core::ReasoningEffort::Low),
+            }],
+        },
+        selected: 0,
+        return_to_list: false,
+    };
+
+    let backend = TestBackend::new(90, 28);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let in_flight = Vec::new();
+    let info = FooterInfo {
+        provider: "openai",
+        model: "gpt-4o",
+        reasoning_effort: None,
+        session_id: "s1",
+        in_flight_tools: &in_flight,
+        features: Default::default(),
+    };
+    terminal
+        .draw(|f| {
+            render_tui(f, &mut st, &info);
+        })
+        .unwrap();
+
+    let buf = terminal.backend().buffer();
+    let mut text = String::new();
+    for y in 0..28 {
+        for x in 0..90 {
+            text.push_str(buf[(x, y)].symbol());
+        }
+        text.push('\n');
+    }
+    assert!(text.contains("Orchestrator · coder"), "header: {text}");
+    assert!(text.contains("Main: "), "main row: {text}");
+    assert!(text.contains("Subagent #1"), "subagent row: {text}");
+    assert!(text.contains("+ Add subagent"), "add row: {text}");
+    assert!(
+        text.contains("off") && text.contains("medium") && text.contains("xhigh"),
+        "effort slider: {text}"
+    );
+    assert!(text.contains("[ Save Orchestrator ]"), "save row: {text}");
+}
+
+#[tokio::test]
+async fn build_provider_items_filters_unconfigured_catalog_overrides_and_sorts_by_usage() {
+    use harness_core::config::ProviderOverride;
+    use harness_core::usage::{UsageLedger, UsageRecord, SOURCE_CHAT};
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let cred_path = tmp.path().join("creds.json");
+    let creds = Arc::new(harness_providers::CredentialManager::new(Some(cred_path)).unwrap());
+    creds
+        .add_credential("openai", "k1", "sk-1", false)
+        .await
+        .unwrap();
+    creds
+        .add_credential("anthropic", "k2", "sk-2", false)
+        .await
+        .unwrap();
+
+    // Simulate config.yaml containing unconfigured catalog entries (like `gemini` with empty
+    // override) plus a genuine custom provider with a base_url.
+    let mut cfg_providers = BTreeMap::new();
+    cfg_providers.insert("gemini".to_string(), ProviderOverride::default());
+    cfg_providers.insert(
+        "my-local".to_string(),
+        ProviderOverride {
+            base_url: Some("http://localhost:1234/v1".to_string()),
+            ..Default::default()
+        },
+    );
+
+    let usage_db = tmp.path().join("usage.db");
+    let ledger = UsageLedger::open(Some(usage_db.clone())).unwrap();
+    for _ in 0..3 {
+        ledger
+            .record(&UsageRecord::new(
+                "s1",
+                "anthropic",
+                "claude-sonnet-4",
+                SOURCE_CHAT,
+            ))
+            .await
+            .unwrap();
+    }
+    ledger
+        .record(&UsageRecord::new("s1", "openai", "gpt-4o", SOURCE_CHAT))
+        .await
+        .unwrap();
+
+    let items = crate::commands::chat::tui::actions::pickers::build_provider_items_with_usage(
+        creds,
+        Some(&cfg_providers),
+        "openai",
+        Some(&usage_db),
+    )
+    .await;
+
+    let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
+    assert!(
+        !ids.contains(&"gemini"),
+        "unconfigured catalog override must not appear: {ids:?}"
+    );
+    assert!(
+        ids.contains(&"my-local"),
+        "custom provider with base_url must appear: {ids:?}"
+    );
+    let anth_pos = ids.iter().position(|&id| id == "anthropic").unwrap();
+    let openai_pos = ids.iter().position(|&id| id == "openai").unwrap();
+    assert!(
+        anth_pos < openai_pos,
+        "most-used provider (anthropic=3) must sort above openai=1: {ids:?}"
+    );
 }

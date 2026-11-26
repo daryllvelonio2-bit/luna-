@@ -126,6 +126,10 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         details: "Switch provider and model (alias: /model)",
     },
     SlashCommand {
+        name: "/orchestrator",
+        details: "Create or edit orchestrator presets (/orchestrator create [name], /orchestrator edit)",
+    },
+    SlashCommand {
         name: "/default_model",
         details: "Choose the default provider and model (this session or global)",
     },

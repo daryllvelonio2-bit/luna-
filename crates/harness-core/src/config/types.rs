@@ -26,6 +26,56 @@ pub struct WorkerProfile {
     pub reasoning_effort: Option<ReasoningEffort>,
 }
 
+/// A provider/model/thinking entry inside an orchestrator preset.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct OrchestratorModelSpec {
+    pub provider: String,
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<ReasoningEffort>,
+}
+
+/// A user-configured orchestrator preset: one main orchestrator model plus a pool of subagent
+/// models, each with its own thinking/reasoning effort.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct OrchestratorConfig {
+    pub orchestrator: OrchestratorModelSpec,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subagents: Vec<OrchestratorModelSpec>,
+}
+
+/// Validate an orchestrator name: non-empty, <= 32 chars, starting with an ASCII letter or digit,
+/// and containing only lowercase ASCII letters, digits, `-`, or `_`.
+pub fn validate_orchestrator_name(name: &str) -> Result<(), HarnessError> {
+    if name.is_empty() {
+        return Err(HarnessError::ConfigurationError(
+            "orchestrator name must not be empty".to_string(),
+        ));
+    }
+    if name.chars().count() > WORKER_NAME_MAX_CHARS {
+        return Err(HarnessError::ConfigurationError(format!(
+            "orchestrator name '{name}' is longer than {WORKER_NAME_MAX_CHARS} characters"
+        )));
+    }
+    let mut chars = name.chars();
+    if !chars
+        .next()
+        .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+    {
+        return Err(HarnessError::ConfigurationError(format!(
+            "orchestrator name '{name}' must start with a lowercase letter or digit"
+        )));
+    }
+    if !chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_') {
+        return Err(HarnessError::ConfigurationError(format!(
+            "orchestrator name '{name}' may only contain lowercase letters, digits, '-' and '_'"
+        )));
+    }
+    Ok(())
+}
+
 /// Validate a worker name as a slash command: lowercase letters, digits, `-` and `_`, starting
 /// with a letter, and short enough to fit the slash menu.
 pub fn validate_worker_name(name: &str) -> Result<(), HarnessError> {

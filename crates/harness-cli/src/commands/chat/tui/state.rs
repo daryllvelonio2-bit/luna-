@@ -41,6 +41,10 @@ pub enum ModelTarget {
     Approval,
     /// A named worker's model (`/worker <name>`).
     Worker(String),
+    /// Main model inside the `/orchestrator` editor.
+    OrchestratorMain,
+    /// Subagent entry inside the `/orchestrator` editor (`None` = append new, `Some(i)` = replace).
+    OrchestratorSubagent(Option<usize>),
 }
 
 /// Async result returned by the approval-model assistant query for an open approval modal.
@@ -118,6 +122,12 @@ pub enum SelectAction {
     MemoryProject {
         projects: Vec<String>,
     },
+    EditOrchestrator {
+        names: Vec<String>,
+    },
+    UseOrchestrator {
+        names: Vec<String>,
+    },
 }
 
 /// Text a generic TUI input modal hands back to the action layer.
@@ -143,6 +153,7 @@ pub enum InputAction {
         provider: String,
         endpoint: String,
     },
+    CreateOrchestrator,
     AutoCompactThreshold,
     AutoCompactPercent {
         threshold: usize,
@@ -1034,6 +1045,7 @@ pub struct BackgroundSession {
     pub session_max_deleted: usize,
     pub pending_modals: VecDeque<PendingModal>,
     pub has_unread_done: bool,
+    pub active_orchestrator: Option<String>,
 }
 
 /// A transient notice in the TUI transcript (compaction reports, queue notices, goal updates).
@@ -1133,6 +1145,18 @@ pub enum PaletteAction {
     Quit,
 }
 
+/// Synthetic provider id used in `/model` when at least one orchestrator preset exists.
+pub const ORCHESTRATORS_PROVIDER_ID: &str = "__orchestrators__";
+
+/// In-progress orchestrator builder state preserved while jumping into Provider/Model pickers.
+#[derive(Debug, Clone)]
+pub struct OrchestratorDraftState {
+    pub name: String,
+    pub config: harness_core::OrchestratorConfig,
+    pub selected: usize,
+    pub return_to_list: bool,
+}
+
 /// Provider entry shown in the first step of `/models` / `/model`.
 #[derive(Debug, Clone)]
 pub struct ProviderPickerItem {
@@ -1212,6 +1236,12 @@ pub enum ActiveModal {
     ThinkingPicker {
         current: Option<ReasoningEffort>,
         selected: usize,
+    },
+    OrchestratorEditor {
+        name: String,
+        draft: harness_core::OrchestratorConfig,
+        selected: usize,
+        return_to_list: bool,
     },
     Approval {
         req: ApprovalRequest,
@@ -1567,6 +1597,10 @@ pub struct TuiState {
     pub background_sessions: HashMap<String, BackgroundSession>,
     /// Deferred approval/clarify/sudo prompts queued for the active session.
     pub pending_modals: VecDeque<PendingModal>,
+    /// In-progress orchestrator editor draft while picking a provider/model.
+    pub orchestrator_draft: Option<OrchestratorDraftState>,
+    /// Name of the active orchestrator preset in this session, if any.
+    pub active_orchestrator: Option<String>,
     /// Active project filter for memories in this session (`None` = all memories passed).
     pub memory_project_filter: Option<String>,
     /// Preserved code changes from compacted turns

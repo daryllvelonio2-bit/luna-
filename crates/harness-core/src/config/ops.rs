@@ -79,6 +79,41 @@ pub fn remove_worker_from_file(
     unset_in_file(layers, &format!("workers.{name}"))
 }
 
+/// Write or update one named orchestrator preset in the config file.
+pub fn set_orchestrator_in_file(
+    layers: &Layers,
+    name: &str,
+    orch: &OrchestratorConfig,
+) -> Result<PathBuf, HarnessError> {
+    validate_orchestrator_name(name)?;
+    let path = layers.file.clone().ok_or_else(|| {
+        HarnessError::ConfigurationError(
+            "no config file location: set LUNA_CONFIG or HOME".to_string(),
+        )
+    })?;
+
+    let mut root = read_file_value(&path)?.unwrap_or_else(|| Value::Mapping(Mapping::new()));
+    let value = to_value(orch)?;
+    set_path(&mut root, &format!("orchestrators.{name}"), value)?;
+
+    let mut check = to_value(&layers.defaults)?;
+    deep_merge(&mut check, root.clone());
+    let check_cfg: Config = from_value(&check)?;
+    check_cfg.validate()?;
+
+    write_file_value(&path, &root)?;
+    Ok(path)
+}
+
+/// Remove one named orchestrator preset from the config file.
+pub fn remove_orchestrator_from_file(
+    layers: &Layers,
+    name: &str,
+) -> Result<Option<PathBuf>, HarnessError> {
+    validate_orchestrator_name(name)?;
+    unset_in_file(layers, &format!("orchestrators.{name}"))
+}
+
 /// Remove `key` from the config file if present.
 pub fn unset_in_file(layers: &Layers, key: &str) -> Result<Option<PathBuf>, HarnessError> {
     let path = match layers.file.as_ref() {

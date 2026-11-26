@@ -163,6 +163,14 @@ pub async fn handle_modal_key(
             mut selected,
         } => {
             if key.code == KeyCode::Esc {
+                if matches!(
+                    target,
+                    ModelTarget::OrchestratorMain | ModelTarget::OrchestratorSubagent(_)
+                ) {
+                    super::super::actions::orchestrator::restore_orchestrator_editor_from_draft(
+                        st,
+                    );
+                }
                 return Ok(Flow::Continue);
             }
             let filtered_ids: Vec<String> = filtered_providers(&items, &query)
@@ -241,6 +249,14 @@ pub async fn handle_modal_key(
             mut selected,
         } => {
             if key.code == KeyCode::Esc {
+                if matches!(
+                    target,
+                    ModelTarget::OrchestratorMain | ModelTarget::OrchestratorSubagent(_)
+                ) {
+                    super::super::actions::orchestrator::restore_orchestrator_editor_from_draft(
+                        st,
+                    );
+                }
                 return Ok(Flow::Continue);
             }
             let filtered_pairs: Vec<(String, String)> = filtered_models(&items, &query)
@@ -583,6 +599,94 @@ pub async fn handle_modal_key(
                 }
                 _ => {
                     st.modal = ActiveModal::ThinkingPicker { current, selected };
+                }
+            }
+        }
+        ActiveModal::OrchestratorEditor {
+            name,
+            mut draft,
+            mut selected,
+            return_to_list,
+        } => {
+            use super::super::actions::orchestrator::{
+                open_orchestrator_edit_list, open_orchestrator_editor, save_orchestrator,
+                step_thinking_effort,
+            };
+
+            let add_row = draft.subagents.len() + 1;
+            let save_row = draft.subagents.len() + 2;
+            let total_rows = save_row + 1;
+            selected = selected.min(total_rows.saturating_sub(1));
+
+            match key.code {
+                KeyCode::Esc => {
+                    st.orchestrator_draft = None;
+                    if return_to_list {
+                        open_orchestrator_edit_list(env, st);
+                    }
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    selected = if selected == 0 {
+                        total_rows - 1
+                    } else {
+                        selected - 1
+                    };
+                    open_orchestrator_editor(st, name, draft, selected, return_to_list);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    selected = (selected + 1) % total_rows;
+                    open_orchestrator_editor(st, name, draft, selected, return_to_list);
+                }
+                KeyCode::Left | KeyCode::Right => {
+                    let delta: i8 = if key.code == KeyCode::Left { -1 } else { 1 };
+                    if selected == 0 {
+                        draft.orchestrator.thinking =
+                            step_thinking_effort(draft.orchestrator.thinking, delta);
+                    } else if selected >= 1 && selected <= draft.subagents.len() {
+                        let idx = selected - 1;
+                        draft.subagents[idx].thinking =
+                            step_thinking_effort(draft.subagents[idx].thinking, delta);
+                    }
+                    open_orchestrator_editor(st, name, draft, selected, return_to_list);
+                }
+                KeyCode::Delete | KeyCode::Backspace | KeyCode::Char('d')
+                    if selected >= 1 && selected <= draft.subagents.len() =>
+                {
+                    let idx = selected - 1;
+                    draft.subagents.remove(idx);
+                    let new_sel = selected.min(draft.subagents.len() + 2);
+                    open_orchestrator_editor(st, name, draft, new_sel, return_to_list);
+                }
+                KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    if let Err(e) = save_orchestrator(env, st, &name, draft.clone()).await {
+                        env.ui.set_transient_error(Some(e.to_string()));
+                        open_orchestrator_editor(st, name, draft, selected, return_to_list);
+                    }
+                }
+                KeyCode::Enter => {
+                    if selected == 0 {
+                        open_orchestrator_editor(st, name, draft, selected, return_to_list);
+                        open_provider_picker_for(env, st, ModelTarget::OrchestratorMain).await;
+                    } else if selected <= draft.subagents.len() {
+                        let idx = selected - 1;
+                        open_orchestrator_editor(st, name, draft, selected, return_to_list);
+                        open_provider_picker_for(
+                            env,
+                            st,
+                            ModelTarget::OrchestratorSubagent(Some(idx)),
+                        )
+                        .await;
+                    } else if selected == add_row {
+                        open_orchestrator_editor(st, name, draft, selected, return_to_list);
+                        open_provider_picker_for(env, st, ModelTarget::OrchestratorSubagent(None))
+                            .await;
+                    } else if let Err(e) = save_orchestrator(env, st, &name, draft.clone()).await {
+                        env.ui.set_transient_error(Some(e.to_string()));
+                        open_orchestrator_editor(st, name, draft, selected, return_to_list);
+                    }
+                }
+                _ => {
+                    open_orchestrator_editor(st, name, draft, selected, return_to_list);
                 }
             }
         }

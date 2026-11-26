@@ -684,6 +684,20 @@ pub async fn run_select_action(
                 };
             }
         }
+        SelectAction::EditOrchestrator { names } => {
+            if let Some(name) = names.get(choice).cloned() {
+                if let Some(orch) = env.config.orchestrators.get(&name).cloned() {
+                    super::orchestrator::open_orchestrator_editor(st, name, orch, 0, true);
+                }
+            }
+        }
+        SelectAction::UseOrchestrator { names } => {
+            if let Some(name) = names.get(choice).cloned() {
+                if let Err(e) = super::orchestrator::apply_orchestrator(env, st, &name).await {
+                    env.ui.set_transient_error(Some(e.to_string()));
+                }
+            }
+        }
     }
 }
 
@@ -922,6 +936,13 @@ pub async fn run_input_action(
             .await;
 
             open_connect_menu(st);
+        }
+        InputAction::CreateOrchestrator => {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                super::orchestrator::open_orchestrator_create(env, st, Some(trimmed.to_string()))
+                    .await;
+            }
         }
         InputAction::AutoCompactThreshold => {
             match harness_onboarding::compact_step::parse_threshold(&value) {

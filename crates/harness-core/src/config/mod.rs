@@ -37,15 +37,16 @@ pub use layers::{
     CONFIG_FILE_RELATIVE, CONFIG_PATH_ENV, ENV_PREFIX,
 };
 pub use ops::{
-    coerce, remove_worker_from_file, set_in_file, set_worker_in_file, unset_in_file,
-    DISTANCE_BUCKET, PROVIDER_FIELDS,
+    coerce, remove_orchestrator_from_file, remove_worker_from_file, set_in_file,
+    set_orchestrator_in_file, set_worker_in_file, unset_in_file, DISTANCE_BUCKET, PROVIDER_FIELDS,
 };
 pub use types::{
-    expand_tilde, home_dir, validate_worker_name, CheckpointSettings, DisplaySettings,
-    FeatureSettings, GatewaySettings, GoalSettings, HooksSettings, McpServerConfig, McpSettings,
-    MemoryMode, MemorySettings, MemoryStoreSettings, ModelSettings, PathsSettings,
-    ProviderOverride, SessionSettings, Source, TelemetrySettings, ThemeMode, ToolsSettings,
-    UpdateSettings, UsageSettings, VoiceSettings, WorkerProfile, WORKER_NAME_MAX_CHARS,
+    expand_tilde, home_dir, validate_orchestrator_name, validate_worker_name, CheckpointSettings,
+    DisplaySettings, FeatureSettings, GatewaySettings, GoalSettings, HooksSettings,
+    McpServerConfig, McpSettings, MemoryMode, MemorySettings, MemoryStoreSettings, ModelSettings,
+    OrchestratorConfig, OrchestratorModelSpec, PathsSettings, ProviderOverride, SessionSettings,
+    Source, TelemetrySettings, ThemeMode, ToolsSettings, UpdateSettings, UsageSettings,
+    VoiceSettings, WorkerProfile, WORKER_NAME_MAX_CHARS,
 };
 pub use web::{
     web_tools_blocked_reason, SearchBackend, WebSettings, DEFAULT_WEB_USER_AGENT, SEARCH_BACKENDS,
@@ -99,6 +100,9 @@ pub struct Config {
     /// Named background workers, invoked in chat as `/<name> <task>`.
     #[serde(default)]
     pub workers: BTreeMap<String, WorkerProfile>,
+    /// Named orchestrator presets (main orchestrator model + subagent pool).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub orchestrators: BTreeMap<String, OrchestratorConfig>,
     /// CLI display preferences (live block limit, turn completion collapse).
     #[serde(default)]
     pub display: DisplaySettings,
@@ -161,6 +165,7 @@ impl Default for Config {
             gateway: GatewaySettings::default(),
             mcp: McpSettings::default(),
             workers: BTreeMap::new(),
+            orchestrators: BTreeMap::new(),
             display: DisplaySettings::default(),
             goal: GoalSettings::default(),
             features: FeatureSettings::default(),

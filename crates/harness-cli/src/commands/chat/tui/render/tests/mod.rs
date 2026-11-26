@@ -124,6 +124,8 @@ pub(crate) fn test_dummy_tui_state() -> TuiState {
         template_agent: agent,
         background_sessions: std::collections::HashMap::new(),
         pending_modals: std::collections::VecDeque::new(),
+        orchestrator_draft: None,
+        active_orchestrator: None,
         memory_project_filter: None,
         compacted_added: 0,
         compacted_deleted: 0,

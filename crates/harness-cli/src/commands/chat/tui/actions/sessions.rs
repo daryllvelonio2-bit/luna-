@@ -190,6 +190,7 @@ pub(crate) fn park_current_session(env: &Env<'_>, st: &mut TuiState) {
         session_max_deleted: st.session_max_deleted,
         pending_modals,
         has_unread_done: false,
+        active_orchestrator: st.active_orchestrator.take(),
     };
     st.background_sessions.insert(old_id, slot);
 }
@@ -270,6 +271,7 @@ pub(crate) fn restore_background_session(
     st.diff_anim_target_added = slot.session_max_added;
     st.diff_anim_target_deleted = slot.session_max_deleted;
     st.pending_modals = slot.pending_modals;
+    st.active_orchestrator = slot.active_orchestrator;
     st.promote_pending_modal();
     st.diff_anim_from_added = slot.session_max_added;
     st.diff_anim_from_deleted = slot.session_max_deleted;
