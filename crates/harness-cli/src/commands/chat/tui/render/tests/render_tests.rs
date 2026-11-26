@@ -2087,3 +2087,63 @@ async fn build_provider_items_filters_unconfigured_catalog_overrides_and_sorts_b
         "most-used provider (anthropic=3) must sort above openai=1: {ids:?}"
     );
 }
+
+#[test]
+fn slash_popup_follows_composer_width_and_aligns_descriptions() {
+    use crate::commands::chat::commands::CommandEntry;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    let mut st = test_dummy_tui_state();
+    st.slash_popup.matches = vec![
+        CommandEntry {
+            name: "/model".into(),
+            details: "Switch provider and model".into(),
+        },
+        CommandEntry {
+            name: "/default_model".into(),
+            details: "Choose the default provider".into(),
+        },
+    ];
+    let mut terminal = Terminal::new(TestBackend::new(120, 20)).unwrap();
+    let screen = Rect {
+        x: 0,
+        y: 0,
+        width: 120,
+        height: 20,
+    };
+    let composer_rect = Rect {
+        x: 0,
+        y: 17,
+        width: 120,
+        height: 3,
+    };
+
+    terminal
+        .draw(|frame| render_slash_popup(frame, screen, composer_rect, &st))
+        .unwrap();
+
+    let buffer = terminal.backend().buffer();
+    let row = |y: u16| -> String {
+        (0..buffer.area.width)
+            .map(|x| buffer[(x, y)].symbol())
+            .collect()
+    };
+
+    // Two entries plus borders, drawn directly above the composer.
+    let top = 13;
+    assert_eq!(row(top).chars().next(), Some('┌'));
+    assert_eq!(row(top).chars().last(), Some('┐'));
+
+    // The description column is shared, so both lines start at the same cell.
+    let first = row(top + 1);
+    let second = row(top + 2);
+    let first_desc = first.find("Switch provider").expect("first description");
+    let second_desc = second
+        .find("Choose the default")
+        .expect("second description");
+    assert_eq!(
+        first_desc, second_desc,
+        "descriptions must align:\n{first}\n{second}"
+    );
+}
