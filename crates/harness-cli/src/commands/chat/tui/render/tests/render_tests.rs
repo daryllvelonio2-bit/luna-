@@ -1901,7 +1901,10 @@ fn tab_bar_colors_background_pending_popup_yellow_done_green_and_inactive_plain(
     assert!(row_str.contains("finished"), "tab bar: {row_str}");
     assert!(row_str.contains("idle"), "tab bar: {row_str}");
 
-    let find_col = |needle: &str| row_str.find(needle).expect("tab present") as u16;
+    let find_col = |needle: &str| -> u16 {
+        let byte_idx = row_str.find(needle).expect("tab present");
+        row_str[..byte_idx].chars().count() as u16
+    };
     let ask_x = find_col("needs-ok");
     let done_x = find_col("finished");
     let idle_x = find_col("idle");
