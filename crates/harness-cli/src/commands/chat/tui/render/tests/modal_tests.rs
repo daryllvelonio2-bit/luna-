@@ -54,6 +54,24 @@ fn approval_modal_renders_four_choices_input_and_reply() {
     assert!(text.contains("Ask a question / add a suggestion"), "{text}");
     assert!(text.contains("Because b fixes the off-by-one."), "{text}");
     assert!(text.contains("Why replace a with b?"), "{text}");
+
+    // Deletions must read red and additions green: an all-green diff hides what was removed.
+    let (mut del_red, mut add_green) = (0, 0);
+    for y in 0..32 {
+        let row: String = (0..100).map(|x| buf[(x, y)].symbol()).collect();
+        if row.contains("-a") {
+            if let Some(x) = (0..100).find(|&x| buf[(x, y)].symbol() == "-") {
+                del_red += usize::from(buf[(x, y)].fg == red_err());
+            }
+        }
+        if row.contains("+b") {
+            if let Some(x) = (0..100).find(|&x| buf[(x, y)].symbol() == "+") {
+                add_green += usize::from(buf[(x, y)].fg == green_ok());
+            }
+        }
+    }
+    assert!(del_red > 0, "the removed line must be red: {text}");
+    assert!(add_green > 0, "the added line must be green: {text}");
 }
 
 #[test]

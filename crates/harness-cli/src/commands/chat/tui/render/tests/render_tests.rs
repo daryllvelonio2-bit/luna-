@@ -2151,10 +2151,13 @@ fn slash_popup_follows_composer_width_and_aligns_descriptions() {
 
 #[test]
 fn composer_card_footer_renders_orchestrator_badge_when_active() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
     let mut st = test_dummy_tui_state();
     st.active_orchestrator = Some("try".to_string());
 
-    let backend = CrosstermBackend::new(Vec::new());
+    let backend = TestBackend::new(100, 6);
     let mut terminal = Terminal::new(backend).unwrap();
     let area = Rect {
         x: 0,
@@ -2163,19 +2166,22 @@ fn composer_card_footer_renders_orchestrator_badge_when_active() {
         height: 6,
     };
 
-    let info = RenderInfo {
+    let in_flight = Vec::new();
+    let info = FooterInfo {
         session_id: "s123",
         provider: "nvidia",
         model: "nemotron-3-ultra-550b-a55b",
-        reasoning_effort: Some(harness_core::ReasoningEffort::XHigh),
+        reasoning_effort: Some(harness_core::ReasoningEffort::Xhigh),
+        in_flight_tools: &in_flight,
+        features: Default::default(),
     };
-    let snap = harness_core::usage::SessionSnapshot::default();
-    let input = crate::commands::chat::tui::render::composer::wrap_composer_text("", 90);
+    let snap = TuiLiveSnapshot::default();
+    let input = crate::commands::chat::tui::render::composer::wrap_composer_lines("", 0, 90);
 
     terminal
         .draw(|frame| {
             crate::commands::chat::tui::render::composer::render_composer_card(
-                frame, area, &st, info, snap, &input, false,
+                frame, area, &mut st, &info, &snap, &input, false,
             );
         })
         .unwrap();
