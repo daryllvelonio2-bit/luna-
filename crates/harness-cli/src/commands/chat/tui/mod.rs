@@ -569,6 +569,17 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
                         } else if let Some(slot) = st.background_sessions.get_mut(origin) {
                             slot.pending_modals.push_back(modal);
                             needs_redraw = true;
+                        } else {
+                            // A delegated child runs in its own session, which is not an open tab.
+                            // Queue its request here: dropping the modal would drop the oneshot
+                            // and silently deny the child instead of asking the human. The notice
+                            // makes it clear who is asking when the prompt appears.
+                            st.system_notices.push(state::SystemNotice::new(format!(
+                                "Subagent {origin} is requesting approval"
+                            )));
+                            st.pending_modals.push_back(modal);
+                            st.promote_pending_modal();
+                            needs_redraw = true;
                         }
                     }
                 }

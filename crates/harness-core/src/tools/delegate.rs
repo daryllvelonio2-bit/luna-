@@ -643,9 +643,11 @@ pub struct DelegateTaskTool {
     event_notifier: Arc<RwLock<Option<SubagentTaskEventNotifier>>>,
     steer_handle: SteerQueueHandle,
     cancels: Arc<RwLock<HashMap<String, CancellationToken>>>,
-    /// The interactive chat's approval gate, used by workers so their writes ask the same human
-    /// as the main turn. Regular delegated children keep the fail-closed `NonInteractive` gate.
-    worker_approver: Arc<RwLock<Option<Arc<dyn Approver>>>>,
+    /// The interactive chat's approval gate, shared by workers and regular delegated children.
+    /// A child now asks the same human as the main turn and inherits live auto/plan-mode state,
+    /// so it cannot be used to bypass the gate. Only when no gate is attached (headless, `-p`,
+    /// eval) does [`subagent_approver`] fall back to the fail-closed `NonInteractive` gate.
+    session_approver: Arc<RwLock<Option<Arc<dyn Approver>>>>,
     /// Optional pool of subagent `(provider, reasoning_effort)` pairs configured by an active
     /// orchestrator preset. When non-empty, delegated children draw from this pool.
     subagent_pool: std::sync::RwLock<Vec<SubagentPoolEntry>>,
@@ -672,7 +674,7 @@ impl DelegateTaskTool {
             event_notifier: Arc::new(RwLock::new(None)),
             steer_handle: Arc::new(RwLock::new(None)),
             cancels: Arc::new(RwLock::new(HashMap::new())),
-            worker_approver: Arc::new(RwLock::new(None)),
+            session_approver: Arc::new(RwLock::new(None)),
             subagent_pool: std::sync::RwLock::new(Vec::new()),
             subagent_cursor: std::sync::atomic::AtomicUsize::new(0),
         }
@@ -744,12 +746,24 @@ impl DelegateTaskTool {
         }
     }
 
-    /// Give workers the chat's approval gate. Without this a worker falls back to the same
-    /// fail-closed gate as a delegated child and cannot mutate anything under `approval = ask`.
+    /// Give this session's children (workers and regular delegated subagents) the chat's approval
+    /// gate. Without one, both fall back to fail-closed under `approval = ask`.
+    ///
+    /// The name is kept for API compatibility; the approver is no longer worker-only.
     pub fn set_worker_approver(&self, approver: Arc<dyn Approver>) {
-        if let Ok(mut lock) = self.worker_approver.try_write() {
+        if let Ok(mut lock) = self.session_approver.try_write() {
             *lock = Some(approver);
         }
+    }
+
+    /// The session gate attached by an interactive host, if any. Workers and regular children
+    /// read it through the same helper so the two paths cannot drift apart; `None` still means
+    /// no human is reachable and the child must fail closed.
+    fn attached_approver(&self) -> Option<Arc<dyn Approver>> {
+        self.session_approver
+            .try_read()
+            .ok()
+            .and_then(|lock| lock.clone())
     }
 
     /// Run a saved worker profile against a fork of `source_session_id`.
@@ -828,11 +842,7 @@ impl DelegateTaskTool {
         let cancels = self.cancels.clone();
         let notifier = self.notifier.clone();
         let steer_handle = session_steer_handle(&self.steer_handle);
-        let approver = self
-            .worker_approver
-            .try_read()
-            .ok()
-            .and_then(|lock| lock.clone());
+        let approver = self.attached_approver();
         let effort = profile.reasoning_effort;
         let cid = child_id.clone();
         let goal = task.to_string();
@@ -941,10 +951,11 @@ fn clip_subagent_reply(reply: &str, log_path: &std::path::Path) -> String {
 
 /// The approver a delegated child runs under when its caller supplied none.
 ///
-/// A background child has no stdin to prompt on, but the *session's* approval mode still applies.
-/// `tools.approval = allow` (or `--yes`) is the user's standing "yes" to mutations, so the child
-/// must honour it instead of denying every write. `deny` refuses as it says. Only `ask` fails
-/// closed, because there is nobody to ask.
+/// An interactive host supplies the session's gate for both workers and regular children, so an
+/// `ask` child puts its request to the same human (and shares live auto/plan-mode state) instead
+/// of being denied outright. Without a supplied gate — headless, `-p`, eval — the *session's*
+/// approval mode still applies: `tools.approval = allow` (or `--yes`) is the user's standing
+/// "yes", `deny` refuses as it says, and only `ask` fails closed because there is nobody to ask.
 fn subagent_approver(mode: ApprovalMode, provided: Option<Arc<dyn Approver>>) -> Arc<dyn Approver> {
     if let Some(approver) = provided {
         return approver;
@@ -1461,6 +1472,9 @@ impl DelegateTaskTool {
     ) -> Result<ToolResult, HarnessError> {
         let mut join_set = JoinSet::new();
         let current_cfg = self.config.read().await.clone();
+        // A blocking child runs while its parent turn is live: hand it the same approver as the
+        // parent so an `ask` prompt goes to the human, not to a fail-closed background gate.
+        let approver = self.attached_approver();
         for (idx, task) in tasks_to_run.into_iter().enumerate() {
             let (provider, sub_effort) = self.subagent_provider_for(Some(idx));
             let memory = self.memory.clone();
@@ -1475,6 +1489,7 @@ impl DelegateTaskTool {
             let context = task.context.clone();
             let child_event_notifier = event_notifier.clone();
             let parent_session = crate::session_context::current();
+            let child_approver = approver.clone();
 
             notify_subagent_event(
                 child_event_notifier.as_ref(),
@@ -1496,7 +1511,7 @@ impl DelegateTaskTool {
                     task,
                     sub_cancel,
                     child_event_notifier,
-                    None,
+                    child_approver,
                     sub_effort,
                     parent_session.clone(),
                 )
@@ -1662,6 +1677,9 @@ impl DelegateTaskTool {
         let notes = self.notes.clone();
         let store = self.store.clone();
         let config = current_cfg.clone();
+        // Same gate as the blocking path: background children must be able to ask the human
+        // rather than inherit the fail-closed background approver.
+        let approver = self.attached_approver();
         let sub_cancel = CancellationToken::new();
         self.cancels
             .write()
@@ -1693,7 +1711,7 @@ impl DelegateTaskTool {
                 },
                 sub_cancel,
                 child_event_notifier,
-                None,
+                approver,
                 sub_effort,
                 parent_session.clone(),
             )

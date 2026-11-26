@@ -536,6 +536,61 @@ async fn a_delegated_child_honours_the_session_approval_mode() {
     );
 }
 
+/// A caller-supplied gate always wins over the mode fallback: the interactive host's approver is
+/// the same object the main turn holds, with its live allow-all/plan-mode state.
+#[tokio::test]
+async fn a_provided_approver_takes_precedence_over_the_mode() {
+    use crate::approval::{AllowAll, ApprovalDecision, ApprovalRequest, Approver};
+
+    let req = ApprovalRequest::default();
+    let provided: Arc<dyn Approver> = Arc::new(AllowAll);
+    let resolved = super::subagent_approver(ApprovalMode::Deny, Some(provided.clone()));
+
+    assert_eq!(
+        resolved.approve(&req).await.unwrap(),
+        ApprovalDecision::Run,
+        "a supplied gate must not be replaced by the mode fallback"
+    );
+    assert!(
+        Arc::ptr_eq(&resolved, &provided),
+        "the exact supplied gate is handed to the child"
+    );
+}
+
+/// Both regular spawn paths read the same field as the worker path through `attached_approver`.
+/// Driving a full spawn here would need a model that emits a mutating tool call; the shared seam
+/// pins the wiring instead: with a gate attached, an `ask` child no longer gets `NonInteractive`.
+#[tokio::test]
+async fn a_regular_child_sees_the_attached_session_approver() {
+    use crate::approval::{AllowAll, ApprovalDecision, ApprovalRequest, Approver};
+
+    let delegate = DelegateTaskTool::new(
+        Arc::new(EchoProvider),
+        Arc::new(EmptyMemory),
+        Arc::new(EmptyNotes),
+        None,
+        Config::default(),
+    );
+    assert!(
+        delegate.attached_approver().is_none(),
+        "headless has no gate attached and must stay fail closed"
+    );
+
+    let provided: Arc<dyn Approver> = Arc::new(AllowAll);
+    delegate.set_worker_approver(provided.clone());
+    let attached = delegate
+        .attached_approver()
+        .expect("interactive host attached its gate");
+    assert!(Arc::ptr_eq(&attached, &provided));
+
+    let resolved = super::subagent_approver(ApprovalMode::Ask, Some(attached));
+    assert_eq!(
+        resolved.approve(&ApprovalRequest::default()).await.unwrap(),
+        ApprovalDecision::Run,
+        "an ask child with a reachable human must not fall back to NonInteractive"
+    );
+}
+
 #[tokio::test]
 async fn test_watchdog_does_not_timeout_while_tool_is_running() {
     let tracker =

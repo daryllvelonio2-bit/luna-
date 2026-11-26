@@ -390,6 +390,82 @@ mod tests {
         assert!(matches!(err, HarnessError::ApprovalRejected(_)));
     }
 
+    /// A child runs in its own session scope but shares this exact approver with the main turn.
+    #[tokio::test]
+    async fn chat_approver_allow_all_answers_a_child_without_touching_the_channel() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let allow_all = Arc::new(AtomicBool::new(true));
+        let plan_mode = Arc::new(AtomicBool::new(false));
+        let approver = ChatApprover::new(tx, allow_all, plan_mode);
+
+        let req = ApprovalRequest::default();
+        let decision =
+            harness_core::session_context::scope("sub_child_allow", None, approver.approve(&req))
+                .await
+                .unwrap();
+        assert_eq!(decision, ApprovalDecision::Run);
+        assert!(
+            rx.try_recv().is_err(),
+            "auto mode must answer in-process, with no modal queued for the child"
+        );
+    }
+
+    /// The session tag is what lets the UI tell a child's request from the main model's.
+    #[tokio::test]
+    async fn chat_approver_tags_child_requests_with_the_child_session() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let approver = ChatApprover::new(
+            tx,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let req = ApprovalRequest::default();
+        let decision = tokio::spawn(async move {
+            harness_core::session_context::scope("sub_child_ask", None, approver.approve(&req))
+                .await
+        });
+
+        let (sid, _, resp_tx) = rx.recv().await.expect("child request must reach the UI");
+        assert_eq!(sid.as_deref(), Some("sub_child_ask"));
+        let _ = resp_tx.send(ApprovalDecision::Run);
+        assert_eq!(decision.await.unwrap().unwrap(), ApprovalDecision::Run);
+    }
+
+    #[tokio::test]
+    async fn chat_approver_plan_mode_rejects_a_child_even_with_allow_all() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let approver = ChatApprover::new(
+            tx,
+            Arc::new(AtomicBool::new(true)),
+            Arc::new(AtomicBool::new(true)),
+        );
+
+        let req = ApprovalRequest::default();
+        let err =
+            harness_core::session_context::scope("sub_child_plan", None, approver.approve(&req))
+                .await
+                .expect_err("plan mode must reject a child even in auto mode");
+        assert!(matches!(err, HarnessError::ApprovalRejected(_)));
+    }
+
+    #[tokio::test]
+    async fn chat_approver_denies_a_child_when_the_receiver_is_dropped() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let approver = ChatApprover::new(
+            tx,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        drop(rx);
+
+        let req = ApprovalRequest::default();
+        let decision =
+            harness_core::session_context::scope("sub_child_closed", None, approver.approve(&req))
+                .await
+                .unwrap();
+        assert_eq!(decision, ApprovalDecision::Deny);
+    }
+
     #[test]
     fn settings_come_from_the_config_keys() {
         let mut config = Config::default();
