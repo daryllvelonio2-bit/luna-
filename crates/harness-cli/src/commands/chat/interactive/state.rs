@@ -61,11 +61,8 @@ pub(in crate::commands::chat) struct Env<'a> {
         oneshot::Sender<harness_core::ApprovalDecision>,
     )>,
     pub(in crate::commands::chat) approval_activity: Arc<tokio::sync::Notify>,
-    pub(in crate::commands::chat) sudo_rx: &'a mut mpsc::UnboundedReceiver<(
-        Option<String>,
-        String,
-        oneshot::Sender<Option<String>>,
-    )>,
+    pub(in crate::commands::chat) sudo_rx:
+        &'a mut mpsc::UnboundedReceiver<(Option<String>, String, oneshot::Sender<Option<String>>)>,
     pub(in crate::commands::chat) clarify_rx: &'a mut mpsc::UnboundedReceiver<(
         Option<String>,
         crate::commands::clarify::ClarifyRequest,

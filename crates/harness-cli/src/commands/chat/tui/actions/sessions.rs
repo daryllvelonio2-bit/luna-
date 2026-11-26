@@ -125,16 +125,14 @@ pub(crate) fn park_current_session(env: &Env<'_>, st: &mut TuiState) {
         let modal = std::mem::replace(&mut st.modal, ActiveModal::None);
         match modal {
             ActiveModal::Approval { req, resp_tx, .. } => {
-                pending_modals.push_front(crate::commands::chat::tui::state::PendingModal::Approval {
-                    req,
-                    resp_tx,
-                });
+                pending_modals.push_front(
+                    crate::commands::chat::tui::state::PendingModal::Approval { req, resp_tx },
+                );
             }
             ActiveModal::Clarify { req, resp_tx, .. } => {
-                pending_modals.push_front(crate::commands::chat::tui::state::PendingModal::Clarify {
-                    req,
-                    resp_tx,
-                });
+                pending_modals.push_front(
+                    crate::commands::chat::tui::state::PendingModal::Clarify { req, resp_tx },
+                );
             }
             ActiveModal::Sudo {
                 prompt, resp_tx, ..

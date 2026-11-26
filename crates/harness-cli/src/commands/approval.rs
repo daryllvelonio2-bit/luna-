@@ -178,8 +178,11 @@ pub fn render_approval_box(
 
 /// Approver for interactive Chat mode: routes approval requests through a channel to the UI loop.
 pub struct ChatApprover {
-    request_tx:
-        mpsc::UnboundedSender<(Option<String>, ApprovalRequest, oneshot::Sender<ApprovalDecision>)>,
+    request_tx: mpsc::UnboundedSender<(
+        Option<String>,
+        ApprovalRequest,
+        oneshot::Sender<ApprovalDecision>,
+    )>,
     allow_all: Arc<AtomicBool>,
     plan_mode: Arc<AtomicBool>,
     activity: Arc<Notify>,

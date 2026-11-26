@@ -14,7 +14,11 @@ pub use harness_core::{ClarifyAnswer, ClarifyItem, ClarifyRequest, ClarifyRespon
 /// ClarifyTool enables the assistant to ask interactive multiple-choice
 /// and free-text questions to the user during conversation turns.
 pub struct ClarifyTool {
-    tx: mpsc::UnboundedSender<(Option<String>, ClarifyRequest, oneshot::Sender<ClarifyResponse>)>,
+    tx: mpsc::UnboundedSender<(
+        Option<String>,
+        ClarifyRequest,
+        oneshot::Sender<ClarifyResponse>,
+    )>,
 }
 
 impl ClarifyTool {

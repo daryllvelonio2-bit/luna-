@@ -1843,8 +1843,10 @@ fn tab_bar_colors_background_pending_popup_yellow_done_green_and_inactive_plain(
         req: harness_core::ApprovalRequest::default(),
         resp_tx: tx,
     });
-    st.background_sessions
-        .insert("s_ask".to_string(), make_bg_slot(&st, "s_ask", ask_queue, false));
+    st.background_sessions.insert(
+        "s_ask".to_string(),
+        make_bg_slot(&st, "s_ask", ask_queue, false),
+    );
     st.background_sessions.insert(
         "s_done".to_string(),
         make_bg_slot(&st, "s_done", VecDeque::new(), true),
