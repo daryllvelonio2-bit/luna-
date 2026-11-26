@@ -1636,15 +1636,20 @@ pub(crate) fn render_slash_popup(
     composer_rect: Rect,
     st: &TuiState,
 ) {
-    let max_items = st.slash_popup.matches.len().min(8);
+    // Grow with the space above the composer instead of a fixed eight rows.
+    let space_above = composer_rect.y.saturating_sub(screen.y + 1) as usize;
+    let max_items = st
+        .slash_popup
+        .matches
+        .len()
+        .min(space_above.saturating_sub(2))
+        .min(16);
     if max_items == 0 {
         return;
     }
     let popup_h = (max_items + 2) as u16;
-    if composer_rect.y < screen.y + popup_h + 1 {
-        return;
-    }
-    let popup_w = composer_rect.width.clamp(36, 72);
+    // Follow the composer width so a wider terminal shows the descriptions in full.
+    let popup_w = composer_rect.width.min(screen.width);
     let popup_rect = Rect {
         x: composer_rect.x,
         y: composer_rect.y - popup_h,
@@ -1668,6 +1673,15 @@ pub(crate) fn render_slash_popup(
         .slash_popup
         .selected
         .saturating_sub(max_items.saturating_sub(1));
+    // One shared column for the descriptions, so they line up instead of trailing each name.
+    let name_col = st
+        .slash_popup
+        .matches
+        .iter()
+        .map(|entry| entry.name.width())
+        .max()
+        .unwrap_or(0)
+        + 1;
     let rows: Vec<Line<'static>> = st
         .slash_popup
         .matches
@@ -1679,18 +1693,18 @@ pub(crate) fn render_slash_popup(
             let sel = idx == st.slash_popup.selected;
             let bg = if sel { bg_selected() } else { bg_elevated() };
             let name_fg = if sel { accent_coral() } else { text_primary() };
-            let desc_w = (inner.width as usize).saturating_sub(entry.name.width() + 4);
+            let desc_w = (inner.width as usize).saturating_sub(name_col + 2);
             let desc = truncate_str(&entry.details, desc_w);
-            let pad = (inner.width as usize).saturating_sub(entry.name.width() + desc.width() + 3);
+            let pad = (inner.width as usize).saturating_sub(name_col + 2 + desc.width());
+            let name_pad = name_col.saturating_sub(entry.name.width());
             Line::from(vec![
                 Span::styled(
-                    format!(" {} ", entry.name),
+                    format!(" {}{} ", entry.name, " ".repeat(name_pad)),
                     Style::default()
                         .fg(name_fg)
                         .bg(bg)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(" ", Style::default().bg(bg)),
                 Span::styled(desc, Style::default().fg(text_muted()).bg(bg)),
                 Span::styled(" ".repeat(pad), Style::default().bg(bg)),
             ])

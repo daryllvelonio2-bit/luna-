@@ -117,6 +117,9 @@ pub struct AgentConfig {
     /// Runtime-only: voice mode is active, requiring conversational, voice-compatible output summaries suitable for text-to-speech.
     #[serde(skip)]
     pub voice_mode: bool,
+    /// Runtime-only orchestrator role & subagent-pool instructions; `None` for non-orchestrators.
+    #[serde(skip)]
+    pub orchestrator_prompt: Option<String>,
     /// Estimated transcript size at which the oldest turns are summarised.
     pub compact_at_tokens: usize,
     /// Trailing user turns kept verbatim when compacting.
@@ -256,6 +259,7 @@ impl Default for AgentConfig {
             profile_behavior: None,
             tui_output: false,
             voice_mode: false,
+            orchestrator_prompt: None,
             compact_at_tokens: 500_000,
             keep_recent_turns: 8,
             compaction_model: None,
@@ -755,6 +759,11 @@ where
     /// Update the reasoning effort setting dynamically during a session.
     pub fn set_reasoning_effort(&mut self, effort: Option<ReasoningEffort>) {
         self.reasoning_effort = effort;
+    }
+
+    /// Set or clear the runtime-only orchestrator prompt block for this session.
+    pub fn set_orchestrator_prompt(&mut self, prompt: Option<String>) {
+        self.config.orchestrator_prompt = prompt;
     }
 
     /// Tell the system prompt that this session is rendered by the full-screen TUI.

@@ -479,6 +479,7 @@ pub async fn apply_model_selection(
     };
     ag.set_provider(client.clone());
     ag.set_context_window(Some(ctx_max as usize));
+    ag.set_orchestrator_prompt(None);
     if env.compact_model.is_none() {
         if let Ok(comp_client) = GenericProviderClient::new(
             provider.to_string(),
