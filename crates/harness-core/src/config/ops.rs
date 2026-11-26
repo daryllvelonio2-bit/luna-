@@ -8,7 +8,10 @@ use serde::Serialize;
 use serde_yaml::{Mapping, Value};
 
 use super::layers::Layers;
-use super::types::{expand_tilde, validate_worker_name, WorkerProfile};
+use super::types::{
+    expand_tilde, validate_orchestrator_name, validate_worker_name, OrchestratorConfig,
+    WorkerProfile,
+};
 use super::Config;
 use crate::error::HarnessError;
 
