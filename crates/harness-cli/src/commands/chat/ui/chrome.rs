@@ -3,9 +3,13 @@ use std::sync::atomic::Ordering;
 use harness_core::tools::todo::TodoSnapshot;
 
 use super::format::{format_delegate_task_row, format_save_notice};
-use super::panels::{DelegateTaskView, MemoryNotice, MAX_MEMORY_NOTICES};
+use super::panels::{
+    DelegateBlockView, DelegateTaskView, MemoryNotice, MAX_DELEGATE_BLOCK_OUTPUT_CHARS,
+    MAX_MEMORY_NOTICES,
+};
 use super::terminal::get_terminal_width;
 use super::view::ChatUi;
+use super::view::MAX_DELEGATE_BLOCKS;
 
 impl ChatUi {
     /// The rows the todo panel is drawn from, empty when the list is.
@@ -81,15 +85,18 @@ impl ChatUi {
         let changed = {
             let mut tasks = self.delegate_tasks.lock().unwrap();
             if let Some(task) = tasks.iter_mut().find(|task| task.id == id) {
-                let changed = task.goal != goal || task.activity != "starting";
+                let changed =
+                    task.goal != goal || task.activity != "starting" || !task.blocks.is_empty();
                 task.goal = goal.to_string();
                 task.activity = "starting".to_string();
+                task.blocks.clear();
                 changed
             } else {
                 tasks.push(DelegateTaskView {
                     id: id.to_string(),
                     goal: goal.to_string(),
                     activity: "starting".to_string(),
+                    blocks: Vec::new(),
                 });
                 true
             }
@@ -114,6 +121,85 @@ impl ChatUi {
             self.notify_tui();
         }
     }
+    /// Open a live block for the child's newest tool call.
+    pub fn start_delegate_block(&self, id: &str, command: &str) {
+        let changed = {
+            let mut tasks = self
+                .delegate_tasks
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            match tasks.iter_mut().find(|task| task.id == id) {
+                Some(task) => {
+                    task.blocks.push(DelegateBlockView {
+                        command: command.to_string(),
+                        ..DelegateBlockView::default()
+                    });
+                    if task.blocks.len() > MAX_DELEGATE_BLOCKS {
+                        task.blocks.remove(0);
+                    }
+                    true
+                }
+                None => false,
+            }
+        };
+        if changed {
+            self.notify_tui();
+        }
+    }
+
+    /// Replace a running block's output with the newest non-empty line of the chunk.
+    pub fn push_delegate_block_output(&self, id: &str, chunk: &str) {
+        let change = delegate_output_tail(chunk);
+        if change.is_empty() {
+            return;
+        }
+        let changed = {
+            let mut tasks = self
+                .delegate_tasks
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            match tasks.iter_mut().find(|task| task.id == id) {
+                Some(task) => match task.blocks.last_mut() {
+                    Some(block) if block.output != change => {
+                        block.output = change;
+                        true
+                    }
+                    _ => false,
+                },
+                None => false,
+            }
+        };
+        if changed {
+            self.notify_tui();
+        }
+    }
+
+    /// Close a running block with the tool's complete output.
+    pub fn finish_delegate_block(&self, id: &str, output: &str, is_error: bool) {
+        let tail = delegate_output_tail(output);
+        let changed = {
+            let mut tasks = self
+                .delegate_tasks
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            match tasks.iter_mut().find(|task| task.id == id) {
+                Some(task) => match task.blocks.last_mut() {
+                    Some(block) => {
+                        let changed = block.output != tail || block.is_error != is_error;
+                        block.output = tail;
+                        block.is_error = is_error;
+                        changed
+                    }
+                    None => false,
+                },
+                None => false,
+            }
+        };
+        if changed {
+            self.notify_tui();
+        }
+    }
+
     /// Remove a delegated child after it finishes.
     pub fn finish_delegate_task(&self, id: &str) {
         let changed = {
@@ -260,4 +346,18 @@ impl ChatUi {
     pub fn queue_depth(&self) -> usize {
         self.queue_depth.load(Ordering::SeqCst)
     }
+}
+
+/// The newest useful line of a tool's output, in one bounded string for the live block.
+fn delegate_output_tail(text: &str) -> String {
+    let newest = text
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or_default()
+        .trim();
+    newest
+        .chars()
+        .take(MAX_DELEGATE_BLOCK_OUTPUT_CHARS)
+        .collect()
 }

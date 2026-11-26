@@ -336,6 +336,37 @@ fn delegated_children_stay_visible_and_report_progress() {
     assert!(multi_plain.contains("sub_2"), "{multi_plain}");
 }
 
+/// Tool blocks live under the delegate row, keep only the newest ten calls, and follow the
+/// newest line of a streaming tool's output.
+#[test]
+fn delegate_tool_blocks_are_live_and_bounded() {
+    let ui = ChatUi::new(true);
+    ui.start_delegate_task("sub_blocks", "Audit the build");
+
+    for i in 0..12 {
+        ui.start_delegate_block("sub_blocks", &format!("terminal · cmd {i}"));
+        ui.push_delegate_block_output("sub_blocks", &format!("line {i}\noutput {i}"));
+    }
+    ui.finish_delegate_block("sub_blocks", "build failed", true);
+
+    let snap = ui.tui_snapshot(80);
+    assert_eq!(snap.delegate_blocks.len(), 10, "at most ten blocks survive");
+    assert!(
+        snap.delegate_blocks[0].0.contains("cmd 2"),
+        "the oldest calls are dropped: {:?}",
+        snap.delegate_blocks[0]
+    );
+    let last = snap.delegate_blocks.last().expect("a block remains");
+    assert_eq!(last.1, "build failed", "finish replaces the tail");
+    assert!(last.2, "a failed call is marked");
+
+    ui.start_delegate_task("sub_blocks", "Second run");
+    assert!(
+        ui.tui_snapshot(80).delegate_blocks.is_empty(),
+        "a restarted task starts with a clean block list"
+    );
+}
+
 /// A queued line sits in the composer like the background-task line it imitates, and the erase
 /// metrics record it: a row the erase does not know about is left behind on the next redraw.
 #[test]

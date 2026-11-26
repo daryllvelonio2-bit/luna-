@@ -256,8 +256,8 @@ pub fn from_subagent_event(session_id: &str, event: SubagentTaskEvent) -> AppEve
         } => {
             let label = match activity {
                 SubagentActivity::ModelStreaming => "streaming".to_string(),
-                SubagentActivity::ToolStarted { name } => format!("{name} running"),
-                SubagentActivity::ToolFinished { name, is_error } => {
+                SubagentActivity::ToolStarted { name, .. } => format!("{name} running"),
+                SubagentActivity::ToolFinished { name, is_error, .. } => {
                     format!("{name} {}", if is_error { "failed" } else { "done" })
                 }
                 SubagentActivity::ToolOutput { name, chunk } => {

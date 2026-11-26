@@ -62,22 +62,32 @@ const SUBAGENT_NOTICE_GOAL_CHARS: usize = 120;
 /// Failure text kept in the one-line finish notice. The full error stays on the task record.
 const SUBAGENT_NOTICE_ERROR_CHARS: usize = 200;
 
+/// Longest command summary carried with a child's `ToolStarted` event. The full arguments stay in
+/// the child's log; the parent only needs enough to recognise the call at a glance.
+const SUBAGENT_TOOL_COMMAND_CHARS: usize = 80;
+
 /// What a delegated child is doing right now.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SubagentActivity {
     /// The model is producing a response.
     ModelStreaming,
-    /// The child started a tool call.
-    ToolStarted { name: String },
+    /// The child started a tool call. `command` is a plain-text summary of the call, so the
+    /// parent can show what was run without opening the child's viewer.
+    ToolStarted { name: String, command: String },
     /// A chunk of the child's running tool output.
     ///
     /// Only tools that stream (currently the terminal) produce this. The parent renders the last
     /// non-empty line on the delegate row, so a child build's progress is visible without opening
     /// its viewer.
     ToolOutput { name: String, chunk: String },
-    /// The child's tool call finished.
-    ToolFinished { name: String, is_error: bool },
+    /// The child's tool call finished. `output` carries the complete result, including tools that
+    /// do not stream, so the parent's live block shows an outcome for every call.
+    ToolFinished {
+        name: String,
+        is_error: bool,
+        output: String,
+    },
 }
 
 /// A lifecycle or progress event from a delegated child.
@@ -527,6 +537,45 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
     }
     let cut: String = flat.chars().take(max_chars.saturating_sub(1)).collect();
     format!("{}…", cut.trim_end())
+}
+
+/// A plain-text summary of a child's tool call: its name and the one argument that identifies the
+/// call. Presentation stays in the CLI; this is data the parent can put in a live block.
+fn subagent_tool_command(name: &str, arguments: &serde_json::Value) -> String {
+    const PRIMARY_KEYS: &[&str] = &[
+        "command", "path", "file", "filepath", "query", "pattern", "url", "name", "goal", "text",
+        "input",
+    ];
+    let detail = PRIMARY_KEYS
+        .iter()
+        .find_map(|key| arguments.get(*key))
+        .and_then(|value| match value {
+            serde_json::Value::String(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let detail = if detail.is_empty() {
+        match arguments {
+            serde_json::Value::Object(map) if !map.is_empty() => {
+                serde_json::to_string(arguments).unwrap_or_default()
+            }
+            _ => String::new(),
+        }
+    } else {
+        detail.to_string()
+    };
+    let detail = truncate_chars(
+        detail
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .unwrap_or_default(),
+        SUBAGENT_TOOL_COMMAND_CHARS,
+    );
+    if detail.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name} · {detail}")
+    }
 }
 
 /// Publish a finished child: store the record, emit the lifecycle event, call the completion
@@ -1127,7 +1176,10 @@ fn subagent_observer(
         AgentEvent::ToolExecuting { name, arguments } => {
             let args_str = serde_json::to_string(&arguments).unwrap_or_default();
             log_obs.append_line(&format!("\n▶ Tool Call: {name} {args_str}"));
-            observer_tracker.record(SubagentActivity::ToolStarted { name });
+            observer_tracker.record(SubagentActivity::ToolStarted {
+                command: subagent_tool_command(&name, &arguments),
+                name,
+            });
         }
         AgentEvent::ToolOutput { name, chunk } => {
             // The parent's delegate row is one line: forward the chunk and let it pick the newest
@@ -1141,7 +1193,11 @@ fn subagent_observer(
         } => {
             let status = if is_error { "FAILED" } else { "SUCCESS" };
             log_obs.append_line(&format!("✔ Tool Result [{name}] ({status}):\n{output}\n"));
-            observer_tracker.record(SubagentActivity::ToolFinished { name, is_error });
+            observer_tracker.record(SubagentActivity::ToolFinished {
+                name,
+                is_error,
+                output,
+            });
         }
         _ => {
             observer_tracker.touch();

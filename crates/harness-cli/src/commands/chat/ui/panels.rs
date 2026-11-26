@@ -8,7 +8,20 @@ pub(super) struct DelegateTaskView {
     pub(super) id: String,
     pub(super) goal: String,
     pub(super) activity: String,
+    /// Live tool calls, oldest first, shown nested under the delegate row.
+    pub(super) blocks: Vec<DelegateBlockView>,
 }
+
+/// One child tool call under its delegate row.
+#[derive(Clone, Debug, Default)]
+pub(super) struct DelegateBlockView {
+    pub(super) command: String,
+    pub(super) output: String,
+    pub(super) is_error: bool,
+}
+
+/// Longest output tail kept for one block. The child's log still holds every byte.
+pub(super) const MAX_DELEGATE_BLOCK_OUTPUT_CHARS: usize = 120;
 
 /// A memory the background saver just wrote, as the composer announces it.
 ///

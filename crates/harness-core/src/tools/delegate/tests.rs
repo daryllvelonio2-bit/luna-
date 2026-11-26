@@ -600,6 +600,7 @@ async fn test_watchdog_does_not_timeout_while_tool_is_running() {
     // Tool starts: active_tools becomes 1
     tracker.record(SubagentActivity::ToolStarted {
         name: "long_running_tool".to_string(),
+        command: "long_running_tool".to_string(),
     });
 
     let work = async {
@@ -714,4 +715,25 @@ fn a_worker_notice_keeps_the_full_report() {
 
     assert!(notice.contains("[/SUBAGENT NOTIFICATION]"));
     assert!(notice.contains("the full worker report"));
+}
+
+/// The parent's live block carries a recognisable command without the child's whole argument blob.
+#[test]
+fn a_tool_started_event_carries_a_one_line_command_summary() {
+    let summary = subagent_tool_command(
+        "terminal",
+        &json!({"command": "cargo test --workspace\n&& echo done", "workdir": "/repo"}),
+    );
+    assert_eq!(summary, "terminal · cargo test --workspace");
+
+    let summary = subagent_tool_command("read_file", &json!({"path": "src/main.rs"}));
+    assert_eq!(summary, "read_file · src/main.rs");
+
+    let long = "x".repeat(SUBAGENT_TOOL_COMMAND_CHARS + 50);
+    let summary = subagent_tool_command("shell", &json!({"command": long}));
+    assert!(summary.chars().count() <= SUBAGENT_TOOL_COMMAND_CHARS + "shell · ".len());
+    assert!(summary.ends_with('…'));
+
+    let summary = subagent_tool_command("skills_list", &json!({}));
+    assert_eq!(summary, "skills_list");
 }

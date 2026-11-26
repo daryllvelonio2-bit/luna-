@@ -90,6 +90,11 @@ pub struct TuiPtyPane {
 /// of the run. Ten minutes of quiet is the cutoff.
 pub const PTY_PANE_IDLE_SECS: u64 = 600;
 
+/// How many live tool-call blocks a delegate row may show. Kept here so both the UI state and the
+/// TUI renderer cap the list at the same number.
+pub const MAX_DELEGATE_BLOCKS: usize = 10;
+
+/// The live snapshot the TUI paints: data, never ANSI-styled text.
 #[derive(Clone, Debug, Default)]
 pub struct TuiLiveSnapshot {
     pub reasoning: String,
@@ -121,6 +126,8 @@ pub struct TuiLiveSnapshot {
     pub todo_collapsed: bool,
     pub delegate_count: usize,
     pub delegate_last: Option<(String, String)>,
+    /// Tool-call blocks under the delegate row: (command summary, output tail, failed).
+    pub delegate_blocks: Vec<(String, String, bool)>,
     pub memory_notices: Vec<(String, String, Option<String>, String)>,
     pub memory_distilling: Option<(String, f32)>,
 }
@@ -368,6 +375,12 @@ impl ChatUi {
             snap.delegate_count = tasks.len();
             if let Some(last) = tasks.last() {
                 snap.delegate_last = Some((last.goal.clone(), last.activity.clone()));
+                snap.delegate_blocks = last
+                    .blocks
+                    .iter()
+                    .take(MAX_DELEGATE_BLOCKS)
+                    .map(|block| (block.command.clone(), block.output.clone(), block.is_error))
+                    .collect();
             }
         }
         {

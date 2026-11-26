@@ -408,8 +408,8 @@ pub(super) fn delegate_event_notifier(
                 // single running row in place instead, which is what the row is for.
                 let label = match &activity {
                     SubagentActivity::ModelStreaming => "streaming".to_string(),
-                    SubagentActivity::ToolStarted { name } => format!("{} running", name),
-                    SubagentActivity::ToolFinished { name, is_error } => {
+                    SubagentActivity::ToolStarted { name, .. } => format!("{} running", name),
+                    SubagentActivity::ToolFinished { name, is_error, .. } => {
                         format!("{} {}", name, if *is_error { "failed" } else { "done" })
                     }
                     // The child's newest output line, so a running build is visible in the parent
@@ -438,6 +438,20 @@ pub(super) fn delegate_event_notifier(
                 }
 
                 ui.update_delegate_task(&id, &label);
+                // The one-line label is unchanged; the blocks carry the detail. Each tool call
+                // gets its own block under the delegate row, bounded by the UI's block cap.
+                match &activity {
+                    SubagentActivity::ToolStarted { command, .. } => {
+                        ui.start_delegate_block(&id, command);
+                    }
+                    SubagentActivity::ToolOutput { chunk, .. } => {
+                        ui.push_delegate_block_output(&id, chunk);
+                    }
+                    SubagentActivity::ToolFinished {
+                        output, is_error, ..
+                    } => ui.finish_delegate_block(&id, output, *is_error),
+                    SubagentActivity::ModelStreaming => {}
+                }
             }
             SubagentTaskEvent::Finished { record } => {
                 if !session_matches(&record.parent_session, &session_id) {

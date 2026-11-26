@@ -1,6 +1,7 @@
 //! cards
 
 use super::*;
+use crate::commands::chat::ui::MAX_DELEGATE_BLOCKS;
 
 pub(crate) fn build_chrome_lines(
     st: &TuiState,
@@ -159,6 +160,29 @@ pub(crate) fn build_chrome_lines(
                 )]
             };
             lines.push(Line::from(spans));
+            // Each child tool call is one bounded line nested under the delegate row. Branches
+            // make the call/output pairs read as a list without spending a row on each half.
+            let blocks = snap
+                .delegate_blocks
+                .iter()
+                .take(MAX_DELEGATE_BLOCKS)
+                .collect::<Vec<_>>();
+            let last = blocks.len().saturating_sub(1);
+            for (idx, (command, output, is_error)) in blocks.into_iter().enumerate() {
+                let branch = if idx == last { "└─" } else { "├─" };
+                let mark = if *is_error { "✖" } else { "·" };
+                let body = if output.is_empty() {
+                    command.clone()
+                } else {
+                    format!("{command} {mark} {output}")
+                };
+                lines.push(Line::from(Span::styled(
+                    truncate_str(&format!("  {branch} {body}"), width),
+                    Style::default()
+                        .fg(if *is_error { red_err() } else { text_muted() })
+                        .bg(bg_canvas()),
+                )));
+            }
         }
     }
     if !st.queue.is_empty() {

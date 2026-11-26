@@ -34,7 +34,7 @@ pub(crate) use metrics::finished_reasoning_text;
 #[allow(unused_imports)]
 pub use metrics::{physical_line_count, visible_width};
 pub use terminal::{get_terminal_height, get_terminal_width, RawTerminal};
-pub use view::{ChatUi, TuiLiveSnapshot, TuiPtyPane};
+pub use view::{ChatUi, TuiLiveSnapshot, TuiPtyPane, MAX_DELEGATE_BLOCKS};
 
 // Names the test module reaches through `use super::*`. They were private items of this module
 // before the split and stay private to it.

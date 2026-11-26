@@ -1344,6 +1344,40 @@ fn test_subagents_chrome_strip_and_hint_counter() {
 }
 
 #[test]
+fn subagent_tool_blocks_render_nested_under_the_delegate_row() {
+    let st = test_dummy_tui_state();
+    let snap = TuiLiveSnapshot {
+        delegate_count: 1,
+        delegate_last: Some(("Review PR".to_string(), "terminal running".to_string())),
+        delegate_blocks: vec![
+            (
+                "terminal · cargo test --workspace".to_string(),
+                "test result: ok".to_string(),
+                false,
+            ),
+            (
+                "search_files · pattern=foo".to_string(),
+                "3 matches".to_string(),
+                false,
+            ),
+            (
+                "patch · src/main.rs".to_string(),
+                "failed to apply".to_string(),
+                true,
+            ),
+        ],
+        ..Default::default()
+    };
+
+    let chrome = build_chrome_lines(&st, &snap, 80);
+    let text = chrome.iter().map(line_text).collect::<Vec<_>>().join("\n");
+    assert_eq!(
+        text,
+        "⠋ Subagent: Review PR — terminal running (Ctrl+B / click to inspect)\n  ├─ terminal · cargo test --workspace · test result: ok\n  ├─ search_files · pattern=foo · 3 matches\n  └─ patch · src/main.rs ✖ failed to apply"
+    );
+}
+
+#[test]
 fn test_background_memory_saver_chrome_and_notices() {
     let st = test_dummy_tui_state();
     let snap = TuiLiveSnapshot {

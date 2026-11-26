@@ -13,7 +13,7 @@ use super::super::render::{
     format_elapsed_secs, reply_for_display, shorten_path, shorten_paths_in_text, truncate_to_cells,
     SPINNER_FRAMES,
 };
-use super::super::ui::{TuiLiveSnapshot, TuiPtyPane};
+use super::super::ui::{TuiLiveSnapshot, TuiPtyPane, MAX_DELEGATE_BLOCKS};
 use super::markdown::{
     clean_terminal_text, parse_terminal_line, render_markdown, render_markdown_with_code,
     strip_ansi, wrap_plain_text, wrap_spans,
@@ -538,9 +538,12 @@ pub(crate) fn render_landing(
     // Card height: 1 top pad + preview strip + 1 gap + input_rows + 1 blank spacer + footer (+ optional antigravity row).
     let card_h = input_rows + 3 + preview_h + u16::from(preview_h > 0) + extra_footer;
 
-    // Optional chrome strips above composer
+    // Optional chrome strips above composer. A delegate row adds its live tool blocks, so the
+    // cap grows with them; the row and its blocks stay in the tail that is actually painted.
     let chrome_lines = build_chrome_lines(st, snap, box_width as usize);
-    let chrome_h = chrome_lines.len().min(4) as u16;
+    let delegate_rows =
+        usize::from(snap.delegate_count > 0) + snap.delegate_blocks.len().min(MAX_DELEGATE_BLOCKS);
+    let chrome_h = chrome_lines.len().min(4 + delegate_rows) as u16;
 
     // Total vertical lockup: logo (3) + gap (2) + optional update (2) + chrome + card + hint (1) + gap (1) + status (2)
     let status_rows: u16 = if area.width < 58 { 3 } else { 2 };
@@ -837,8 +840,11 @@ pub(crate) fn render_conversation(
     let card_h = input_rows + 3 + preview_h + u16::from(preview_h > 0) + extra_footer;
 
     // Optional chrome strips above composer (todo, delegate, memory notices, queue, compaction, error)
+    // A delegate row and its live blocks get their own rows so none of them are clipped away.
     let chrome_lines = build_chrome_lines(st, snap, content_w as usize);
-    let chrome_h = chrome_lines.len().min(8) as u16;
+    let delegate_rows =
+        usize::from(snap.delegate_count > 0) + snap.delegate_blocks.len().min(MAX_DELEGATE_BLOCKS);
+    let chrome_h = chrome_lines.len().min(8 + delegate_rows) as u16;
 
     let bottom_total = chrome_h + card_h + 1; // +1 for bottom status hint row
     let transcript_h = area.height.saturating_sub(bottom_total + 1).max(3);
