@@ -525,7 +525,7 @@ pub async fn apply_model_selection(
     env.delegate_tool.set_provider(client);
     env.delegate_tool.set_subagent_pool(Vec::new());
     st.active_orchestrator = None;
-    super::orchestrator::save_session_orchestrator(&env.session_id, None);
+    super::orchestrator::save_session_orchestrator(env.session_id, None);
     *env.current_provider = provider.to_string();
     *env.current_model = model.to_string();
     let used = env.ui.current_context_used();

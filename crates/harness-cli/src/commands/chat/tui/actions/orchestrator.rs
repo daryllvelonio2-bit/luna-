@@ -266,7 +266,7 @@ pub async fn apply_orchestrator(
         ag.set_orchestrator_prompt(Some(prompt_block));
     }
     st.active_orchestrator = Some(name.to_string());
-    save_session_orchestrator(&env.session_id, Some(name));
+    save_session_orchestrator(env.session_id, Some(name));
     st.system_notices.push(SystemNotice::new(format!(
         "Active orchestrator: {name} ({}/{} · {} subagents)",
         orch.orchestrator.provider,
