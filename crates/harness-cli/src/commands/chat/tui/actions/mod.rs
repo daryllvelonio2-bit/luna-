@@ -62,6 +62,7 @@ mod tests;
 pub use approval::*;
 pub use composer::*;
 pub use modals_dispatch::*;
+pub use orchestrator::*;
 pub use pickers::*;
 pub use sessions::*;
 pub use settings::*;

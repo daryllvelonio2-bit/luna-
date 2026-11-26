@@ -934,9 +934,8 @@ async fn init_tui_state(env: &mut Env<'_>) -> Result<TuiState, HarnessError> {
             }
             env.delegate_tool.set_subagent_pool(pool);
             let prompt_block = actions::build_orchestrator_prompt_block(&saved_orch, orch);
-            if let Ok(mut ag) = env.agent.try_lock() {
-                ag.set_orchestrator_prompt(Some(prompt_block));
-            }
+            let mut ag = env.agent.lock().await;
+            ag.set_orchestrator_prompt(Some(prompt_block));
         }
     }
     if voice_active {

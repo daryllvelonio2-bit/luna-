@@ -230,6 +230,8 @@ pub async fn open_provider_picker_with_target(
         if orch_active {
             for item in &mut items {
                 item.is_current = false;
+                let tags: Vec<&str> = item.tag.split(" · ").filter(|t| *t != "active").collect();
+                item.tag = tags.join(" · ");
             }
         }
         let active_tag = if let Some(ref name) = st.active_orchestrator {
@@ -274,6 +276,9 @@ pub async fn open_provider_picker_with_target(
             if orch_active {
                 for item in &mut items {
                     item.is_current = false;
+                    let tags: Vec<&str> =
+                        item.tag.split(" · ").filter(|t| *t != "active").collect();
+                    item.tag = tags.join(" · ");
                 }
             }
             let active_tag = if let Some(ref name) = active_orch {

@@ -18,6 +18,7 @@ pub const NOTES_SESSION_PROMPT: &str = "NOTES_SESSION_PROMPT";
 pub const MEMORY_BACKGROUND_PROMPT: &str = "MEMORY_BACKGROUND_PROMPT";
 pub const GOAL_START_PROMPT: &str = "GOAL_START_PROMPT";
 pub const GOAL_CONTINUE_PROMPT: &str = "GOAL_CONTINUE_PROMPT";
+pub const ORCHESTRATOR_PROMPT: &str = "ORCHESTRATOR_PROMPT";
 
 /// The body of the `name` section, with surrounding blank lines trimmed.
 ///
@@ -58,9 +59,30 @@ mod tests {
             MEMORY_BACKGROUND_PROMPT,
             GOAL_START_PROMPT,
             GOAL_CONTINUE_PROMPT,
+            ORCHESTRATOR_PROMPT,
         ] {
             let body = section(name).expect("declared section is present");
             assert!(!body.is_empty(), "{name} loaded empty");
+        }
+    }
+
+    #[test]
+    fn orchestrator_prompt_exposes_its_substitution_points() {
+        let body = section(ORCHESTRATOR_PROMPT).expect("orchestrator prompt loads");
+        for marker in [
+            "{{PERSISTENT_MEMORY_TAG}}",
+            "{{SYSTEM_PROMPT_PREFIX}}",
+            "{{ORCHESTRATOR_SUBAGENTS}}",
+            "{{MEMORY_AND_NOTE_PROTOCOL}}",
+            "{{SKILLS_PROTOCOL}}",
+            "{{MCP_PROTOCOL}}",
+            "{{ACTIVE_MEMORIES_BLOCK}}",
+            "{{RICH_OUTPUT_PROTOCOL}}",
+        ] {
+            assert!(
+                body.contains(marker),
+                "missing marker {marker} in orchestrator prompt"
+            );
         }
     }
 

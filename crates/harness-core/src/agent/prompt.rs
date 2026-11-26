@@ -27,16 +27,12 @@ where
     /// been resolved, so text a user wrote in a profile cannot remove or duplicate the locked
     /// tool/memory blocks. Markers inside profile text stay literal.
     pub(super) async fn system_prompt(&self, user_input: &str) -> Result<String, HarnessError> {
-        let (persona, behavior) = self.persona_and_behavior()?;
         let memory_prompt = self.memory_prompt(user_input).await?;
         let persistent_memory_tag = if self.config.memory_enabled {
             " with persistent memory"
         } else {
             ""
         };
-        // A pointer, not an index: the list is discovered on demand with `skills_list`, and the
-        // procedure only enters the context when `skill_view` loads it. The instruction is what
-        // makes that discovery reliable — without it the model has no reason to look.
         let skills_protocol = if self.config.skills_enabled {
             "- Skills: if `skills_list` is available, call it before starting a task that could match an installed skill; when one matches, load it with `skill_view(name)` and follow its instructions. Load companion reference files directly with `skill_view(name, path)` or `skill_view(\"skill/path\")`.\n  To install a skill from GitHub or the web, run `luna skill install <source>` via `terminal` (accepts `owner/repo[@ref]`, a GitHub repo/tree/blob URL, or a raw `SKILL.md` URL; use `--skill <name>` to pick specific skills and `--force` to overwrite). If given only a skill name, use `web_search` first to find its GitHub repository or URL. Never clone or download skills manually into `/tmp` or `~/.config/luna/skills`; `luna skill install` validates and installs directly into the configured skills directory (`luna skill list` shows installed paths)."
         } else {
@@ -56,24 +52,12 @@ where
             String::new()
         };
         let memory_instruction = self.memory_instruction()?;
-        // The rich-output invitation belongs only to the renderer that can honor it. Piped runs,
-        // the inline CLI and headless execs must not be told to emit tables or ANSI color.
         let rich_output = if self.config.tui_output {
             crate::prompts::section(crate::prompts::TUI_RENDER_PROMPT)?
         } else {
             String::new()
         };
 
-        let base = self.fill_base_prompt(
-            &persona,
-            &behavior,
-            persistent_memory_tag,
-            &active_memories_block,
-            skills_protocol,
-            &mcp_protocol,
-            &memory_instruction,
-            &rich_output,
-        )?;
         let env_info = self.runtime_environment();
         let voice_instruction = if self.config.voice_mode {
             "\n\nVOICE MODE ACTIVE (DUAL WRITTEN + SPOKEN EXPERIENCE):\n- Your written reply in the chat is rendered visually and read on screen; a separate spoken voice layer reads a concise conversational summary aloud.\n- Keep your full written reply thorough and well-formatted (Markdown tables, code blocks, lists, and complete details are great in the chat).\n- IMPORTANT FOR RESPONSIVENESS: Whenever you are about to run tools to perform a task (e.g. cleaning files, running commands, searching, or editing), write a brief, friendly 1-sentence acknowledgment FIRST (such as \"Alright, on it — cleaning up the build artifacts now.\") before invoking your first tool call."
@@ -95,12 +79,33 @@ where
 
         if let Some(ref orch_prompt) = self.config.orchestrator_prompt {
             if !orch_prompt.trim().is_empty() {
+                let base = self.fill_orchestrator_prompt(
+                    orch_prompt,
+                    persistent_memory_tag,
+                    &active_memories_block,
+                    skills_protocol,
+                    &mcp_protocol,
+                    &memory_instruction,
+                    &rich_output,
+                )?;
                 return Ok(format!(
-                    "{orch_prompt}\n\n{}{}{}{}\n\n{orch_prompt}",
+                    "{}{}{}{}",
                     base, env_info, voice_instruction, pinned_skills_block
                 ));
             }
         }
+
+        let (persona, behavior) = self.persona_and_behavior()?;
+        let base = self.fill_base_prompt(
+            &persona,
+            &behavior,
+            persistent_memory_tag,
+            &active_memories_block,
+            skills_protocol,
+            &mcp_protocol,
+            &memory_instruction,
+            &rich_output,
+        )?;
 
         Ok(format!(
             "{}{}{}{}",
@@ -202,6 +207,35 @@ where
                 }
             }
         }
+    }
+
+    /// Substitute the dedicated `ORCHESTRATOR_PROMPT` markers.
+    #[allow(clippy::too_many_arguments)]
+    fn fill_orchestrator_prompt(
+        &self,
+        subagents_block: &str,
+        persistent_memory_tag: &str,
+        active_memories_block: &str,
+        skills_protocol: &str,
+        mcp_protocol: &str,
+        memory_instruction: &str,
+        rich_output: &str,
+    ) -> Result<String, HarnessError> {
+        Ok(
+            crate::prompts::section(crate::prompts::ORCHESTRATOR_PROMPT)?
+                .replace("{{PERSISTENT_MEMORY_TAG}}", persistent_memory_tag)
+                .replace("{{ACTIVE_MEMORIES_BLOCK}}", active_memories_block)
+                .replace("{{SKILLS_PROTOCOL}}", skills_protocol)
+                .replace("{{MCP_PROTOCOL}}", mcp_protocol)
+                .replace("{{RICH_OUTPUT_PROTOCOL}}", rich_output)
+                .replace("{{MEMORY_AND_NOTE_PROTOCOL}}\n\n", memory_instruction)
+                .replace("{{MEMORY_AND_NOTE_PROTOCOL}}", memory_instruction)
+                .replace(
+                    "{{SYSTEM_PROMPT_PREFIX}}",
+                    self.config.system_prompt_prefix.as_deref().unwrap_or(""),
+                )
+                .replace("{{ORCHESTRATOR_SUBAGENTS}}", subagents_block),
+        )
     }
 
     /// Substitute the static `prompts.md` contract's markers. Behavior is substituted *last*, after

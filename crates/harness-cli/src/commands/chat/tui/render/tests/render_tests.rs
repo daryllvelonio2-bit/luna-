@@ -2194,3 +2194,35 @@ fn composer_card_footer_renders_orchestrator_badge_when_active() {
         "footer should not show bare provider when orchestrator is active, got:\n{footer}"
     );
 }
+
+#[test]
+fn orchestrator_active_strips_active_tag_from_underlying_providers() {
+    let mut items = vec![
+        crate::commands::chat::tui::state::ProviderPickerItem {
+            id: "nvidia".to_string(),
+            display_name: "NVIDIA NIM".to_string(),
+            tag: "nvidia · active · configured".to_string(),
+            is_current: true,
+        },
+        crate::commands::chat::tui::state::ProviderPickerItem {
+            id: "opencode".to_string(),
+            display_name: "OpenCode".to_string(),
+            tag: "configured".to_string(),
+            is_current: false,
+        },
+    ];
+
+    let orch_active = true;
+    if orch_active {
+        for item in &mut items {
+            item.is_current = false;
+            let tags: Vec<&str> = item.tag.split(" · ").filter(|t| *t != "active").collect();
+            item.tag = tags.join(" · ");
+        }
+    }
+
+    assert!(!items[0].is_current);
+    assert_eq!(items[0].tag, "nvidia · configured");
+    assert!(!items[1].is_current);
+    assert_eq!(items[1].tag, "configured");
+}

@@ -276,20 +276,11 @@ pub async fn apply_orchestrator(
     Ok(())
 }
 
-/// Build the system-prompt block injected only when an orchestrator preset is active.
+/// Build the subagents details block substituted into `ORCHESTRATOR_PROMPT`.
 pub fn build_orchestrator_prompt_block(name: &str, orch: &OrchestratorConfig) -> String {
     let mut block = format!(
-        "CRITICAL MANDATE — ORCHESTRATOR MODE ACTIVE (Preset: '{name}'):\n\
-         - You are acting as the Orchestrator. Your primary responsibility is to plan, decompose complex tasks, delegate focused subtasks to your configured subagent pool via `delegate_task`, and synthesize/verify their results.\n\
-         - DO NOT write code, modify files, apply patches, or execute build/test commands directly yourself.\n\
-         - You MUST delegate ALL implementation, code searching/inspection, file changes, and testing to your configured subagent pool using the `delegate_task` tool.\n\
-         - Whenever the user asks you to implement a feature, fix a bug, investigate an issue, or perform a task:\n\
-           1. Decompose the request into focused subtasks with specific goals and context.\n\
-           2. Immediately call `delegate_task(action: \"spawn\", tasks: [{{ goal: \"...\", context: \"...\" }}])` to assign work to your subagents.\n\
-           3. Monitor, poll, or wait for the subagents' outputs using `delegate_task`.\n\
-           4. Review, synthesize, and verify the subagent results.\n\
-           5. Present the final synthesized result to the user.\n\
-         - Directly calling `patch`, `write_file`, or implementation `terminal` commands yourself is a strict violation of your orchestrator role. Always delegate through `delegate_task`."
+        "- Active preset: '{name}'\n- Orchestrator primary model: {}/{}",
+        orch.orchestrator.provider, orch.orchestrator.model
     );
     if orch.subagents.is_empty() {
         block.push_str(
