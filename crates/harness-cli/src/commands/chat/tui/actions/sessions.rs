@@ -271,7 +271,9 @@ pub(crate) fn restore_background_session(
     st.diff_anim_target_added = slot.session_max_added;
     st.diff_anim_target_deleted = slot.session_max_deleted;
     st.pending_modals = slot.pending_modals;
-    st.active_orchestrator = slot.active_orchestrator;
+    st.active_orchestrator = slot
+        .active_orchestrator
+        .or_else(|| super::orchestrator::load_session_orchestrator(&env.session_id));
     if let Some(ref name) = st.active_orchestrator {
         if let Some(orch) = env.config.orchestrators.get(name) {
             let mut pool: Vec<(

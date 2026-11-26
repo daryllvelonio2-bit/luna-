@@ -93,14 +93,18 @@ where
             String::new()
         };
 
-        let orchestrator_block = match self.config.orchestrator_prompt.as_deref() {
-            Some(block) if !block.trim().is_empty() => format!("\n\n{block}"),
-            _ => String::new(),
-        };
+        if let Some(ref orch_prompt) = self.config.orchestrator_prompt {
+            if !orch_prompt.trim().is_empty() {
+                return Ok(format!(
+                    "{orch_prompt}\n\n{}{}{}{}\n\n{orch_prompt}",
+                    base, env_info, voice_instruction, pinned_skills_block
+                ));
+            }
+        }
 
         Ok(format!(
-            "{}{}{}{}{}",
-            base, env_info, voice_instruction, pinned_skills_block, orchestrator_block
+            "{}{}{}{}",
+            base, env_info, voice_instruction, pinned_skills_block
         ))
     }
 

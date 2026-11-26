@@ -266,6 +266,7 @@ pub async fn apply_orchestrator(
         ag.set_orchestrator_prompt(Some(prompt_block));
     }
     st.active_orchestrator = Some(name.to_string());
+    save_session_orchestrator(&env.session_id, Some(name));
     st.system_notices.push(SystemNotice::new(format!(
         "Active orchestrator: {name} ({}/{} · {} subagents)",
         orch.orchestrator.provider,
@@ -278,7 +279,17 @@ pub async fn apply_orchestrator(
 /// Build the system-prompt block injected only when an orchestrator preset is active.
 pub fn build_orchestrator_prompt_block(name: &str, orch: &OrchestratorConfig) -> String {
     let mut block = format!(
-        "You are acting as the Orchestrator (Preset: '{name}'). Your primary responsibility is to plan, decompose complex tasks, delegate focused subtasks to your configured subagent pool via `delegate_task`, and synthesize/verify their results."
+        "CRITICAL MANDATE — ORCHESTRATOR MODE ACTIVE (Preset: '{name}'):\n\
+         - You are acting as the Orchestrator. Your primary responsibility is to plan, decompose complex tasks, delegate focused subtasks to your configured subagent pool via `delegate_task`, and synthesize/verify their results.\n\
+         - DO NOT write code, modify files, apply patches, or execute build/test commands directly yourself.\n\
+         - You MUST delegate ALL implementation, code searching/inspection, file changes, and testing to your configured subagent pool using the `delegate_task` tool.\n\
+         - Whenever the user asks you to implement a feature, fix a bug, investigate an issue, or perform a task:\n\
+           1. Decompose the request into focused subtasks with specific goals and context.\n\
+           2. Immediately call `delegate_task(action: \"spawn\", tasks: [{{ goal: \"...\", context: \"...\" }}])` to assign work to your subagents.\n\
+           3. Monitor, poll, or wait for the subagents' outputs using `delegate_task`.\n\
+           4. Review, synthesize, and verify the subagent results.\n\
+           5. Present the final synthesized result to the user.\n\
+         - Directly calling `patch`, `write_file`, or implementation `terminal` commands yourself is a strict violation of your orchestrator role. Always delegate through `delegate_task`."
     );
     if orch.subagents.is_empty() {
         block.push_str(
@@ -301,4 +312,37 @@ pub fn build_orchestrator_prompt_block(name: &str, orch: &OrchestratorConfig) ->
         }
     }
     block
+}
+
+/// Load the active orchestrator name persisted for a session across restarts.
+pub fn load_session_orchestrator(session_id: &str) -> Option<String> {
+    let home = std::env::var("HOME").ok()?;
+    let path = std::path::Path::new(&home)
+        .join(".luna")
+        .join("session_orchestrators.json");
+    let content = std::fs::read_to_string(path).ok()?;
+    let map: std::collections::HashMap<String, String> = serde_json::from_str(&content).ok()?;
+    map.get(session_id).cloned()
+}
+
+/// Persist or clear the active orchestrator name for a session.
+pub fn save_session_orchestrator(session_id: &str, orch: Option<&str>) {
+    let Ok(home) = std::env::var("HOME") else {
+        return;
+    };
+    let path = std::path::Path::new(&home)
+        .join(".luna")
+        .join("session_orchestrators.json");
+    let mut map: std::collections::HashMap<String, String> = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|c| serde_json::from_str(&c).ok())
+        .unwrap_or_default();
+    if let Some(name) = orch {
+        map.insert(session_id.to_string(), name.to_string());
+    } else {
+        map.remove(session_id);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(&map) {
+        let _ = std::fs::write(path, json);
+    }
 }

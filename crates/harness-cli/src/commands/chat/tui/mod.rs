@@ -911,6 +911,34 @@ async fn init_tui_state(env: &mut Env<'_>) -> Result<TuiState, HarnessError> {
         diff_anim_target_deleted: 0,
         diff_anim_start: None,
     };
+    if let Some(saved_orch) = actions::load_session_orchestrator(env.session_id.as_str()) {
+        if let Some(orch) = env.config.orchestrators.get(&saved_orch) {
+            st.active_orchestrator = Some(saved_orch.clone());
+            let mut pool: Vec<(
+                std::sync::Arc<dyn harness_core::ModelProvider>,
+                Option<harness_core::ReasoningEffort>,
+            )> = Vec::with_capacity(orch.subagents.len());
+            for sub in &orch.subagents {
+                if let Ok(client) = harness_providers::GenericProviderClient::new(
+                    sub.provider.clone(),
+                    sub.model.clone(),
+                    env.cred_manager.clone(),
+                    env.discovery.clone(),
+                    env.config.providers.get(&sub.provider),
+                ) {
+                    pool.push((
+                        std::sync::Arc::new(client.with_session_id(env.session_id.as_str())),
+                        sub.thinking,
+                    ));
+                }
+            }
+            env.delegate_tool.set_subagent_pool(pool);
+            let prompt_block = actions::build_orchestrator_prompt_block(&saved_orch, orch);
+            if let Ok(mut ag) = env.agent.try_lock() {
+                ag.set_orchestrator_prompt(Some(prompt_block));
+            }
+        }
+    }
     if voice_active {
         actions::activate_voice(env, &mut st).await;
     }
