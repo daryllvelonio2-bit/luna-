@@ -1707,3 +1707,49 @@ fn diff_counter_never_resets_down_to_low_value() {
         "compacted counters preserve diff"
     );
 }
+
+#[test]
+fn settled_turn_registers_copy_hit_target_on_code_block_header() {
+    let turn = TurnRecord {
+        user_query: "show me rust".to_string(),
+        reasoning: None,
+        tools: Vec::new(),
+        tool_items: Vec::new(),
+        duration: Duration::from_millis(500),
+        reply: "Here is a snippet:\n\n```rust\nlet x = 42;\nprintln!(\"{x}\");\n```\n".to_string(),
+    };
+    let mut out = Vec::new();
+    let mut hits = Vec::new();
+    let empty_set: HashSet<(usize, usize)> = HashSet::new();
+    let empty_turns: HashSet<usize> = HashSet::new();
+    render_single_settled_turn(
+        &mut out,
+        &mut hits,
+        0,
+        &turn,
+        None,
+        false,
+        true,
+        None,
+        &empty_set,
+        &empty_set,
+        &empty_turns,
+        &empty_turns,
+        "Build",
+        "gpt-4o",
+        80,
+        76,
+    );
+
+    let copy_hit = hits.iter().find_map(|(row, target)| match target {
+        TranscriptClickTarget::CopyCodeBlock(code) => Some((*row, code.as_str())),
+        _ => None,
+    });
+    let (row, code) = copy_hit.expect("expected CopyCodeBlock hit target");
+    assert_eq!(code, "let x = 42;\nprintln!(\"{x}\");\n");
+    let header_row = line_text(&out[row]);
+    assert!(
+        header_row.contains("rust") && header_row.contains("copy"),
+        "hit target row should be the code block header: {header_row:?}"
+    );
+}
