@@ -98,6 +98,17 @@ pub async fn submit_composer(
     env.ui.clear_transient_error();
     st.jump_to_latest();
     st.system_notices.clear();
+    if let Some(ref orch_name) = st.active_orchestrator {
+        if let Some(orch) = env.config.orchestrators.get(orch_name) {
+            let prompt_block =
+                super::orchestrator::build_orchestrator_prompt_block(orch_name, orch);
+            if let Ok(mut ag) = env.agent.try_lock() {
+                ag.set_orchestrator_prompt(Some(prompt_block));
+            }
+        }
+    } else if let Ok(mut ag) = env.agent.try_lock() {
+        ag.set_orchestrator_prompt(None);
+    }
     launch_turn(
         &submitted.expanded_text,
         display_opt,

@@ -261,7 +261,8 @@ pub async fn apply_orchestrator(
     }
     env.delegate_tool.set_subagent_pool(pool);
     let prompt_block = build_orchestrator_prompt_block(name, &orch);
-    if let Ok(mut ag) = env.agent.try_lock() {
+    {
+        let mut ag = env.agent.lock().await;
         ag.set_orchestrator_prompt(Some(prompt_block));
     }
     st.active_orchestrator = Some(name.to_string());
@@ -277,9 +278,7 @@ pub async fn apply_orchestrator(
 /// Build the system-prompt block injected only when an orchestrator preset is active.
 pub fn build_orchestrator_prompt_block(name: &str, orch: &OrchestratorConfig) -> String {
     let mut block = format!(
-        "ORCHESTRATOR MODE ACTIVE (Preset: '{name}'):\n\
-         - You are acting as the Orchestrator. Your primary responsibility is to plan, decompose complex tasks, delegate focused subtasks to your configured subagent pool via `delegate_task`, and synthesize/verify their results.\n\
-         - Prefer delegating independent or parallelizable subtasks with clear goals, file paths, and acceptance criteria, then review and integrate their outputs before replying to the user."
+        "You are acting as the Orchestrator (Preset: '{name}'). Your primary responsibility is to plan, decompose complex tasks, delegate focused subtasks to your configured subagent pool via `delegate_task`, and synthesize/verify their results."
     );
     if orch.subagents.is_empty() {
         block.push_str(

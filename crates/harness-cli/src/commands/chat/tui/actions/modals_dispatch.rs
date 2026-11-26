@@ -1284,10 +1284,9 @@ pub async fn apply_thinking_selection(
         ));
         return;
     }
-    if let Ok(mut ag) = env.agent.try_lock() {
-        ag.set_reasoning_effort(effort);
-        st.reasoning_effort = effort;
-    }
+    let mut ag = env.agent.lock().await;
+    ag.set_reasoning_effort(effort);
+    st.reasoning_effort = effort;
 }
 
 pub fn set_all_process_expanded(st: &mut TuiState, expanded: bool) {

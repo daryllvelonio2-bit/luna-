@@ -227,12 +227,22 @@ pub async fn open_provider_picker_with_target(
     let orch_active = st.active_orchestrator.is_some();
     if show_orchestrators {
         items.retain(|i| i.id != crate::commands::chat::tui::state::ORCHESTRATORS_PROVIDER_ID);
+        if orch_active {
+            for item in &mut items {
+                item.is_current = false;
+            }
+        }
+        let active_tag = if let Some(ref name) = st.active_orchestrator {
+            format!("active: {name} · {orch_count} configured")
+        } else {
+            format!("{orch_count} configured")
+        };
         items.insert(
             0,
             ProviderPickerItem {
                 id: crate::commands::chat::tui::state::ORCHESTRATORS_PROVIDER_ID.to_string(),
                 display_name: "Orchestrators".to_string(),
-                tag: format!("{orch_count} configured"),
+                tag: active_tag,
                 is_current: orch_active,
             },
         );
@@ -251,6 +261,7 @@ pub async fn open_provider_picker_with_target(
     let cred_manager = env.cred_manager.clone();
     let config_providers = env.config.providers.clone();
     let usage_db = env.config.paths.usage_db.clone();
+    let active_orch = st.active_orchestrator.clone();
     tokio::spawn(async move {
         let mut items = build_provider_items_with_usage(
             cred_manager,
@@ -260,12 +271,22 @@ pub async fn open_provider_picker_with_target(
         )
         .await;
         if show_orchestrators {
+            if orch_active {
+                for item in &mut items {
+                    item.is_current = false;
+                }
+            }
+            let active_tag = if let Some(ref name) = active_orch {
+                format!("active: {name} · {orch_count} configured")
+            } else {
+                format!("{orch_count} configured")
+            };
             items.insert(
                 0,
                 ProviderPickerItem {
                     id: crate::commands::chat::tui::state::ORCHESTRATORS_PROVIDER_ID.to_string(),
                     display_name: "Orchestrators".to_string(),
-                    tag: format!("{orch_count} configured"),
+                    tag: active_tag,
                     is_current: orch_active,
                 },
             );

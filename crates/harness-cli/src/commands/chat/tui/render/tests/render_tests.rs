@@ -2147,3 +2147,49 @@ fn slash_popup_follows_composer_width_and_aligns_descriptions() {
         "descriptions must align:\n{first}\n{second}"
     );
 }
+
+#[test]
+fn composer_card_footer_renders_orchestrator_badge_when_active() {
+    let mut st = test_dummy_tui_state();
+    st.active_orchestrator = Some("try".to_string());
+
+    let backend = CrosstermBackend::new(Vec::new());
+    let mut terminal = Terminal::new(backend).unwrap();
+    let area = Rect {
+        x: 0,
+        y: 0,
+        width: 100,
+        height: 6,
+    };
+
+    let info = RenderInfo {
+        session_id: "s123",
+        provider: "nvidia",
+        model: "nemotron-3-ultra-550b-a55b",
+        reasoning_effort: Some(harness_providers::ReasoningEffort::XHigh),
+    };
+    let snap = harness_core::usage::SessionSnapshot::default();
+    let input = crate::commands::chat::tui::render::composer::wrap_composer_text("", 90);
+
+    terminal
+        .draw(|frame| {
+            crate::commands::chat::tui::render::composer::render_composer_card(
+                frame, area, &st, info, snap, &input, false,
+            );
+        })
+        .unwrap();
+
+    let buffer = terminal.backend().buffer();
+    let footer: String = (0..buffer.area.width)
+        .map(|x| buffer[(x, area.height - 1)].symbol())
+        .collect();
+
+    assert!(
+        footer.contains("Orchestrator: try"),
+        "footer should show active orchestrator name, got:\n{footer}"
+    );
+    assert!(
+        !footer.contains("Nvidia"),
+        "footer should not show bare provider when orchestrator is active, got:\n{footer}"
+    );
+}

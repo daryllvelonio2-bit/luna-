@@ -272,6 +272,38 @@ pub(crate) fn restore_background_session(
     st.diff_anim_target_deleted = slot.session_max_deleted;
     st.pending_modals = slot.pending_modals;
     st.active_orchestrator = slot.active_orchestrator;
+    if let Some(ref name) = st.active_orchestrator {
+        if let Some(orch) = env.config.orchestrators.get(name) {
+            let mut pool: Vec<(
+                Arc<dyn harness_providers::ModelProvider>,
+                Option<harness_providers::ReasoningEffort>,
+            )> = Vec::with_capacity(orch.subagents.len());
+            for sub in &orch.subagents {
+                if let Ok(client) = harness_providers::GenericProviderClient::new(
+                    sub.provider.clone(),
+                    sub.model.clone(),
+                    env.cred_manager.clone(),
+                    env.discovery.clone(),
+                    env.config.providers.get(&sub.provider),
+                ) {
+                    pool.push((
+                        Arc::new(client.with_session_id(env.session_id.as_str())),
+                        sub.thinking,
+                    ));
+                }
+            }
+            env.delegate_tool.set_subagent_pool(pool);
+            let prompt_block = super::orchestrator::build_orchestrator_prompt_block(name, orch);
+            if let Ok(mut ag) = env.agent.try_lock() {
+                ag.set_orchestrator_prompt(Some(prompt_block));
+            }
+        }
+    } else {
+        env.delegate_tool.set_subagent_pool(Vec::new());
+        if let Ok(mut ag) = env.agent.try_lock() {
+            ag.set_orchestrator_prompt(None);
+        }
+    }
     st.promote_pending_modal();
     st.diff_anim_from_added = slot.session_max_added;
     st.diff_anim_from_deleted = slot.session_max_deleted;

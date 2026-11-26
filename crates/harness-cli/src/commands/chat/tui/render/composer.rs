@@ -511,6 +511,36 @@ pub(crate) fn render_composer_card(
             text_muted()
         };
 
+        let (lead_model_span, provider_span) = if let Some(ref orch_name) = st.active_orchestrator {
+            (
+                Span::styled(
+                    format!("Orchestrator: {orch_name}"),
+                    Style::default()
+                        .fg(accent_coral())
+                        .bg(bg_surface())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(" ({model_display}) · "),
+                    Style::default().fg(text_muted()).bg(bg_surface()),
+                ),
+            )
+        } else {
+            (
+                Span::styled(
+                    model_display,
+                    Style::default()
+                        .fg(text_primary())
+                        .bg(bg_surface())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(" {provider_display} · "),
+                    Style::default().fg(text_muted()).bg(bg_surface()),
+                ),
+            )
+        };
+
         let mut footer_spans = vec![
             Span::styled("▎", Style::default().fg(accent).bg(bg_surface())),
             Span::styled("  ", Style::default().bg(bg_surface())),
@@ -522,17 +552,8 @@ pub(crate) fn render_composer_card(
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(" · ", Style::default().fg(text_muted()).bg(bg_surface())),
-            Span::styled(
-                model_display,
-                Style::default()
-                    .fg(text_primary())
-                    .bg(bg_surface())
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!(" {provider_display} · "),
-                Style::default().fg(text_muted()).bg(bg_surface()),
-            ),
+            lead_model_span,
+            provider_span,
             Span::styled(
                 thinking_label,
                 Style::default().fg(thinking_color).bg(bg_surface()),
