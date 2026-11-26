@@ -461,19 +461,39 @@ async fn register_clarify_tool(
 fn install_ui_bridge(
     ui: &Arc<ChatUi>,
     clarify_tx: &mpsc::UnboundedSender<(
+        Option<String>,
         crate::commands::clarify::ClarifyRequest,
         oneshot::Sender<crate::commands::clarify::ClarifyResponse>,
     )>,
     approval_tx: &mpsc::UnboundedSender<(
+        Option<String>,
         ApprovalRequest,
         oneshot::Sender<harness_core::ApprovalDecision>,
     )>,
     allow_all_session: &Arc<AtomicBool>,
 ) {
+    let (bridge_clarify_tx, mut bridge_clarify_rx) = mpsc::unbounded_channel();
+    let clarify_fwd = clarify_tx.clone();
+    tokio::spawn(async move {
+        while let Some((req, resp_tx)) = bridge_clarify_rx.recv().await {
+            if clarify_fwd.send((None, req, resp_tx)).is_err() {
+                break;
+            }
+        }
+    });
+    let (bridge_approval_tx, mut bridge_approval_rx) = mpsc::unbounded_channel();
+    let approval_fwd = approval_tx.clone();
+    tokio::spawn(async move {
+        while let Some((req, resp_tx)) = bridge_approval_rx.recv().await {
+            if approval_fwd.send((None, req, resp_tx)).is_err() {
+                break;
+            }
+        }
+    });
     let ui_for_bridge = ui.clone();
     harness_providers::opencode::set_ui_bridge(harness_providers::opencode::OpencodeUiBridge {
-        clarify_tx: clarify_tx.clone(),
-        approval_tx: approval_tx.clone(),
+        clarify_tx: bridge_clarify_tx,
+        approval_tx: bridge_approval_tx,
         allow_all: allow_all_session.clone(),
         update_context_used_fn: Some(Arc::new(move |tokens| {
             ui_for_bridge.update_context_used(tokens);
@@ -980,7 +1000,7 @@ async fn register_task_and_core_tools(
     (
         Arc<harness_core::tasks::BackgroundTaskQueue>,
         Arc<harness_core::tools::DelegateTaskTool>,
-        mpsc::UnboundedReceiver<(String, oneshot::Sender<Option<String>>)>,
+        mpsc::UnboundedReceiver<(Option<String>, String, oneshot::Sender<Option<String>>)>,
     ),
     HarnessError,
 > {

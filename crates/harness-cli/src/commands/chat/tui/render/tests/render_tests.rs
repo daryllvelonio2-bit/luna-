@@ -1766,7 +1766,7 @@ fn make_bg_slot(
     use std::sync::{Arc, Mutex};
     crate::commands::chat::tui::state::BackgroundSession {
         session_id: session_id.to_string(),
-        agent: st.template_agent.clone(),
+        agent: Arc::new(tokio::sync::Mutex::new((*st.template_agent).clone())),
         ui: Arc::new(crate::commands::chat::ui::ChatUi::new(false)),
         in_flight_tools: Arc::new(Mutex::new(Vec::new())),
         interruptions: Arc::new(Mutex::new(Vec::new())),
