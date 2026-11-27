@@ -41,6 +41,7 @@ pub(crate) fn test_dummy_tui_state() -> TuiState {
         turns: Vec::new(),
         turn_meta: Vec::new(),
         system_notices: Vec::new(),
+        deferred_commands: std::collections::VecDeque::new(),
         process_expanded: false,
         auto_hide_thinking: true,
         block_limit: None,

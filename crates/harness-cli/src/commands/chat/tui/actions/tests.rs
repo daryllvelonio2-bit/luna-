@@ -57,6 +57,18 @@ fn compaction_notice_expires_after_ttl() {
 }
 
 #[test]
+fn agent_free_probe_never_blocks_and_sees_a_held_lock() {
+    let agent = std::sync::Arc::new(tokio::sync::Mutex::new(0u8));
+    assert!(agent_is_free(&agent), "a released mutex reads as free");
+    let held = agent.try_lock().expect("first acquire succeeds");
+    // A running turn holds this guard for its whole duration; the probe must report busy without
+    // waiting, which is the whole point of the deferral.
+    assert!(!agent_is_free(&agent), "a held mutex reads as busy");
+    drop(held);
+    assert!(agent_is_free(&agent), "free again once the turn ends");
+}
+
+#[test]
 fn subagent_ui_entry_state_and_cancellation() {
     use super::SubagentUiEntry;
     let mut entry = SubagentUiEntry {

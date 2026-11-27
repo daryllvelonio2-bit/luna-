@@ -4,6 +4,21 @@ use colored::Colorize;
 
 use super::*;
 
+/// Whether the agent is free right now.
+///
+/// A running turn holds this mutex until it finishes, so `lock().await` on the UI thread freezes
+/// the whole screen — no redraw, no keys, no approval prompt. `try_lock` is the only way to ask
+/// without blocking; the command waits in `deferred_commands` instead.
+pub fn agent_is_free<T>(agent: &Arc<tokio::sync::Mutex<T>>) -> bool {
+    match agent.try_lock() {
+        Ok(guard) => {
+            drop(guard);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
 pub async fn submit_composer(
     env: &mut Env<'_>,
     st: &mut TuiState,
@@ -691,6 +706,17 @@ pub async fn run_slash_command(
             );
             st.prune_stale_notices();
         }
+        return Ok(Flow::Continue);
+    }
+
+    // A running turn holds the agent lock until it finishes. Awaiting it here would freeze the
+    // whole UI (no redraw, no keys, no approval prompt), so the command waits in the queue and
+    // the event loop runs it as soon as the lock is free.
+    if !agent_is_free(&env.agent) {
+        st.deferred_commands.push_back(cmd.to_string());
+        st.system_notices.push(SystemNotice::new(format!(
+            "⏸ Queued {name} — runs when the current turn finishes"
+        )));
         return Ok(Flow::Continue);
     }
 

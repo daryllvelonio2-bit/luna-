@@ -121,7 +121,15 @@ async fn refresh_agent_pins(env: &mut Env<'_>, st: &TuiState) {
         skills_slice,
         Some(&env.config.paths.skills_dir),
     );
-    let mut ag = env.agent.lock().await;
-    ag.set_pinned_skills(combined);
-    ag.set_pinned_skill_instructions(resolved);
+    // `try_lock`: a running turn holds the agent for its whole duration. The pin is already saved,
+    // so it takes effect on the next turn instead of freezing the screen for this one.
+    match env.agent.try_lock() {
+        Ok(mut ag) => {
+            ag.set_pinned_skills(combined);
+            ag.set_pinned_skill_instructions(resolved);
+        }
+        Err(_) => env.ui.set_transient_error(Some(
+            "Skill saved — it applies when the current turn finishes".to_string(),
+        )),
+    }
 }

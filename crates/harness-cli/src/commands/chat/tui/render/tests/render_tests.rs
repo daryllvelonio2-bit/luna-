@@ -750,6 +750,7 @@ fn ensure_settled_transcript_caches_and_appends_incrementally() {
     let (approval_reply_tx, approval_reply_rx) = tokio::sync::mpsc::unbounded_channel();
     let (voice_tx, voice_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut st = TuiState {
+        deferred_commands: std::collections::VecDeque::new(),
         turns: vec![TurnRecord {
             user_query: "turn one".to_string(),
             reasoning: None,

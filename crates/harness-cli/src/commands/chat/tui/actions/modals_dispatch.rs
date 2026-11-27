@@ -1146,9 +1146,16 @@ pub(crate) fn open_settings_voice_list_menu(env: &Env<'_>, st: &mut TuiState) {
 }
 
 pub(crate) async fn apply_feature_live(env: &Env<'_>, feature: Feature, enabled: bool) {
+    // `try_lock`, never `lock().await`: a running turn holds the agent for its whole duration, and
+    // blocking on it here would freeze the screen. Report instead of stalling.
+    let Ok(mut ag) = env.agent.try_lock() else {
+        env.ui.set_transient_error(Some(format!(
+            "{feature:?} was not changed — a turn is running, try again when it finishes"
+        )));
+        return;
+    };
     env.feature_toggles.set(feature, enabled);
     let registry = {
-        let mut ag = env.agent.lock().await;
         match feature {
             Feature::Memory => ag.set_memory_enabled(enabled),
             Feature::Notes => ag.set_notes_enabled(enabled),

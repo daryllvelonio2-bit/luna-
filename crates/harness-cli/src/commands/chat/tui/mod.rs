@@ -48,7 +48,10 @@ use super::todo;
 use super::turn::{can_auto_resume, drain_queue, launch_internal_turn};
 use super::ui::ANIMATION_INTERVAL;
 use crate::commands::context_window::context_window;
-use actions::{drain_tui_notices, handle_background_turn_end, handle_turn_end, refresh_tabs};
+use actions::{
+    agent_is_free, drain_tui_notices, handle_background_turn_end, handle_turn_end, refresh_tabs,
+    run_slash_command,
+};
 use render::{draw, FeatureLandingItem, FooterInfo, LandingFeaturesStatus};
 use state::{
     ActiveModal, AgentMode, BackgroundSession, ComposerState, LiveThinkingView, SlashPopupState,
@@ -226,6 +229,22 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
             .background_sessions
             .values()
             .any(|s| s.active_turn.is_some());
+
+        // A command deferred while a turn held the agent lock runs here, as soon as the lock is
+        // free. Deferring again cannot happen: the check above and this one use the same
+        // non-blocking probe, so nothing re-queues forever.
+        if !st.deferred_commands.is_empty() && st.active_turn.is_none() && agent_is_free(&env.agent)
+        {
+            if let Some(cmd) = st.deferred_commands.pop_front() {
+                let display = cmd.clone();
+                needs_redraw = true;
+                if run_slash_command(&mut env, &mut st, &mut terminal, &cmd, &display).await?
+                    == Flow::Break
+                {
+                    break;
+                }
+            }
+        }
 
         tokio::select! {
             biased;
@@ -853,6 +872,7 @@ async fn init_tui_state(env: &mut Env<'_>) -> Result<TuiState, HarnessError> {
         modal: ActiveModal::None,
         slash_popup: SlashPopupState::default(),
         queue: VecDeque::new(),
+        deferred_commands: VecDeque::new(),
         current_cancel: CancellationToken::new(),
         active_turn: None,
         active_goal: None,

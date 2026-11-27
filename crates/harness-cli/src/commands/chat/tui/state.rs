@@ -1628,6 +1628,9 @@ pub struct TuiState {
     pub modal: ActiveModal,
     pub slash_popup: SlashPopupState,
     pub queue: VecDeque<String>,
+    /// Slash commands deferred because a turn held the agent lock. Drained by the event loop the
+    /// moment the lock is free, so a command never blocks the UI.
+    pub deferred_commands: VecDeque<String>,
     pub current_cancel: CancellationToken,
     pub active_turn: Option<tokio::task::JoinHandle<Result<TurnOutcome, HarnessError>>>,
     pub active_goal: Option<harness_core::GoalRunState>,
