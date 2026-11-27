@@ -1401,8 +1401,12 @@ mod tests {
     use std::path::PathBuf;
 
     fn temp_db() -> PathBuf {
+        // Windows' clock ticks in ~15 ms steps, so `timestamp_nanos` alone can hand two parallel
+        // tests the same file; the counter makes every call distinct.
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         std::env::temp_dir().join(format!(
-            "luna-transcript-migration-{}-{}.db",
+            "luna-transcript-migration-{}-{seq}-{}.db",
             std::process::id(),
             Utc::now().timestamp_nanos_opt().unwrap_or(0)
         ))
