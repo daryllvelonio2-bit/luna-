@@ -274,6 +274,11 @@ pub async fn run_slash_command(
             super::open_mcp_list(env, st);
             return Ok(Flow::Continue);
         }
+        // Same for `/skills`: the popup pins skills. `/skills pin|unpin|on|off` still dispatch.
+        "/skills" if arg.is_none() || arg == Some("list") => {
+            super::open_skills_list(env, st).await;
+            return Ok(Flow::Continue);
+        }
         "/sessions" | "/session" if arg.is_none() => {
             open_session_picker(env, st).await;
             return Ok(Flow::Continue);

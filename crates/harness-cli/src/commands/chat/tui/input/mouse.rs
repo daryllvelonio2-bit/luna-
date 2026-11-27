@@ -31,7 +31,8 @@ pub async fn handle_mouse(
                 | ActiveModal::ModelPicker { selected, .. }
                 | ActiveModal::ThinkingPicker { selected, .. }
                 | ActiveModal::SubagentsModal { selected, .. }
-                | ActiveModal::McpList { selected, .. } => {
+                | ActiveModal::McpList { selected, .. }
+                | ActiveModal::SkillsList { selected, .. } => {
                     *selected = selected.saturating_sub(1);
                 }
                 ActiveModal::TextModal { scroll, .. }
@@ -106,6 +107,12 @@ pub async fn handle_mouse(
                     items, selected, ..
                 } => {
                     *selected = (*selected + 1).min(items.len().saturating_sub(1));
+                }
+                ActiveModal::McpList { entries, selected } => {
+                    *selected = (*selected + 1).min(entries.len().saturating_sub(1));
+                }
+                ActiveModal::SkillsList { entries, selected } => {
+                    *selected = (*selected + 1).min(entries.len().saturating_sub(1));
                 }
                 ActiveModal::TextModal { lines, scroll, .. } => {
                     let max_s = lines.len().saturating_sub(1);

@@ -1497,6 +1497,39 @@ pub(crate) fn render_modal(
             st.modal_rect = Some(rect);
             render_subagent_inspector(frame, rect, items, *current_idx, *scroll, spinner_tick);
         }
+        ActiveModal::SkillsList { entries, selected } => {
+            let (w, h) = responsive_modal_size(screen, 4, 2, 54, 88, 12, 24);
+            let rect = centered_rect(screen, w, h);
+            st.modal_rect = Some(rect);
+            let inner = draw_modal_frame(frame, rect, "Skills list", "esc close · space toggle");
+            let inner_w = inner.width as usize;
+            let name_w = entries
+                .iter()
+                .map(|e| e.name.len())
+                .max()
+                .unwrap_or(0)
+                .clamp(8, 28);
+            let mut lines: Vec<Line<'static>> = Vec::new();
+            for (idx, entry) in entries.iter().enumerate() {
+                let is_sel = idx == *selected;
+                let prefix = if is_sel { " ▸ " } else { "   " };
+                let row = format!(
+                    "{prefix}{:<name_w$}   {}",
+                    truncate_str(&entry.name, name_w),
+                    entry.status_label(),
+                    name_w = name_w
+                );
+                let style = if is_sel {
+                    Style::default()
+                        .fg(text_primary())
+                        .bg(bg_approval_selected())
+                } else {
+                    Style::default().fg(text_muted()).bg(bg_elevated())
+                };
+                lines.push(Line::from(Span::styled(truncate_str(&row, inner_w), style)));
+            }
+            frame.render_widget(Paragraph::new(lines), inner);
+        }
         ActiveModal::McpList { entries, selected } => {
             let (w, h) = responsive_modal_size(screen, 4, 2, 54, 88, 12, 24);
             let rect = centered_rect(screen, w, h);

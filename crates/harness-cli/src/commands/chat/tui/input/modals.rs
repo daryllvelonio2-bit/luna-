@@ -760,6 +760,41 @@ pub async fn handle_modal_key(
                 }
             }
         }
+        ActiveModal::SkillsList {
+            mut entries,
+            mut selected,
+        } => {
+            // Esc closes without rebuilding: the modal was already replaced with `None`.
+            if key.code == KeyCode::Esc || key.code == KeyCode::Char('q') {
+                return Ok(Flow::Continue);
+            }
+            let len = entries.len();
+            match key.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    selected = if selected == 0 {
+                        len.saturating_sub(1)
+                    } else {
+                        selected - 1
+                    };
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if len > 0 {
+                        selected = (selected + 1) % len;
+                    }
+                }
+                KeyCode::Char(' ') => {
+                    if let Some(entry) = entries.get_mut(selected) {
+                        entry.cycle();
+                    }
+                    // Keep the modal in state so the key handler can read the row it just set.
+                    st.modal = ActiveModal::SkillsList { entries, selected };
+                    actions::apply_skill_pin(env, st, selected).await;
+                    return Ok(Flow::Continue);
+                }
+                _ => {}
+            }
+            st.modal = ActiveModal::SkillsList { entries, selected };
+        }
         ActiveModal::McpList {
             mut entries,
             mut selected,

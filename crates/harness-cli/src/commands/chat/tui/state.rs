@@ -1314,6 +1314,11 @@ pub enum ActiveModal {
         entries: Vec<McpListEntry>,
         selected: usize,
     },
+    /// The `/skills` popup: one row per installed skill, space cycles its pinning.
+    SkillsList {
+        entries: Vec<SkillListEntry>,
+        selected: usize,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1351,6 +1356,39 @@ impl McpListEntry {
     }
 
     /// Space cycles disabled -> session -> global -> disabled, so one key reaches every state.
+    pub fn cycle(&mut self) {
+        if self.session {
+            self.session = false;
+            self.global = true;
+        } else if self.global {
+            self.global = false;
+        } else {
+            self.session = true;
+        }
+    }
+}
+
+/// One installed skill in the `/skills` popup. A skill is either pinned globally (config), pinned
+/// for this session (store), or not pinned — the same three states, reached the same way.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SkillListEntry {
+    pub name: String,
+    pub global: bool,
+    pub session: bool,
+}
+
+impl SkillListEntry {
+    pub fn status_label(&self) -> &'static str {
+        if self.session {
+            "pinned for this session"
+        } else if self.global {
+            "pinned globally"
+        } else {
+            "not pinned"
+        }
+    }
+
+    /// Space cycles not pinned -> session -> global -> not pinned.
     pub fn cycle(&mut self) {
         if self.session {
             self.session = false;
@@ -1937,6 +1975,7 @@ fn roll_number(from: usize, to: usize, progress: f32, direction: i8) -> String {
 mod roll_tests {
     use super::roll_number;
     use super::McpListEntry;
+    use super::SkillListEntry;
 
     #[test]
     fn rolls_the_changed_digit_upward() {
@@ -1990,5 +2029,21 @@ mod roll_tests {
             session: false,
         };
         assert_eq!(configured.status_label(), "enabled globally");
+    }
+
+    #[test]
+    fn skill_entry_cycle_reaches_every_state_and_wraps() {
+        let mut entry = SkillListEntry {
+            name: "ponytail".to_string(),
+            global: false,
+            session: false,
+        };
+        assert_eq!(entry.status_label(), "not pinned");
+        entry.cycle();
+        assert!(entry.session && !entry.global);
+        entry.cycle();
+        assert!(entry.global && !entry.session);
+        entry.cycle();
+        assert!(!entry.global && !entry.session, "third press wraps to off");
     }
 }
