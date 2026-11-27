@@ -185,7 +185,11 @@ async fn apply_model_switch(
             discovery.clone(),
             config.providers.get(chosen_provider),
         )?
-        .with_session_id(session_id),
+        .with_session_id(session_id)
+        .with_image_fallback(
+            config.model.image_fallback_provider.clone(),
+            config.model.image_fallback_model.clone(),
+        ),
     );
 
     {

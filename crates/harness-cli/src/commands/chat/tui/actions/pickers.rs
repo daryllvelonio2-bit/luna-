@@ -633,6 +633,7 @@ pub async fn apply_model_target(
             model,
             env.config.tools.approval_reasoning_effort,
         ),
+        ModelTarget::ImageFallback => apply_image_fallback_choice(env, st, provider, model),
         ModelTarget::Worker(name) => apply_worker_target(env, st, &name, provider, model),
         ModelTarget::OrchestratorMain => {
             if let Some(ref mut draft) = st.orchestrator_draft {

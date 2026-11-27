@@ -64,6 +64,25 @@ pub(crate) fn format_approval_model_badge(env: &Env<'_>, st: &TuiState) -> Strin
     }
 }
 
+/// Persist and apply the model that describes images the session model cannot read.
+pub fn apply_image_fallback_choice(
+    env: &mut Env<'_>,
+    st: &mut TuiState,
+    provider: &str,
+    model: &str,
+) -> Result<(), HarnessError> {
+    let layers = harness_core::config::process_layers(crate::commands::config::catalog_defaults())?;
+    harness_core::config::set_in_file(&layers, "model.image_fallback_provider", provider)?;
+    harness_core::config::set_in_file(&layers, "model.image_fallback_model", model)?;
+    env.config.model.image_fallback_provider = Some(provider.to_string());
+    env.config.model.image_fallback_model = Some(model.to_string());
+    notify_setting_change(
+        st,
+        format!("✔ Image fallback model set to {provider}/{model}"),
+    );
+    Ok(())
+}
+
 pub fn apply_approval_model_choice(
     env: &mut Env<'_>,
     st: &mut TuiState,
@@ -378,6 +397,13 @@ pub(crate) fn feature_status_badge(env: &Env<'_>, feature: Feature) -> String {
 
 pub(crate) fn open_settings_menu(env: &Env<'_>, st: &mut TuiState, selected: usize) {
     let config = &env.config;
+    let image_fallback_label = match (
+        config.model.image_fallback_provider.as_deref(),
+        config.model.image_fallback_model.as_deref(),
+    ) {
+        (Some(provider), Some(model)) => format!("{provider}/{model}"),
+        _ => "none".to_string(),
+    };
     let limit = match config.display.block_limit {
         None => "uncapped".to_string(),
         Some(1) => "1 line".to_string(),
@@ -423,10 +449,11 @@ pub(crate) fn open_settings_menu(env: &Env<'_>, st: &mut TuiState, selected: usi
             format!("Notes · {}", feature_status_badge(env, Feature::Notes)),
             format!("Memory saver · {saver}"),
             format!("Approval model · {approval_model}"),
+            format!("Image fallback model · {image_fallback_label}"),
             format!("Voice mode · {voice_label}"),
             "View current settings summary".to_string(),
         ],
-        selected: selected.min(11),
+        selected: selected.min(12),
         action: SelectAction::SettingsMain,
     };
 }

@@ -44,7 +44,8 @@ pub async fn run_select_action(
             }
             2..=8 => toggle_settings_main_item(env, st, choice).await,
             9 => open_provider_picker_for(env, st, ModelTarget::Approval).await,
-            10 => open_settings_voice_menu(env, st, 0),
+            10 => open_provider_picker_for(env, st, ModelTarget::ImageFallback).await,
+            11 => open_settings_voice_menu(env, st, 0),
             _ => {
                 let summary = format_settings_summary(env.config, Some(env.feature_toggles));
                 show_text_modal(st, "Current CLI Settings", &summary);
@@ -52,7 +53,7 @@ pub async fn run_select_action(
         },
         SelectAction::SettingsVoice => match choice {
             1 => open_settings_voice_list_menu(env, st),
-            7 => open_settings_menu(env, st, 10),
+            7 => open_settings_menu(env, st, 11),
             _ => {
                 let prev_provider = env.config.voice.provider.clone();
                 let arg = match choice {

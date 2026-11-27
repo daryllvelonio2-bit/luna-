@@ -258,7 +258,11 @@ fn build_provider_setup(
             discovery.clone(),
             config.providers.get(&session.current_provider),
         )?
-        .with_session_id(&session.session_id),
+        .with_session_id(&session.session_id)
+        .with_image_fallback(
+            config.model.image_fallback_provider.clone(),
+            config.model.image_fallback_model.clone(),
+        ),
     );
 
     // Compaction model: priority is session-specific override -> config setting -> active model

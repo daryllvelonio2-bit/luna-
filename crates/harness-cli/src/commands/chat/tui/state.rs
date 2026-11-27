@@ -39,6 +39,8 @@ pub enum ModelTarget {
     BgSaver,
     /// The model used to answer questions or suggestions inside the approval popup.
     Approval,
+    /// The model asked to describe an image when the session model rejects one.
+    ImageFallback,
     /// A named worker's model (`/worker <name>`).
     Worker(String),
     /// Main model inside the `/orchestrator` editor.

@@ -366,6 +366,13 @@ impl Default for CheckpointSettings {
 pub struct ModelSettings {
     pub provider: String,
     pub default: String,
+    /// Provider asked to describe a pasted image when the session model turns out not to accept
+    /// one. Paired with `image_fallback_model`; empty means an image rejection surfaces as an
+    /// error instead of a description.
+    #[serde(default)]
+    pub image_fallback_provider: Option<String>,
+    #[serde(default)]
+    pub image_fallback_model: Option<String>,
 }
 
 /// Who writes durable memory.

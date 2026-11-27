@@ -859,11 +859,8 @@ where
         // Runtime feature toggles (`/memory off`, `/notes off`, `/skills off`, `/mcp off`) remove
         // the owned tools from the request entirely: the model cannot ask for what it cannot see.
         tools.retain(|tool| self.config.tool_enabled(&tool.name));
-        // A text-only model gets no image tool: every call would read a file only to be told
-        // the pixels were dropped, which spends a round and teaches nothing.
-        if !capabilities.vision {
-            tools.retain(|tool| tool.name != "view_image");
-        }
+        // Images are always offered: a model that cannot read one is handled by the provider's
+        // image fallback, so withholding the tool would deny it the pixels twice.
         if !capabilities.tool_use {
             if !tools.is_empty() {
                 warn!(

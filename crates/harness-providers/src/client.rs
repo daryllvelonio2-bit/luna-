@@ -350,6 +350,14 @@ pub struct GenericProviderClient {
     http_client: reqwest::Client,
     default_model: String,
     session_id: Option<String>,
+    /// `provider`/`model` asked to describe an image when this client's model turns out not to
+    /// accept one. Empty means no fallback: an image rejection surfaces as an error.
+    image_fallback: Option<(String, String)>,
+    /// Set once a request has been rejected for carrying an image, so later turns describe the
+    /// images up front instead of paying a rejection round trip every time.
+    images_must_be_described: std::sync::atomic::AtomicBool,
+    /// One description per pasted image, so a replayed screenshot is described once per process.
+    image_descriptions: std::sync::Mutex<std::collections::HashMap<u64, String>>,
 }
 
 impl GenericProviderClient {
@@ -377,7 +385,16 @@ impl GenericProviderClient {
             http_client: build_http_client(descriptor.timeout_secs)?,
             default_model: default_model.into(),
             session_id: None,
+            image_fallback: None,
+            images_must_be_described: std::sync::atomic::AtomicBool::new(false),
+            image_descriptions: std::sync::Mutex::new(std::collections::HashMap::new()),
         })
+    }
+
+    /// Use `provider`/`model` to describe an image when this client's model rejects one.
+    pub fn with_image_fallback(mut self, provider: Option<String>, model: Option<String>) -> Self {
+        self.image_fallback = provider.zip(model);
+        self
     }
 
     pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
@@ -1097,10 +1114,6 @@ impl GenericProviderClient {
     /// non-Google provider is unaffected — it neither sends a signature nor is sent one.
     fn serialize_messages(&self, messages: &[Message], model: &str) -> serde_json::Value {
         let enforce_signatures = thought_signature::model_enforces_thought_signature(model);
-        // Vision is a property of the model, so the serializer is told once per request whether
-        // pasted images may become content parts.
-        let vision = crate::capability::resolve(&self.provider_id, model).vision;
-        let mut dropped_images = false;
         let mut list = Vec::new();
         for m in messages {
             let role_str = match m.role {
@@ -1115,10 +1128,9 @@ impl GenericProviderClient {
             });
 
             if let Some(ref text) = m.content {
-                if !vision && carries_attached_image(role_str, text) {
-                    dropped_images = true;
-                }
-                msg_obj["content"] = serialize_content_with_images(role_str, text, vision);
+                // Images are always sent: a model that cannot decode one is caught by the image
+                // fallback in `complete`, which describes the pixels instead of dropping them.
+                msg_obj["content"] = serialize_content_with_images(role_str, text);
             } else if m.role == Role::Assistant {
                 msg_obj["content"] = serde_json::Value::Null;
             }
@@ -1160,15 +1172,6 @@ impl GenericProviderClient {
 
             list.push(msg_obj);
         }
-        if dropped_images {
-            // Once per request, not once per replayed message: a session that pasted a screenshot
-            // an hour ago still carries it, and the log should say so once.
-            warn!(
-                provider = %self.provider_id,
-                model = %model,
-                "dropped pasted image(s): this model has no vision capability, so the pixels cannot be sent (the model is told an image was omitted)"
-            );
-        }
         json!(list)
     }
 
@@ -1203,6 +1206,61 @@ impl ModelProvider for GenericProviderClient {
     }
 
     async fn complete(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        options: &CompletionOptions,
+    ) -> Result<Message, HarnessError> {
+        use std::sync::atomic::Ordering;
+
+        // A model that already rejected an image gets the descriptions up front: paying the
+        // rejection once per turn would double every request that carries a screenshot.
+        let prepared;
+        let attempt = if self.images_must_be_described.load(Ordering::SeqCst)
+            && messages.iter().any(message_carries_image)
+        {
+            self.describe_uncached_images(messages).await?;
+            prepared = self.rewrite_images_as_text(messages);
+            &prepared[..]
+        } else {
+            messages
+        };
+
+        let first = self.complete_inner(attempt, tools, options).await;
+        if let Err(error) = &first {
+            if self.image_fallback.is_some() && is_image_rejection(error) {
+                // The request named an image the model cannot read. Ask the fallback model to
+                // describe it, then retry this same request with prose in place of the pixels.
+                self.describe_uncached_images(messages).await?;
+                self.images_must_be_described.store(true, Ordering::SeqCst);
+                let rewritten = self.rewrite_images_as_text(messages);
+                return self.complete_inner(&rewritten, tools, options).await;
+            }
+        }
+        first
+    }
+
+    fn capabilities(&self) -> ModelCapabilities {
+        crate::capability::resolve(&self.provider_id, &self.default_model)
+    }
+
+    async fn stream(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        options: &CompletionOptions,
+    ) -> Result<BoxStream<'static, Result<StreamEvent, HarnessError>>, HarnessError> {
+        self.stream_inner(messages, tools, options).await
+    }
+
+    async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, HarnessError> {
+        self.embed_inner(texts).await
+    }
+}
+
+impl GenericProviderClient {
+    /// The provider call itself; the image fallback wrapper lives in `complete`.
+    async fn complete_inner(
         &self,
         messages: &[Message],
         tools: &[ToolDefinition],
@@ -1262,7 +1320,7 @@ impl ModelProvider for GenericProviderClient {
         self.completion_from_response(&resp_json)
     }
 
-    async fn stream(
+    async fn stream_inner(
         &self,
         messages: &[Message],
         tools: &[ToolDefinition],
@@ -1330,7 +1388,7 @@ impl ModelProvider for GenericProviderClient {
         Ok(Box::pin(mapped))
     }
 
-    async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, HarnessError> {
+    async fn embed_inner(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, HarnessError> {
         let (headers, query_param, _secret) = self.build_auth_headers().await?;
         let mut url = format!("{}/embeddings", self.base_url);
         if let Some(q) = query_param {
@@ -1376,26 +1434,102 @@ impl ModelProvider for GenericProviderClient {
         Ok(embeddings)
     }
 
-    /// What this client's resolved model can be asked to do. The model is the one every call will
-    /// use unless `CompletionOptions::model` overrides it, so the answer is about `default_model`
-    /// — the same model the request body names (`catalog` + `capability` are the two halves of
-    /// "what is this model": its window and its kind).
-    fn capabilities(&self) -> ModelCapabilities {
-        crate::capability::resolve(&self.provider_id, &self.default_model)
+    /// Describe every pasted image the cache does not know yet, using the fallback model.
+    async fn describe_uncached_images(&self, messages: &[Message]) -> Result<(), HarnessError> {
+        let Some((ref provider, ref model)) = self.image_fallback else {
+            return Ok(());
+        };
+        let pending: Vec<String> = messages
+            .iter()
+            .flat_map(data_urls_in)
+            .filter(|url| self.cached_description(url).is_none())
+            .collect();
+        if pending.is_empty() {
+            return Ok(());
+        }
+        let client = GenericProviderClient::new(
+            provider.clone(),
+            model.clone(),
+            self.cred_manager.clone(),
+            self.discovery.clone(),
+            None,
+        )?;
+        for url in pending {
+            // The fallback client carries no fallback of its own, so a refusal here ends the
+            // attempt instead of recursing.
+            let asks = vec![
+                Message::system(DESCRIBE_INSTRUCTION),
+                Message::user(url.clone()),
+            ];
+            match client
+                .complete(&asks, &[], &CompletionOptions::default())
+                .await
+            {
+                Ok(reply) => {
+                    let text = reply.content.unwrap_or_default().trim().to_string();
+                    if !text.is_empty() {
+                        self.image_descriptions
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .insert(hash_url(&url), text);
+                    }
+                }
+                Err(error) => {
+                    warn!(
+                        fallback = %format!("{provider}/{model}"),
+                        "image fallback model failed: {error}"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn cached_description(&self, url: &str) -> Option<String> {
+        self.image_descriptions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&hash_url(url))
+            .cloned()
+    }
+
+    /// The same transcript with every pasted image replaced by its description.
+    fn rewrite_images_as_text(&self, messages: &[Message]) -> Vec<Message> {
+        let label = match &self.image_fallback {
+            Some((provider, model)) => format!("image described by {provider}/{model}"),
+            None => "image".to_string(),
+        };
+        let cache = self
+            .image_descriptions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        messages
+            .iter()
+            .map(|message| {
+                let Some(ref content) = message.content else {
+                    return message.clone();
+                };
+                if message.role != Role::User || !content.contains("data:image/") {
+                    return message.clone();
+                }
+                Message {
+                    content: Some(replace_data_urls(content, &label, &cache)),
+                    ..message.clone()
+                }
+            })
+            .collect()
     }
 }
 
 /// Serialize one message's text into a provider `content` value. A message that carries pasted
 /// screenshots (data URLs written by the CLI's Ctrl+V path) becomes the multimodal array form —
-/// `[{"type":"text",...},{"type":"image_url",...}]` — so vision-capable providers receive the
-/// image. Plain text stays a bare string, which every provider accepts and which keeps the
-/// common path byte-identical to what it was before images existed.
+/// `[{"type":"text",...},{"type":"image_url",...}]` — so every provider is sent the image. Plain
+/// text stays a bare string, which every provider accepts and which keeps the common path
+/// byte-identical to what it was before images existed.
 ///
-/// `vision` is the resolved capability of the model this request names. A model without it is
-/// sent a one-line note where the image was, instead of a URL it cannot decode: the pixels are
-/// dropped either way, but the model is told *why* it is being asked about an image it cannot
-/// see, so it answers "I cannot see that image" instead of inventing a description.
-fn serialize_content_with_images(role: &str, text: &str, vision: bool) -> serde_json::Value {
+/// A model that cannot decode the part is handled after the fact: `complete` retries with the
+/// image described by the configured fallback model instead of dropping it up front.
+fn serialize_content_with_images(role: &str, text: &str) -> serde_json::Value {
     // Only user turns carry pasted images; a data URL inside a system/assistant/tool string is
     // prose about an image, not an attachment, and must not be lifted into a content part.
     if !carries_attached_image(role, text) {
@@ -1424,14 +1558,10 @@ fn serialize_content_with_images(role: &str, text: &str, vision: bool) -> serde_
             if !flushed.is_empty() {
                 parts.push(json!({ "type": "text", "text": flushed }));
             }
-            if vision {
-                parts.push(json!({
-                    "type": "image_url",
-                    "image_url": { "url": url }
-                }));
-            } else {
-                parts.push(json!({ "type": "text", "text": IMAGE_OMITTED_NOTE }));
-            }
+            parts.push(json!({
+                "type": "image_url",
+                "image_url": { "url": url }
+            }));
             rest = after;
         }
         prose.push_str(rest);
@@ -1442,23 +1572,107 @@ fn serialize_content_with_images(role: &str, text: &str, vision: bool) -> serde_
         parts.push(json!({ "type": "text", "text": tail }));
     }
 
-    if !parts
-        .iter()
-        .any(|p| p["type"] == "image_url" || p["text"] == IMAGE_OMITTED_NOTE)
-    {
+    if !parts.iter().any(|p| p["type"] == "image_url") {
         return json!(text);
     }
 
     json!(parts)
 }
 
-/// What a model without vision is told where the image was. Deliberately explicit about the
-/// cause: a bare "[image]" invites the model to guess at the pixels.
-pub const IMAGE_OMITTED_NOTE: &str =
-    "[image omitted: this model does not accept image input, so the image could not be sent]";
+/// What the model is told where an image was when even the fallback model could not describe it.
+pub const IMAGE_UNDESCRIBED_NOTE: &str = "[image could not be described]";
+
+/// The instruction the fallback model answers when a pasted image has to become prose.
+const DESCRIBE_INSTRUCTION: &str = "Describe the attached image in complete, concrete detail for \
+another model that cannot see it: what it shows, any text it contains verbatim, its layout, and \
+the colours that carry meaning. Answer with the description only.";
+
+/// Every `data:image/...` token in a user message, in order.
+fn data_urls_in(message: &Message) -> Vec<String> {
+    let Some(ref content) = message.content else {
+        return Vec::new();
+    };
+    if message.role != Role::User {
+        return Vec::new();
+    }
+    content
+        .split_whitespace()
+        .filter(|token| token.starts_with("data:image/"))
+        .map(str::to_string)
+        .collect()
+}
 
 /// Whether this message carries a pasted image the serializer would lift into a content part.
-/// One predicate, used both to lift and to report the drop, so the two cannot drift apart.
+fn message_carries_image(message: &Message) -> bool {
+    message.role == Role::User
+        && message
+            .content
+            .as_deref()
+            .is_some_and(|text| text.contains("data:image/"))
+}
+
+/// A stable key for one image, so a replayed screenshot is described once.
+fn hash_url(url: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    url.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Swap every data URL for its description, keeping the words around it in place.
+fn replace_data_urls(
+    text: &str,
+    label: &str,
+    cache: &std::collections::HashMap<u64, String>,
+) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(start) = find_data_url(rest) {
+        let (before, url_and_rest) = rest.split_at(start);
+        let url_len = url_and_rest
+            .find(char::is_whitespace)
+            .unwrap_or(url_and_rest.len());
+        let (url, after) = url_and_rest.split_at(url_len);
+        out.push_str(before);
+        let described = cache
+            .get(&hash_url(url))
+            .map(String::as_str)
+            .unwrap_or(IMAGE_UNDESCRIBED_NOTE);
+        out.push_str(&format!("\n[{label}: {described}]\n"));
+        rest = after;
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Whether an error means "this request carried an image the model cannot decode".
+///
+/// Providers word it differently — `image_url is not supported`, `invalid content type`,
+/// `could not process image`, Gemini's `Unable to process input image` — so the test is a
+/// modality word plus a rejection word, not one vendor's sentence.
+fn is_image_rejection(error: &HarnessError) -> bool {
+    let HarnessError::ProviderError { message, .. } = error else {
+        return false;
+    };
+    let text = message.to_lowercase();
+    let mentions_image = text.contains("image")
+        || text.contains("vision")
+        || text.contains("modality")
+        || text.contains("multimodal");
+    let rejects = text.contains("not support")
+        || text.contains("unsupported")
+        || text.contains("invalid")
+        || text.contains("cannot process")
+        || text.contains("could not process")
+        || text.contains("unable to process")
+        || text.contains("400")
+        || text.contains("415")
+        || text.contains("422");
+    mentions_image && rejects
+}
+
+/// Whether this message carries a pasted image the serializer would lift into a content part.
+/// One predicate, used both to lift and to rewrite, so the two cannot drift apart.
 fn carries_attached_image(role: &str, text: &str) -> bool {
     role == "user" && text.contains("data:image/")
 }
@@ -1525,6 +1739,9 @@ mod tests {
             http_client: build_http_client(600).expect("http client"),
             default_model: "test-model".to_string(),
             session_id: None,
+            image_fallback: None,
+            images_must_be_described: std::sync::atomic::AtomicBool::new(false),
+            image_descriptions: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -1561,7 +1778,6 @@ mod tests {
         let content = serialize_content_with_images(
             "user",
             "what is in this image data:image/png;base64,iVBORw0KGgo exactly",
-            true,
         );
         let parts = content.as_array().expect("multimodal array");
         let kinds: Vec<&str> = parts.iter().map(|p| p["type"].as_str().unwrap()).collect();
@@ -1577,11 +1793,8 @@ mod tests {
     /// The clipboard path appends the URL as its own line; that shape must keep working.
     #[test]
     fn a_line_starting_with_a_data_url_is_lifted() {
-        let content = serialize_content_with_images(
-            "user",
-            "describe it\n\ndata:image/jpeg;base64,QUJD",
-            true,
-        );
+        let content =
+            serialize_content_with_images("user", "describe it\n\ndata:image/jpeg;base64,QUJD");
         let parts = content.as_array().expect("multimodal array");
         let kinds: Vec<&str> = parts.iter().map(|p| p["type"].as_str().unwrap()).collect();
         assert_eq!(kinds, vec!["text", "image_url"]);
@@ -1595,7 +1808,6 @@ mod tests {
         let content = serialize_content_with_images(
             "user",
             "two shots data:image/png;base64,AAAA and data:image/jpeg;base64,BBBB done",
-            true,
         );
         let parts = content.as_array().expect("multimodal array");
         let kinds: Vec<&str> = parts.iter().map(|p| p["type"].as_str().unwrap()).collect();
@@ -1613,53 +1825,90 @@ mod tests {
     #[test]
     fn a_data_url_mention_in_system_role_stays_plain_text() {
         let content =
-            serialize_content_with_images("system", "sent data:image/png;base64,QUJD once", true);
+            serialize_content_with_images("system", "sent data:image/png;base64,QUJD once");
         assert!(content.is_string(), "system turns are never multimodal");
     }
 
     #[test]
     fn prose_without_base64_marker_is_not_lifted() {
-        let content = serialize_content_with_images("user", "the spec data:image/png draft", true);
+        let content = serialize_content_with_images("user", "the spec data:image/png draft");
         assert!(content.is_string());
     }
 
-    /// A model without vision is told the image was omitted instead of being handed a base64 URL
-    /// it cannot decode — the pixels are dropped either way, and the model must know why.
+    /// Images are always sent now: a model that cannot decode one is caught by the fallback in
+    /// `complete`, not by dropping the pixels before the request is made.
     #[test]
-    fn a_model_without_vision_is_told_the_image_was_omitted() {
-        let content = serialize_content_with_images(
-            "user",
-            "what is this\ndata:image/png;base64,AAAA",
-            false,
-        );
-        let parts = content
-            .as_array()
-            .expect("the note replaces the image part");
+    fn an_image_is_lifted_for_every_model() {
+        let content =
+            serialize_content_with_images("user", "what is this\ndata:image/png;base64,AAAA");
+        let parts = content.as_array().expect("multimodal array");
         let kinds: Vec<&str> = parts.iter().map(|p| p["type"].as_str().unwrap()).collect();
-        assert_eq!(kinds, vec!["text", "text"]);
-        assert_eq!(parts[0]["text"], "what is this");
-        assert_eq!(parts[1]["text"], IMAGE_OMITTED_NOTE);
-        assert!(
-            !content.to_string().contains("base64"),
-            "no image bytes reach a model that cannot read them"
-        );
+        assert_eq!(kinds, vec!["text", "image_url"]);
+        assert_eq!(parts[1]["image_url"]["url"], "data:image/png;base64,AAAA");
     }
 
-    /// The same rule one level up: the request body built for a text-only model carries prose and
-    /// the omission note, and no `image_url` part at all.
     #[test]
-    fn a_text_only_model_request_carries_no_image_part() {
+    fn an_image_reaches_the_request_body_even_for_a_named_text_only_model() {
         let client = client_for("deepseek", "https://api.deepseek.com/v1");
         let body = client.serialize_messages(
             &[Message::user("look at this\ndata:image/png;base64,AAAA")],
             "deepseek-chat",
         );
-        let text = body.to_string();
         assert!(
-            !text.contains("image_url"),
-            "no image part for a text model"
+            body.to_string().contains("\"type\":\"image_url\""),
+            "the image part is in the body: {body}"
         );
-        assert!(text.contains(IMAGE_OMITTED_NOTE));
+    }
+
+    #[test]
+    fn a_rejection_for_carrying_an_image_is_recognized() {
+        let provider_error = |message: &str| HarnessError::ProviderError {
+            provider: "nvidia".to_string(),
+            message: message.to_string(),
+        };
+        assert!(is_image_rejection(&provider_error(
+            "400 invalid request: content of type image_url is not supported"
+        )));
+        assert!(is_image_rejection(&provider_error(
+            "Unable to process input image"
+        )));
+        assert!(is_image_rejection(&provider_error(
+            "the model does not support image input"
+        )));
+        // A rate limit or an unrelated 500 must not trigger a description round trip.
+        assert!(!is_image_rejection(&provider_error(
+            "429 rate limit exceeded"
+        )));
+        assert!(!is_image_rejection(&provider_error(
+            "500 internal server error"
+        )));
+    }
+
+    #[test]
+    fn a_description_replaces_the_image_and_keeps_the_words_around_it() {
+        let url = "data:image/png;base64,AAAA";
+        let mut cache = std::collections::HashMap::new();
+        cache.insert(hash_url(url), "a red square".to_string());
+        let rewritten = replace_data_urls(
+            &format!("look at this {url} please"),
+            "image described by nvidia/vl",
+            &cache,
+        );
+        assert!(!rewritten.contains("data:image/"), "{rewritten}");
+        assert!(rewritten.contains("a red square"), "{rewritten}");
+        assert!(rewritten.contains("look at this"), "{rewritten}");
+        assert!(rewritten.contains("please"), "{rewritten}");
+    }
+
+    #[test]
+    fn an_undescribed_image_still_names_itself_in_the_request() {
+        let rewritten = replace_data_urls(
+            "look at data:image/png;base64,AAAA",
+            "image",
+            &std::collections::HashMap::new(),
+        );
+        assert!(rewritten.contains(IMAGE_UNDESCRIBED_NOTE), "{rewritten}");
+        assert!(!rewritten.contains("data:image/"), "{rewritten}");
     }
 
     #[test]

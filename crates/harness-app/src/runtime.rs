@@ -170,7 +170,11 @@ impl AppRuntime {
                 discovery.clone(),
                 config.providers.get(&current_provider),
             )?
-            .with_session_id(&session_id),
+            .with_session_id(&session_id)
+            .with_image_fallback(
+                config.model.image_fallback_provider.clone(),
+                config.model.image_fallback_model.clone(),
+            ),
         );
 
         let (comp_p, comp_m) = match &record.compact_model {
