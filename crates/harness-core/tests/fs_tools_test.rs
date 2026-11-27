@@ -191,16 +191,14 @@ async fn test_read_before_write_and_stale_refusal() {
         .unwrap();
     assert!(!res.is_error);
 
-    // 2. Mutate out-of-band directly on disk
-    tokio::fs::write(root.join("test.txt"), "Changed out of band!\n")
+    // 2. Attempt to overwrite an existing file that was never read in this session -> refused
+    tokio::fs::write(root.join("unread.txt"), "Existing unread content\n")
         .await
         .unwrap();
-
-    // 3. Attempt write without reading -> refused
     let stale_res = writer
         .execute(
             "call_write_2",
-            &json!({ "path": "test.txt", "content": "Overwriting..." }),
+            &json!({ "path": "unread.txt", "content": "Overwriting..." }),
             &cancel,
         )
         .await
@@ -212,21 +210,20 @@ async fn test_read_before_write_and_stale_refusal() {
         stale_res.content
     );
 
-    // 4. Now read the file to update read cache
+    // 3. Read the file, edit it, and edit it again (even if changed on disk between edits) -> succeeds
     let read_res = reader
-        .execute("call_read_1", &json!({ "path": "test.txt" }), &cancel)
+        .execute("call_read_1", &json!({ "path": "unread.txt" }), &cancel)
         .await
         .unwrap();
     assert!(!read_res.is_error);
 
-    // 5. Subsequent patch succeeds
     let patch_res = patcher
         .execute(
             "call_patch_1",
             &json!({
-                "path": "test.txt",
-                "old_string": "Changed out of band!",
-                "new_string": "Properly patched!"
+                "path": "unread.txt",
+                "old_string": "Existing unread content",
+                "new_string": "First patch"
             }),
             &cancel,
         )
@@ -234,11 +231,34 @@ async fn test_read_before_write_and_stale_refusal() {
         .unwrap();
     assert!(
         !patch_res.is_error,
-        "Patch after read should succeed: {}",
+        "First patch after read should succeed: {}",
         patch_res.content
     );
 
-    let final_content = tokio::fs::read_to_string(root.join("test.txt"))
+    // Simulate a formatter / disk change between consecutive edits
+    tokio::fs::write(root.join("unread.txt"), "First patch (formatted)\n")
+        .await
+        .unwrap();
+
+    let second_patch_res = patcher
+        .execute(
+            "call_patch_2",
+            &json!({
+                "path": "unread.txt",
+                "old_string": "First patch (formatted)",
+                "new_string": "Properly patched!"
+            }),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert!(
+        !second_patch_res.is_error,
+        "Second patch after prior read should succeed: {}",
+        second_patch_res.content
+    );
+
+    let final_content = tokio::fs::read_to_string(root.join("unread.txt"))
         .await
         .unwrap();
     assert!(final_content.contains("Properly patched!"));

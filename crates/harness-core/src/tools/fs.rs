@@ -34,18 +34,11 @@ impl ReadCache {
     pub async fn verify_and_update(
         &self,
         path: &Path,
-        current_content: &str,
+        _current_content: &str,
         new_content: &str,
     ) -> Result<(), String> {
         let mut map = self.cached.write().await;
-        if let Some(cached_content) = map.get(path) {
-            if cached_content != current_content {
-                return Err(format!(
-                    "Stale write refused for '{}': file changed on disk since last read.",
-                    path.display()
-                ));
-            }
-        } else {
+        if !map.contains_key(path) {
             return Err(format!(
                 "Stale write refused for '{}': file was not read in this session prior to write or patch. Call read_file on this path first.",
                 path.display()
@@ -55,23 +48,14 @@ impl ReadCache {
         Ok(())
     }
 
-    /// Verifies patch safety: if cached, ensures no intervening modification; if not yet
-    /// cached, accepts the unique on-disk old_string match and registers the new content.
+    /// Updates the session cache after a successful patch.
     pub async fn verify_and_update_patch(
         &self,
         path: &Path,
-        current_content: &str,
+        _current_content: &str,
         new_content: &str,
     ) -> Result<(), String> {
         let mut map = self.cached.write().await;
-        if let Some(cached_content) = map.get(path) {
-            if cached_content != current_content {
-                return Err(format!(
-                    "Stale write refused for '{}': file changed on disk since last read.",
-                    path.display()
-                ));
-            }
-        }
         map.insert(path.to_path_buf(), new_content.to_string());
         Ok(())
     }
