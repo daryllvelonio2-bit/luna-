@@ -275,16 +275,17 @@ fn print_totals(totals: &UsageTotals) {
         "time",
         format_duration(totals.duration_ms)
     );
+    let io = format!(
+        "{} · {}",
+        format_tokens(totals.prompt_tokens),
+        format_tokens(totals.completion_tokens)
+    );
     println!(
         "  {:<LABEL$}{:<22}{:<8}{}",
         "tokens",
         format_tokens(totals.total_tokens),
         "in · out",
-        format!(
-            "{} · {}",
-            format_tokens(totals.prompt_tokens),
-            format_tokens(totals.completion_tokens)
-        )
+        io
     );
     // The bar is the cached share: the one number here that is a *ratio* rather than a total, and
     // so the one a row of dots communicates better than the percentage does.

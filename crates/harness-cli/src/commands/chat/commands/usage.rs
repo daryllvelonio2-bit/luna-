@@ -267,24 +267,18 @@ pub(crate) fn totals_report(title: &str, totals: &UsageTotals) -> Vec<String> {
         lines.push(format!("  {}  cache {cache}", dot_bar(ratio)));
     }
     if totals.failed_turns > 0 || totals.denied_calls > 0 {
-        lines.push(format!(
-            "  {}",
-            format!(
-                "{} turn(s) hit a tool error · {} denied call(s)",
-                totals.failed_turns, totals.denied_calls
-            )
-            .yellow()
-        ));
+        let note = format!(
+            "{} turn(s) hit a tool error · {} denied call(s)",
+            totals.failed_turns, totals.denied_calls
+        );
+        lines.push(format!("  {}", note.yellow()));
     }
     if totals.unpriced_turns > 0 {
-        lines.push(format!(
-            "  {}",
-            format!(
-                "{} turn(s) used a model with no price; set usage.prices to cost them",
-                totals.unpriced_turns
-            )
-            .dimmed()
-        ));
+        let note = format!(
+            "{} turn(s) used a model with no price; set usage.prices to cost them",
+            totals.unpriced_turns
+        );
+        lines.push(format!("  {}", note.dimmed()));
     }
     lines
 }
@@ -373,7 +367,11 @@ mod tests {
     fn an_unknown_window_is_reported_as_unknown() {
         let report = context_report("p/m", Some(&parts()), 0, "at 80%", 100).join("\n");
         assert!(report.contains("window unknown"), "{report}");
-        assert!(!report.contains('%'), "no share without a window: {report}");
+        // No row may claim a share: "0.0%" of an unknown window would read as "empty".
+        assert!(
+            !report.contains("tokens ("),
+            "no share without a window: {report}"
+        );
     }
 
     /// The cache is a bar and a share of the input, and it disappears when nothing measured it.
