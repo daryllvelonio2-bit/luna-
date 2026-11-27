@@ -33,10 +33,9 @@ pub enum ModelTarget {
     /// The persisted default model (`/default_model`). `global` is the scope the caller already
     /// supplied; `None` means ask with a follow-up picker.
     Default { global: Option<bool> },
-    /// The compaction model (`/compact-model`).
-    Compact { global: Option<bool> },
-    /// The background memory saver's model (`/bgsaver-model`).
-    BgSaver,
+    /// The unified background model (`/bg-model`) used for compaction, background memory/notes
+    /// saver, and `/instructions` prompt refinement.
+    BgModel { global: Option<bool> },
     /// The model used to answer questions or suggestions inside the approval popup.
     Approval,
     /// The model asked to describe an image when the session model rejects one.
@@ -130,6 +129,13 @@ pub enum SelectAction {
     UseOrchestrator {
         names: Vec<String>,
     },
+    InstructionsList {
+        ids: Vec<String>,
+    },
+    InstructionsAddMethod,
+    InstructionItemMenu {
+        id: String,
+    },
 }
 
 /// Text a generic TUI input modal hands back to the action layer.
@@ -166,6 +172,11 @@ pub enum InputAction {
     },
     MemoryCustomProject,
     VoiceCustomName,
+    InstructionCreate,
+    InstructionEdit {
+        id: String,
+    },
+    InstructionAskBgModel,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

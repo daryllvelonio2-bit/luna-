@@ -77,6 +77,20 @@ where
             String::new()
         };
 
+        let priority_block = if !self.config.priority_instructions.is_empty() {
+            let mut block =
+                String::from("\n\nPRIORITY INSTRUCTIONS (USER-DEFINED — ALWAYS FOLLOW):\n");
+            for (idx, body) in self.config.priority_instructions.iter().enumerate() {
+                let trimmed = body.trim();
+                if !trimmed.is_empty() {
+                    block.push_str(&format!("{}. {}\n", idx + 1, trimmed));
+                }
+            }
+            block
+        } else {
+            String::new()
+        };
+
         if let Some(ref orch_prompt) = self.config.orchestrator_prompt {
             if !orch_prompt.trim().is_empty() {
                 let base = self.fill_orchestrator_prompt(
@@ -89,8 +103,8 @@ where
                     &rich_output,
                 )?;
                 return Ok(format!(
-                    "{}{}{}{}",
-                    base, env_info, voice_instruction, pinned_skills_block
+                    "{}{}{}{}{}",
+                    base, priority_block, env_info, voice_instruction, pinned_skills_block
                 ));
             }
         }
@@ -108,8 +122,8 @@ where
         )?;
 
         Ok(format!(
-            "{}{}{}{}",
-            base, env_info, voice_instruction, pinned_skills_block
+            "{}{}{}{}{}",
+            base, priority_block, env_info, voice_instruction, pinned_skills_block
         ))
     }
 

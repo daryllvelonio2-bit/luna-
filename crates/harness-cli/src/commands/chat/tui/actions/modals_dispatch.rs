@@ -214,8 +214,8 @@ pub async fn run_select_action(
                 ModelTarget::Default { .. } => {
                     apply_default_target(env, st, &provider, &model, is_global).await
                 }
-                ModelTarget::Compact { .. } => {
-                    apply_compact_target(env, st, &provider, &model, is_global).await
+                ModelTarget::BgModel { .. } => {
+                    apply_bg_model_target(env, st, &provider, &model, is_global).await
                 }
                 _ => Ok(()),
             };
@@ -702,6 +702,58 @@ pub async fn run_select_action(
                 }
             }
         }
+        SelectAction::InstructionsList { ids } => {
+            if choice < ids.len() {
+                super::instructions::open_instruction_item_menu(env.config, st, &ids[choice]);
+            } else {
+                super::instructions::open_instruction_add_method(st);
+            }
+        }
+        SelectAction::InstructionsAddMethod => match choice {
+            0 => super::instructions::open_instruction_create_input(st, String::new()),
+            1 => super::instructions::open_instruction_ask_bg_model_input(st),
+            _ => {}
+        },
+        SelectAction::InstructionItemMenu { id } => match choice {
+            0 => {
+                if let Err(e) = super::instructions::toggle_instruction(env, &id).await {
+                    env.ui.set_transient_error(Some(e.to_string()));
+                }
+                super::instructions::open_instructions_list(env.config, st);
+            }
+            1 => {
+                let initial = super::instructions::load_instructions(env.config)
+                    .into_iter()
+                    .find(|i| i.id == id)
+                    .map(|i| i.body)
+                    .unwrap_or_default();
+                super::instructions::open_instruction_edit_input(st, id, initial);
+            }
+            2 => {
+                let current = super::instructions::load_instructions(env.config)
+                    .into_iter()
+                    .find(|i| i.id == id)
+                    .map(|i| i.body)
+                    .unwrap_or_default();
+                match super::instructions::suggest_instruction_with_bg_model(env, &current).await {
+                    Ok(suggested) => {
+                        super::instructions::open_instruction_edit_input(st, id, suggested);
+                    }
+                    Err(e) => {
+                        env.ui
+                            .set_transient_error(Some(format!("bg-model error: {e}")));
+                        super::instructions::open_instruction_edit_input(st, id, current);
+                    }
+                }
+            }
+            3 => {
+                if let Err(e) = super::instructions::delete_instruction(env, &id).await {
+                    env.ui.set_transient_error(Some(e.to_string()));
+                }
+                super::instructions::open_instructions_list(env.config, st);
+            }
+            _ => {}
+        },
     }
 }
 
@@ -1062,6 +1114,35 @@ pub async fn run_input_action(
                 }
             }
             open_settings_voice_menu(env, st, 1);
+        }
+        InputAction::InstructionCreate => {
+            if let Err(e) = super::instructions::upsert_instruction(env, None, value).await {
+                env.ui.set_transient_error(Some(e.to_string()));
+            }
+            super::instructions::open_instructions_list(env.config, st);
+        }
+        InputAction::InstructionEdit { id } => {
+            if let Err(e) = super::instructions::upsert_instruction(env, Some(id), value).await {
+                env.ui.set_transient_error(Some(e.to_string()));
+            }
+            super::instructions::open_instructions_list(env.config, st);
+        }
+        InputAction::InstructionAskBgModel => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                super::instructions::open_instructions_list(env.config, st);
+                return;
+            }
+            match super::instructions::suggest_instruction_with_bg_model(env, trimmed).await {
+                Ok(suggested) => {
+                    super::instructions::open_instruction_create_input(st, suggested);
+                }
+                Err(e) => {
+                    env.ui
+                        .set_transient_error(Some(format!("bg-model error: {e}")));
+                    super::instructions::open_instruction_create_input(st, trimmed.to_string());
+                }
+            }
         }
     }
 }

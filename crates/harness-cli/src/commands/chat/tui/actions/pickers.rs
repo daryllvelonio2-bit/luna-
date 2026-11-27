@@ -597,35 +597,19 @@ pub async fn apply_model_target(
                 Ok(())
             }
         },
-        ModelTarget::Compact { global } => match global {
-            Some(is_global) => apply_compact_target(env, st, provider, model, is_global).await,
+        ModelTarget::BgModel { global } => match global {
+            Some(is_global) => apply_bg_model_target(env, st, provider, model, is_global).await,
             None => {
                 open_model_scope(
                     env,
                     st,
-                    ModelTarget::Compact { global: None },
+                    ModelTarget::BgModel { global: None },
                     provider,
                     model,
                 );
                 Ok(())
             }
         },
-        ModelTarget::BgSaver => {
-            crate::commands::chat::commands::apply_bgsaver_model_choice(
-                &env.ui,
-                env.config,
-                &env.cred_manager,
-                &env.discovery,
-                &env.agent,
-                env.feature_toggles,
-                env.current_provider,
-                env.current_model,
-                env.session_id,
-                provider.to_string(),
-                model.to_string(),
-            )
-            .await
-        }
         ModelTarget::Approval => apply_approval_model_choice(
             env,
             st,

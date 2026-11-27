@@ -169,8 +169,15 @@ impl<'a> SlashContext<'a> {
         match name {
             "/default_model" | "/default-model" => self.cmd_default_model(arg).await,
             "/model" | "/models" | "/provider" => self.cmd_model().await,
-            "/compact-model" => self.cmd_compact_model(arg).await,
-            "/bgsaver-model" => self.cmd_bgsaver_model(arg).await,
+            "/bg-model" | "/compact-model" | "/bgsaver-model" => self.cmd_bg_model(arg).await,
+            "/instructions" => {
+                self.ui.emit_above(&format!(
+                    "{} Use {} in full-screen TUI mode to manage priority instructions.",
+                    "ℹ".cyan(),
+                    "/instructions".bold()
+                ));
+                Ok(SlashOutcome::Continue)
+            }
             "/reasoning" => self.cmd_reasoning(arg).await,
             "/thinking" | "/think" => self.cmd_thinking(arg).await,
             "/connect" => self.cmd_connect().await,

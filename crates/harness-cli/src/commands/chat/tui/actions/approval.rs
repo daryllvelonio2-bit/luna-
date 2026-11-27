@@ -262,7 +262,7 @@ pub(crate) async fn apply_default_target(
     .await
 }
 
-pub(crate) async fn apply_compact_target(
+pub(crate) async fn apply_bg_model_target(
     env: &mut Env<'_>,
     _st: &mut TuiState,
     provider: &str,
@@ -283,7 +283,25 @@ pub(crate) async fn apply_compact_target(
         model.to_string(),
         is_global,
     )
-    .await
+    .await?;
+
+    if is_global {
+        crate::commands::chat::commands::apply_bgsaver_model_choice(
+            &env.ui,
+            env.config,
+            &env.cred_manager,
+            &env.discovery,
+            &env.agent,
+            env.feature_toggles,
+            env.current_provider,
+            env.current_model,
+            env.session_id,
+            provider.to_string(),
+            model.to_string(),
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 pub(crate) fn open_model_scope(

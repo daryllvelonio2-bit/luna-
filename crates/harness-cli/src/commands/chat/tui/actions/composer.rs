@@ -521,20 +521,11 @@ pub async fn run_slash_command(
             open_provider_picker_for(env, st, ModelTarget::Default { global }).await;
             return Ok(Flow::Continue);
         }
-        "/compact-model" => {
-            let is_reset = arg.is_some_and(|value| {
-                matches!(
-                    value.trim().to_ascii_lowercase().as_str(),
-                    "reset" | "default"
-                )
-            });
-            if !is_reset {
-                let global = compact_scope_arg(arg);
-                open_provider_picker_for(env, st, ModelTarget::Compact { global }).await;
-                return Ok(Flow::Continue);
-            }
+        "/instructions" => {
+            super::instructions::open_instructions_list(env.config, st);
+            return Ok(Flow::Continue);
         }
-        "/bgsaver-model" => {
+        "/bg-model" | "/compact-model" | "/bgsaver-model" => {
             let is_reset = arg.is_some_and(|value| {
                 matches!(
                     value.trim().to_ascii_lowercase().as_str(),
@@ -542,7 +533,8 @@ pub async fn run_slash_command(
                 )
             });
             if !is_reset {
-                open_provider_picker_for(env, st, ModelTarget::BgSaver).await;
+                let global = compact_scope_arg(arg);
+                open_provider_picker_for(env, st, ModelTarget::BgModel { global }).await;
                 return Ok(Flow::Continue);
             }
         }

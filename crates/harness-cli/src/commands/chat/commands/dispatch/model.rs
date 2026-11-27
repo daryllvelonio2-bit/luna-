@@ -61,7 +61,7 @@ impl<'a> SlashContext<'a> {
         Ok(SlashOutcome::Continue)
     }
 
-    pub(super) async fn cmd_compact_model(
+    pub(super) async fn cmd_bg_model(
         &mut self,
         arg: Option<&str>,
     ) -> Result<SlashOutcome, HarnessError> {
@@ -84,19 +84,11 @@ impl<'a> SlashContext<'a> {
         .await
         {
             self.ui.emit_above(&format!(
-                "{} Failed to set compaction model: {}",
+                "{} Failed to set background compaction model: {}",
                 "✖".red().bold(),
                 e
             ));
         }
-        Ok(SlashOutcome::Continue)
-    }
-
-    pub(super) async fn cmd_bgsaver_model(
-        &mut self,
-        arg: Option<&str>,
-    ) -> Result<SlashOutcome, HarnessError> {
-        self.ui.redraw_input_line();
         if let Err(e) = handle_bgsaver_model_command(
             self.key_rx.as_deref_mut(),
             self.ui,

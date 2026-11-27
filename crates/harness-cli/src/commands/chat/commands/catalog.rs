@@ -135,12 +135,12 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         details: "Choose the default provider and model (this session or global)",
     },
     SlashCommand {
-        name: "/compact-model",
-        details: "Choose provider and model for context compaction",
+        name: "/bg-model",
+        details: "Choose provider and model for background tasks (compaction, memory saver, and /instructions)",
     },
     SlashCommand {
-        name: "/bgsaver-model",
-        details: "Choose provider and model for the background memory saver",
+        name: "/instructions",
+        details: "Manage priority user instructions added to the system prompt",
     },
     SlashCommand {
         name: "/thinking",

@@ -47,6 +47,7 @@ use crate::commands::sessions::{resolve_session, SessionSelection};
 
 pub mod approval;
 pub mod composer;
+pub mod instructions;
 pub mod mcp;
 pub mod modals_dispatch;
 pub mod orchestrator;

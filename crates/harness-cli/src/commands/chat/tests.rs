@@ -289,24 +289,26 @@ fn slash_commands_includes_sessions_picker() {
 }
 
 #[test]
-fn slash_commands_includes_background_saver_model() {
+fn slash_commands_includes_bg_model_and_instructions() {
     use super::commands::SLASH_COMMANDS;
     assert!(
-        SLASH_COMMANDS
-            .iter()
-            .any(|cmd| cmd.name == "/bgsaver-model"),
-        "/bgsaver-model must be registered in SLASH_COMMANDS"
+        SLASH_COMMANDS.iter().any(|cmd| cmd.name == "/bg-model"),
+        "/bg-model must be registered in SLASH_COMMANDS"
+    );
+    assert!(
+        SLASH_COMMANDS.iter().any(|cmd| cmd.name == "/instructions"),
+        "/instructions must be registered in SLASH_COMMANDS"
     );
 }
 
 #[test]
-fn a_worker_cannot_shadow_the_background_saver_command() {
+fn a_worker_cannot_shadow_the_bg_model_command() {
     use super::commands::command_entries;
     use harness_core::{Config, WorkerProfile};
 
     let mut config = Config::default();
     config.workers.insert(
-        "bgsaver-model".to_string(),
+        "bg-model".to_string(),
         WorkerProfile {
             provider: "nvidia".to_string(),
             model: "tiny-model".to_string(),
@@ -318,10 +320,10 @@ fn a_worker_cannot_shadow_the_background_saver_command() {
     assert!(
         entries
             .iter()
-            .filter(|entry| entry.name == "/bgsaver-model")
+            .filter(|entry| entry.name == "/bg-model")
             .count()
             == 1,
-        "the built-in /bgsaver-model must not be duplicated by a worker"
+        "the built-in /bg-model must not be duplicated by a worker"
     );
 }
 

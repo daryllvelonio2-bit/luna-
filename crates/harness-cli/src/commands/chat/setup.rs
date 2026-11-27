@@ -559,6 +559,8 @@ fn assemble_agent(
             Some(&config.paths.skills_dir),
         );
     }
+    agent_config.priority_instructions =
+        crate::commands::chat::tui::actions::instructions::active_instruction_bodies(config);
 
     let agent = Agent::new(provider, memory, notes, registry, agent_config.clone())
         .with_permissions(harness_core::PermissionEngine::validate(

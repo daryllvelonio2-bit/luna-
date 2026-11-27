@@ -176,6 +176,9 @@ pub struct AgentConfig {
     /// Runtime resolved instructions for pinned skills: `(name, instructions)`.
     #[serde(skip)]
     pub pinned_skill_instructions: Vec<(String, String)>,
+    /// Active user-defined priority instructions (`/instructions`) included in every system prompt.
+    #[serde(skip)]
+    pub priority_instructions: Vec<String>,
     /// The active model's context window in tokens, when the caller knows it.
     ///
     /// Compaction is a bound on the model's context, so one fixed token bar cannot be right for
@@ -279,6 +282,7 @@ impl Default for AgentConfig {
             auto_compact_turns: 20,
             pinned_skills: Vec::new(),
             pinned_skill_instructions: Vec::new(),
+            priority_instructions: Vec::new(),
             context_window: None,
             max_parallel_tool_calls: 4,
         }
@@ -960,6 +964,11 @@ where
     /// Set the list of pinned skill names.
     pub fn set_pinned_skills(&mut self, skills: Vec<String>) {
         self.config.pinned_skills = skills;
+    }
+
+    /// Set active user-defined priority instructions included in the system prompt.
+    pub fn set_priority_instructions(&mut self, instructions: Vec<String>) {
+        self.config.priority_instructions = instructions;
     }
 
     /// Set runtime resolved pinned skill instructions `[(name, instructions)]`.
