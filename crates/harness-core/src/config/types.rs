@@ -702,6 +702,8 @@ pub enum ThemeMode {
     #[default]
     Dark,
     Light,
+    /// Dark accents with no painted background, so the terminal's own background shows through.
+    Transparent,
 }
 
 impl ThemeMode {
@@ -713,13 +715,41 @@ impl ThemeMode {
         match self {
             Self::Dark => "dark",
             Self::Light => "light",
+            Self::Transparent => "transparent",
+        }
+    }
+
+    /// Menu wording for the settings surfaces.
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Dark => "Dark mode (default)",
+            Self::Light => "Light mode",
+            Self::Transparent => "Transparent (terminal background)",
+        }
+    }
+
+    /// Position in the theme list, and back — the order the menus present.
+    pub fn index(self) -> usize {
+        match self {
+            Self::Dark => 0,
+            Self::Light => 1,
+            Self::Transparent => 2,
+        }
+    }
+
+    pub fn from_index(index: usize) -> Self {
+        match index {
+            1 => Self::Light,
+            2 => Self::Transparent,
+            _ => Self::Dark,
         }
     }
 
     pub fn toggle(self) -> Self {
         match self {
             Self::Dark => Self::Light,
-            Self::Light => Self::Dark,
+            Self::Light => Self::Transparent,
+            Self::Transparent => Self::Dark,
         }
     }
 }
@@ -737,8 +767,9 @@ impl std::str::FromStr for ThemeMode {
         match s.trim().to_ascii_lowercase().as_str() {
             "dark" => Ok(Self::Dark),
             "light" => Ok(Self::Light),
+            "transparent" => Ok(Self::Transparent),
             other => Err(HarnessError::ConfigurationError(format!(
-                "theme must be 'dark' or 'light', got '{other}'"
+                "theme must be 'dark', 'light' or 'transparent', got '{other}'"
             ))),
         }
     }

@@ -112,29 +112,62 @@ pub const LIGHT_PALETTE: ThemePalette = ThemePalette {
     ],
 };
 
+/// Dark accents and no painted background: every full-area surface is [`Color::Reset`], so the
+/// terminal's own background (a translucent or image-backed profile) shows through instead of the
+/// charcoal canvas. Only the small selection surfaces keep a real color — a highlight drawn as
+/// `Reset` would be invisible.
+pub const TRANSPARENT_PALETTE: ThemePalette = ThemePalette {
+    bg_canvas: Color::Reset,
+    bg_surface: Color::Reset,
+    bg_elevated: Color::Reset,
+    bg_code: Color::Reset,
+    bg_selected: Color::Rgb(44, 48, 62),
+    bg_selection: Color::Rgb(64, 82, 124),
+    bg_approval: Color::Reset,
+    bg_approval_selected: Color::Rgb(56, 42, 18),
+    border_subtle: Color::Rgb(96, 102, 120),
+    accent_coral: Color::Rgb(255, 116, 72),
+    accent_plan: Color::Rgb(86, 168, 255),
+    accent_auto: Color::Rgb(250, 188, 72),
+    text_primary: Color::Rgb(246, 247, 250),
+    text_muted: Color::Rgb(158, 166, 182),
+    text_dim: Color::Rgb(104, 112, 128),
+    logo_gray: Color::Rgb(152, 160, 176),
+    green_ok: Color::Rgb(74, 214, 128),
+    red_err: Color::Rgb(248, 92, 108),
+    yellow_warn: Color::Rgb(245, 196, 88),
+    cyan_link: Color::Rgb(82, 196, 246),
+    code_inline: Color::Rgb(250, 188, 72),
+    code_keyword: Color::Rgb(214, 126, 248),
+    code_string: Color::Rgb(136, 214, 128),
+    code_number: Color::Rgb(246, 190, 96),
+    code_comment: Color::Rgb(118, 126, 144),
+    code_function: Color::Rgb(92, 182, 255),
+    code_key: Color::Rgb(72, 206, 220),
+    note_accent: Color::Rgb(224, 134, 248),
+    scanner_trail: [
+        Color::Rgb(196, 82, 50),
+        Color::Rgb(118, 48, 32),
+        Color::Rgb(60, 26, 18),
+    ],
+};
+
 static ACTIVE_THEME: AtomicU8 = AtomicU8::new(0);
 
 pub fn set_active_theme(mode: ThemeMode) {
-    let val = match mode {
-        ThemeMode::Dark => 0,
-        ThemeMode::Light => 1,
-    };
-    ACTIVE_THEME.store(val, Ordering::Relaxed);
+    ACTIVE_THEME.store(mode.index() as u8, Ordering::Relaxed);
 }
 
 pub fn active_theme() -> ThemeMode {
-    match ACTIVE_THEME.load(Ordering::Relaxed) {
-        1 => ThemeMode::Light,
-        _ => ThemeMode::Dark,
-    }
+    ThemeMode::from_index(ACTIVE_THEME.load(Ordering::Relaxed) as usize)
 }
 
 #[inline]
 pub fn palette_for(mode: ThemeMode) -> &'static ThemePalette {
-    if mode.is_light() {
-        &LIGHT_PALETTE
-    } else {
-        &DARK_PALETTE
+    match mode {
+        ThemeMode::Light => &LIGHT_PALETTE,
+        ThemeMode::Transparent => &TRANSPARENT_PALETTE,
+        ThemeMode::Dark => &DARK_PALETTE,
     }
 }
 
@@ -407,6 +440,27 @@ pub fn humanize_tokens(tokens: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transparent_palette_paints_no_background_but_keeps_text_and_selection() {
+        let t = palette_for(ThemeMode::Transparent);
+        // Nothing full-area is painted, so the terminal's own background survives.
+        assert_eq!(t.bg_canvas, Color::Reset);
+        assert_eq!(t.bg_surface, Color::Reset);
+        assert_eq!(t.bg_elevated, Color::Reset);
+        assert_eq!(t.bg_code, Color::Reset);
+        assert_eq!(t.bg_approval, Color::Reset);
+        // A selection must stay visible, so it keeps a real color.
+        assert_ne!(t.bg_selected, Color::Reset);
+        assert_ne!(t.bg_selection, Color::Reset);
+        // Text and accents are the dark palette's, so it stays legible on a dark terminal.
+        assert_eq!(t.text_primary, DARK_PALETTE.text_primary);
+        assert_eq!(t.accent_coral, DARK_PALETTE.accent_coral);
+        assert_eq!(
+            ThemeMode::from_index(ThemeMode::Transparent.index()),
+            ThemeMode::Transparent
+        );
+    }
 
     #[test]
     fn dark_and_light_palettes_have_distinct_canvas_and_readable_text() {

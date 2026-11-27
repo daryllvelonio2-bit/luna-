@@ -419,10 +419,7 @@ pub(crate) fn open_settings_menu(env: &Env<'_>, st: &mut TuiState, selected: usi
     } else {
         "off"
     };
-    let theme_label = match config.display.theme {
-        harness_core::ThemeMode::Dark => "dark mode (default)",
-        harness_core::ThemeMode::Light => "light mode",
-    };
+    let theme_label = config.display.theme.description();
     let saver = match config.memory.mode {
         harness_core::MemoryMode::Session => "Session writer",
         harness_core::MemoryMode::Background => "Background saver",

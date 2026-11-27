@@ -74,7 +74,7 @@ pub(crate) async fn handle_settings_command(
             }
             _ => {
                 ui.emit_above(&format!(
-                    "{} Unknown settings option: {}\nUsage: /settings [theme <dark|light>] [limit <1-10|all>] [collapse <on|off>] [thinking <on|off>] [voice <on|off|antigravity|openai|groq>] [show]",
+                    "{} Unknown settings option: {}\nUsage: /settings [theme <dark|light|transparent>] [limit <1-10|all>] [collapse <on|off>] [thinking <on|off>] [voice <on|off|antigravity|openai|groq>] [show]",
                     "•".cyan(),
                     arg_str
                 ));
@@ -118,8 +118,9 @@ fn parse_theme(val: &str) -> Result<ThemeMode, HarnessError> {
     match val.trim().to_ascii_lowercase().as_str() {
         "dark" | "darkmode" | "dark-mode" => Ok(ThemeMode::Dark),
         "light" | "lightmode" | "light-mode" => Ok(ThemeMode::Light),
+        "transparent" | "transparentmode" | "transparent-mode" => Ok(ThemeMode::Transparent),
         _ => Err(HarnessError::ConfigurationError(
-            "theme must be 'dark' or 'light'".to_string(),
+            "theme must be 'dark', 'light' or 'transparent'".to_string(),
         )),
     }
 }
@@ -146,10 +147,7 @@ async fn run_settings_wizard(
     } else {
         "Disabled (keep thinking visible)"
     };
-    let current_theme_desc = match config.display.theme {
-        ThemeMode::Dark => "Dark mode (Default)",
-        ThemeMode::Light => "Light mode",
-    };
+    let current_theme_desc = config.display.theme.description();
     let current_voice_desc = if config.voice.enabled {
         format!(
             "Enabled ({} · {})",
@@ -247,11 +245,12 @@ async fn run_settings_wizard(
             }
         }
         Some(3) => {
-            let theme_items = vec!["Dark Mode (Default)".to_string(), "Light Mode".to_string()];
-            let default_idx = match config.display.theme {
-                ThemeMode::Dark => 0,
-                ThemeMode::Light => 1,
-            };
+            let theme_items: Vec<String> =
+                [ThemeMode::Dark, ThemeMode::Light, ThemeMode::Transparent]
+                    .iter()
+                    .map(|mode| mode.description().to_string())
+                    .collect();
+            let default_idx = config.display.theme.index();
             let theme_choice = select_from_rx(
                 rx,
                 ui,
@@ -263,12 +262,7 @@ async fn run_settings_wizard(
             )
             .await;
             if let Some(idx) = theme_choice {
-                let theme = if idx == 1 {
-                    ThemeMode::Light
-                } else {
-                    ThemeMode::Dark
-                };
-                apply_theme(theme, ui, config, display_settings)?;
+                apply_theme(ThemeMode::from_index(idx), ui, config, display_settings)?;
             }
         }
         Some(4) => {
@@ -643,10 +637,7 @@ fn apply_theme(
     let layers = harness_core::config::process_layers(crate::commands::config::catalog_defaults())?;
     let _ = harness_core::config::set_in_file(&layers, "display.theme", theme.label());
 
-    let desc = match theme {
-        ThemeMode::Dark => "Dark mode (default)",
-        ThemeMode::Light => "Light mode",
-    };
+    let desc = theme.description();
 
     ui.emit_above(&format!(
         "{} Theme set to: {} (saved to config)",
@@ -686,10 +677,7 @@ pub(crate) fn format_settings_summary(
     } else {
         "Disabled (keep thinking visible)"
     };
-    let theme_str = match config.display.theme {
-        ThemeMode::Dark => "Dark mode (default)",
-        ThemeMode::Light => "Light mode",
-    };
+    let theme_str = config.display.theme.description();
     let compact_str = if config.auto_compact_enabled {
         "Enabled"
     } else {
@@ -823,6 +811,7 @@ mod tests {
         assert_eq!(parse_theme("DARK").unwrap(), ThemeMode::Dark);
         assert_eq!(parse_theme("light").unwrap(), ThemeMode::Light);
         assert_eq!(parse_theme("light-mode").unwrap(), ThemeMode::Light);
+        assert_eq!(parse_theme("transparent").unwrap(), ThemeMode::Transparent);
         assert!(parse_theme("sepia").is_err());
     }
 

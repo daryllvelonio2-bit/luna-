@@ -5,17 +5,14 @@ use super::*;
 pub async fn toggle_settings_main_item(env: &mut Env<'_>, st: &mut TuiState, choice: usize) {
     match choice {
         0 => {
-            let next = match env.config.display.theme {
-                harness_core::ThemeMode::Dark => "theme light",
-                harness_core::ThemeMode::Light => "theme dark",
-            };
+            let next = format!("theme {}", env.config.display.theme.toggle().label());
             if let Err(error) = handle_settings_command(
                 None,
                 &env.ui,
                 env.config,
                 &env.display_settings,
                 &mut st.process_expanded,
-                Some(next),
+                Some(next.as_str()),
             )
             .await
             {

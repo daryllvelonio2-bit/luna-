@@ -11,11 +11,15 @@ pub async fn run_select_action(
     match action {
         SelectAction::SettingsMain => match choice {
             0 => {
-                let items = vec!["Dark Mode (default)".to_string(), "Light Mode".to_string()];
-                let selected = match env.config.display.theme {
-                    harness_core::ThemeMode::Dark => 0,
-                    harness_core::ThemeMode::Light => 1,
-                };
+                let items: Vec<String> = [
+                    harness_core::ThemeMode::Dark,
+                    harness_core::ThemeMode::Light,
+                    harness_core::ThemeMode::Transparent,
+                ]
+                .iter()
+                .map(|mode| mode.description().to_string())
+                .collect();
+                let selected = env.config.display.theme.index();
                 st.modal = ActiveModal::SelectModal {
                     title: "Select Theme".to_string(),
                     items,
@@ -147,18 +151,17 @@ pub async fn run_select_action(
             open_settings_voice_menu(env, st, 1);
         }
         SelectAction::SettingsTheme => {
-            let arg = if choice == 1 {
-                "theme light"
-            } else {
-                "theme dark"
-            };
+            let arg = format!(
+                "theme {}",
+                harness_core::ThemeMode::from_index(choice).label()
+            );
             if let Err(error) = handle_settings_command(
                 None,
                 &env.ui,
                 env.config,
                 &env.display_settings,
                 &mut st.process_expanded,
-                Some(arg),
+                Some(arg.as_str()),
             )
             .await
             {
