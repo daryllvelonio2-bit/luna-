@@ -102,6 +102,9 @@ mod tests {
 
     /// The swap is what keeps the transcript out of the question's way, and what makes leaving put
     /// back exactly what was there instead of a rebuilt screen.
+    ///
+    /// Unix-only: measuring it means capturing the process's stdout with `dup2`.
+    #[cfg(unix)]
     #[test]
     fn a_modal_is_drawn_on_the_alternate_screen() {
         let captured = crate::commands::chat::ui::test_support::capture_stdout(|| {

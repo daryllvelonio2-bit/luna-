@@ -3,6 +3,8 @@
 use super::*;
 use crate::commands::chat::ui::MAX_DELEGATE_BLOCKS;
 
+const COMMAND_HEADER_COLLAPSED_LINES: usize = 3;
+
 pub(crate) fn build_chrome_lines(
     st: &TuiState,
     snap: &TuiLiveSnapshot,
@@ -1092,10 +1094,15 @@ pub(crate) fn format_opencode_tool_header(
     match tool_name {
         "terminal" | "shell" | "bash" => {
             if let Some(cmd) = arg_str("command") {
-                let first = cmd.lines().next().unwrap_or(cmd).trim();
-                let mut header = shorten_paths_in_text(first);
-                if cmd.lines().count() > 1 {
-                    header.push_str(" …");
+                let mut header = cmd
+                    .trim()
+                    .lines()
+                    .map(|line| shorten_paths_in_text(line.trim_end()))
+                    .filter(|line| !line.trim().is_empty())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if header.is_empty() {
+                    header = shorten_paths_in_text(cmd.trim());
                 }
                 if let Some(wd) = arg_str("workdir") {
                     header = format!("{header} (in {})", shorten_path(wd));
@@ -1328,6 +1335,14 @@ pub(crate) fn push_completed_tool_card(
     let prefix_w = prefix.width();
     let wrap_w = card_inner_w.saturating_sub(prefix_w).max(8);
     let header_lines = wrap_plain_text(&clean_header, wrap_w);
+    let total_header_lines = header_lines.len();
+    let visible_header_lines =
+        if !open && prefix == "$ " && total_header_lines > COMMAND_HEADER_COLLAPSED_LINES {
+            COMMAND_HEADER_COLLAPSED_LINES
+        } else {
+            total_header_lines
+        };
+    let hidden_header_lines = total_header_lines.saturating_sub(visible_header_lines);
 
     push_card_blank_row(
         out,
@@ -1337,7 +1352,11 @@ pub(crate) fn push_completed_tool_card(
         width,
     );
 
-    for (i, hline) in header_lines.into_iter().enumerate() {
+    for (i, hline) in header_lines
+        .into_iter()
+        .take(visible_header_lines)
+        .enumerate()
+    {
         let lead = if i == 0 {
             prefix.to_string()
         } else {
@@ -1369,6 +1388,27 @@ pub(crate) fn push_completed_tool_card(
                         .add_modifier(Modifier::BOLD),
                 ),
             ],
+        );
+    }
+    if hidden_header_lines > 0 {
+        let noun = if hidden_header_lines == 1 {
+            "line"
+        } else {
+            "lines"
+        };
+        push_card_row(
+            out,
+            Some(hit_targets),
+            Some(&click_target),
+            border_color,
+            width,
+            vec![Span::styled(
+                format!(
+                    "{}… ({hidden_header_lines} more {noun})",
+                    " ".repeat(prefix_w)
+                ),
+                Style::default().fg(text_dim()).bg(bg_surface()),
+            )],
         );
     }
 
@@ -1531,9 +1571,21 @@ pub(crate) fn push_running_tool_card(
     let prefix_w = format!("{spinner} {prefix}").width();
     let wrap_w = card_inner_w.saturating_sub(prefix_w).max(8);
     let header_lines = wrap_plain_text(&full_header, wrap_w);
+    let total_header_lines = header_lines.len();
+    let visible_header_lines =
+        if prefix == "$ " && total_header_lines > COMMAND_HEADER_COLLAPSED_LINES {
+            COMMAND_HEADER_COLLAPSED_LINES
+        } else {
+            total_header_lines
+        };
+    let hidden_header_lines = total_header_lines.saturating_sub(visible_header_lines);
 
     push_card_blank_row(out, None, None, accent_coral(), width);
-    for (i, hline) in header_lines.into_iter().enumerate() {
+    for (i, hline) in header_lines
+        .into_iter()
+        .take(visible_header_lines)
+        .enumerate()
+    {
         if i == 0 {
             push_card_row(
                 out,
@@ -1581,6 +1633,27 @@ pub(crate) fn push_running_tool_card(
                 ],
             );
         }
+    }
+    if hidden_header_lines > 0 {
+        let noun = if hidden_header_lines == 1 {
+            "line"
+        } else {
+            "lines"
+        };
+        push_card_row(
+            out,
+            None,
+            None,
+            accent_coral(),
+            width,
+            vec![Span::styled(
+                format!(
+                    "{}… ({hidden_header_lines} more {noun}){suffix}",
+                    " ".repeat(prefix_w)
+                ),
+                Style::default().fg(text_dim()).bg(bg_surface()),
+            )],
+        );
     }
 
     if !raw_tail.is_empty() || hidden_lines > 0 {

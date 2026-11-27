@@ -8,6 +8,9 @@
 /// that captures a `println!` gets an empty string and asserts nothing — check the returned
 /// bytes are non-empty when the assertion matters.
 ///
+/// Swapping the process's stdout handle is a `dup2` on a descriptor, which Windows does not have;
+/// the tests that use this are therefore `#[cfg(unix)]` rather than silently asserting nothing.
+///
 #[cfg(unix)]
 pub(crate) fn capture_stdout<F: FnOnce() + Send + 'static>(f: F) -> String {
     use std::io::{Read, Write};

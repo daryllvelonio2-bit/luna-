@@ -2305,3 +2305,122 @@ fn orchestrator_active_strips_active_tag_from_underlying_providers() {
     assert!(!items[1].is_current);
     assert_eq!(items[1].tag, "configured");
 }
+
+#[test]
+fn multiline_cd_command_shows_subsequent_lines_without_hiding() {
+    let item = TurnProcessItem {
+        tool_name: "terminal".to_string(),
+        call_formatted: "cd /home/janelle/Documents/GitHub/rust-agent-harness".to_string(),
+        result_formatted: "✔ ok".to_string(),
+        diff_lines: Vec::new(),
+        output: String::new(),
+        output_dropped: 0,
+        arguments: Some(serde_json::json!({
+            "command": "cd /home/janelle/Documents/GitHub/rust-agent-harness\ncargo test -p harness-cli"
+        })),
+        duration_secs: Some(0.4),
+        is_error: false,
+    };
+
+    let mut out = Vec::new();
+    let mut hits = Vec::new();
+    push_completed_tool_card(
+        &mut out,
+        &mut hits,
+        &item,
+        false,
+        TranscriptClickTarget::ToggleTurnTools(0, 0),
+        80,
+        76,
+    );
+    let joined = out.iter().map(line_text).collect::<Vec<_>>().join("\n");
+    assert!(
+        joined.contains("$ cd Documents/GitHub/rust-agent-harness"),
+        "expected shortened cd line, got:\n{joined}"
+    );
+    assert!(
+        joined.contains("cargo test -p harness-cli"),
+        "expected second command line to remain visible, got:\n{joined}"
+    );
+    assert!(
+        !joined.contains("more line"),
+        "2-line command should not be truncated, got:\n{joined}"
+    );
+}
+
+#[test]
+fn command_header_truncates_after_three_blocks_and_expands_on_click() {
+    let item = TurnProcessItem {
+        tool_name: "terminal".to_string(),
+        call_formatted: "cd /home/janelle/Documents/GitHub/rust-agent-harness".to_string(),
+        result_formatted: "✔ ok".to_string(),
+        diff_lines: Vec::new(),
+        output: String::new(),
+        output_dropped: 0,
+        arguments: Some(serde_json::json!({
+            "command": "cd /home/janelle/Documents/GitHub/rust-agent-harness\ncargo fmt --check\ncargo clippy --all-targets\ncargo test -p harness-cli\ngit status"
+        })),
+        duration_secs: Some(1.2),
+        is_error: false,
+    };
+
+    // Collapsed: first 3 command lines + clickable truncation indicator.
+    let mut out_closed = Vec::new();
+    let mut hits_closed = Vec::new();
+    push_completed_tool_card(
+        &mut out_closed,
+        &mut hits_closed,
+        &item,
+        false,
+        TranscriptClickTarget::ToggleTurnTools(0, 0),
+        80,
+        76,
+    );
+    let joined_closed = out_closed
+        .iter()
+        .map(line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(joined_closed.contains("$ cd Documents/GitHub/rust-agent-harness"));
+    assert!(joined_closed.contains("cargo fmt --check"));
+    assert!(joined_closed.contains("cargo clippy --all-targets"));
+    assert!(
+        !joined_closed.contains("cargo test -p harness-cli"),
+        "4th command line should be hidden when collapsed, got:\n{joined_closed}"
+    );
+    assert!(
+        joined_closed.contains("… (2 more lines)"),
+        "expected truncation indicator, got:\n{joined_closed}"
+    );
+    let indicator_row = out_closed
+        .iter()
+        .position(|l| line_text(l).contains("… (2 more lines)"))
+        .expect("truncation indicator row");
+    assert!(
+        hits_closed.iter().any(|(row, t)| {
+            *row == indicator_row && matches!(t, TranscriptClickTarget::ToggleTurnTools(0, 0))
+        }),
+        "truncation indicator row should be clickable to expand"
+    );
+
+    // Expanded: all 5 command lines visible, no truncation indicator.
+    let mut out_open = Vec::new();
+    let mut hits_open = Vec::new();
+    push_completed_tool_card(
+        &mut out_open,
+        &mut hits_open,
+        &item,
+        true,
+        TranscriptClickTarget::ToggleTurnTools(0, 0),
+        80,
+        76,
+    );
+    let joined_open = out_open
+        .iter()
+        .map(line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(joined_open.contains("cargo test -p harness-cli"));
+    assert!(joined_open.contains("git status"));
+    assert!(!joined_open.contains("more lines"));
+}

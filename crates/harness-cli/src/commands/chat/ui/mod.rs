@@ -37,14 +37,15 @@ pub use terminal::{get_terminal_height, get_terminal_width, RawTerminal};
 pub use view::{ChatUi, TuiLiveSnapshot, TuiPtyPane, MAX_DELEGATE_BLOCKS};
 
 // Names the test module reaches through `use super::*`. They were private items of this module
-// before the split and stay private to it.
-#[cfg(test)]
+// before the split and stay private to it. `unix` as well as `test`: the tests that reach them
+// capture stdout through `dup2` and do not compile elsewhere.
+#[cfg(all(test, unix))]
 use super::render::reasoning_rows;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use super::render::PROMPT;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use colored::Colorize;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use consts::{HINT_MIN_ROOM, IDLE_HINT};
 #[cfg(test)]
 use harness_core::tools::todo::TodoSnapshot;
@@ -61,5 +62,7 @@ use std::sync::atomic::Ordering;
 #[cfg(test)]
 use tail::TOOL_TAIL_LINES;
 
-#[cfg(test)]
+// The module measures the UI by capturing the process's stdout descriptor, which only `dup2` on
+// Unix can redirect; on Windows there is no capture to assert against.
+#[cfg(all(test, unix))]
 mod tests;
