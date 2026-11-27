@@ -605,7 +605,7 @@ where
         // A model that cannot call tools is not sent their schemas: every provider that accepts a
         // `tools` array for a model without tool use charges for the tokens, and some reject the
         // request outright.
-        let tools = self.turn_tools(&state.messages).await?;
+        let tools = self.turn_tools(&messages).await?;
 
         debug!("Starting agent task loop for query: '{}'", user_input);
 
@@ -676,10 +676,17 @@ where
         self.fold_if_over_threshold(state, system_text, current_tokens)
             .await;
 
+        let refreshed_tools = if state.loop_rounds > 0 {
+            Some(self.turn_tools(&state.messages).await?)
+        } else {
+            None
+        };
+        let active_tools = refreshed_tools.as_deref().unwrap_or(tools);
+
         debug!(
             "Invoking model completion with {} messages and {} tools",
             state.messages.len(),
-            tools.len()
+            active_tools.len()
         );
         let options = CompletionOptions {
             reasoning_effort: self.reasoning_effort,
@@ -688,7 +695,7 @@ where
 
         // Retrying on transient / overloaded errors with backoff
         let call = self
-            .complete_with_retry(state, tools, &options, cancel_token)
+            .complete_with_retry(state, active_tools, &options, cancel_token)
             .await?;
         let ModelCall {
             mut response,
