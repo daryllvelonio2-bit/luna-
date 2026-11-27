@@ -560,7 +560,7 @@ fn assemble_agent(
         );
     }
     agent_config.priority_instructions =
-        crate::commands::chat::tui::actions::instructions::active_instruction_bodies(config);
+        crate::commands::chat::tui::active_instruction_bodies(config);
 
     let agent = Agent::new(provider, memory, notes, registry, agent_config.clone())
         .with_permissions(harness_core::PermissionEngine::validate(

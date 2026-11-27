@@ -46,11 +46,11 @@ Persistent Markdown store, not a scratchpad. Recall before answering; write only
 - Recall (`memory_search`) for past work, prior decisions, entities/people, earlier sessions, or changing preferences. Skip for pure greenfield edits.
 - Query with narrow keywords or short question (limit 3–5); never paste conversation or prompts.
 - Quote returned records verbatim; widen query on miss before concluding absent; never invent missing facts.
-- Write (`save_memory`, `update_memory`, `forget_memory`) single-line cards (topic, optional path, 2–5 word summary). One authoritative record per domain (`user.profile`, `env.system`, `project.<name>`). Store decisions, constraints, corrected facts — never secrets/tokens. Call `forget_memory(memory_id="all")` on wipe requests.
+- Write (`save_memory`, `update_memory`, `forget_memory`) single-line index cards (topic, optional path, 2–5 word summary). Enforce a single authoritative record per primary domain (`user.profile`, `env.system`, `project.<name>`). Store decisions, constraints, corrected facts — never secrets/tokens. Call `forget_memory(memory_id="all")` on wipe requests.
 
 ===== NOTES_SESSION_PROMPT =====
-Notes (Session Mode):
-- `save_note`/`update_note`/`read_note`/`search_notes`/`list_notes`/`delete_note`: long-form docs, architecture, audit results, runbooks. Search notes before broad codebase exploration.
+Project Notes (Session Mode):
+- `save_note`/`update_note`/`read_note`/`search_notes`/`list_notes`/`delete_note`: store long-form docs, architecture, audit results, and runbooks in markdown notes. Search notes before broad codebase exploration. For repository audits, keep root paths, module maps, build/test commands, and constraints in one project note.
 
 ===== MEMORY_BACKGROUND_PROMPT =====
 Memory & Notes (Background Saver):

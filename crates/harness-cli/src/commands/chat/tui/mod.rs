@@ -8,7 +8,8 @@
 //! - [`input`]: `crossterm::event::EventStream` keyboard, mouse, and paste handling
 //! - [`actions`]: turn lifecycle, slash commands, session switching, pickers
 
-pub(crate) mod actions;
+mod actions;
+pub(in crate::commands::chat) use actions::instructions::active_instruction_bodies;
 mod input;
 mod markdown;
 mod render;
