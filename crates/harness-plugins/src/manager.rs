@@ -1021,8 +1021,12 @@ export async function apply(ctx: any): Promise<void> {
             .unwrap();
         assert!(!out.is_error, "{}", out.content);
         assert!(out.content.contains("ok:luna"), "{}", out.content);
-        assert!(
-            out.content.contains(&ws_root.display().to_string()),
+        // The path is compared as a parsed JSON value, not as text: on Windows every separator in
+        // it is written `\\` in the JSON, so a substring test against the raw path fails.
+        let parsed: serde_json::Value = serde_json::from_str(&out.content).expect("json result");
+        assert_eq!(
+            parsed["ws"],
+            serde_json::json!(ws_root.display().to_string()),
             "{}",
             out.content
         );
