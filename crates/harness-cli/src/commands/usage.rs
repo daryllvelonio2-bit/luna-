@@ -397,26 +397,26 @@ fn print_recent(records: &[UsageRecord]) {
     }
     println!("{}", "Recent turns".bold());
     println!("{}", rule(RULE));
+    // The cache is its own column: folded into the token cell it widened that cell on exactly the
+    // turns that reported a cache read, and pushed the cost column out of line.
     let header = format!(
-        "{:<17}{:>8}{:>10}{:>8}  {}",
-        "when", "tokens", "cost", "time", "model"
+        "{:<17}{:>8}{:>9}{:>10}{:>8}  {}",
+        "when", "tokens", "cached", "cost", "time", "model"
     );
     println!("  {}", header.dimmed());
     for record in records {
-        // Only turns whose provider reported a cache read carry the marker, so the column stays
-        // quiet on the providers that say nothing about caching.
+        // A provider that says nothing about caching leaves the column empty rather than zero:
+        // `0` would read as "caching was measured and did not help".
         let cached = if record.cached_tokens > 0 {
-            format!(
-                " ({} cached)",
-                format_tokens(u64::from(record.cached_tokens))
-            )
+            format_tokens(u64::from(record.cached_tokens))
         } else {
-            String::new()
+            "-".to_string()
         };
         println!(
-            "  {:<17}{:>8}{:>10}{:>8}  {}",
+            "  {:<17}{:>8}{:>9}{:>10}{:>8}  {}",
             record.ts.format("%Y-%m-%d %H:%M"),
-            format!("{}{cached}", format_tokens(u64::from(record.total_tokens))),
+            format_tokens(u64::from(record.total_tokens)),
+            cached,
             record
                 .cost_usd
                 .map(|cost| format!("${cost:.4}"))
