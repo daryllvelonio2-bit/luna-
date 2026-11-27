@@ -140,11 +140,19 @@ fn heading(title: &str) -> String {
 
 /// One row of the context split: the bullet carries the share as colour, the text as a number.
 fn part_row(parts: &ContextParts, max: u32, label: &str, tokens: u32) -> String {
+    // Without a published window there is no share to draw, and a `0.0%` row would read as
+    // empty — so the row states the tokens and nothing else.
+    if max == 0 {
+        return format!(
+            "{} {label}: {} tokens",
+            "•".dimmed(),
+            format_tokens(tokens as u64)
+        );
+    }
     let share = parts.percent(tokens, max);
     format!(
-        "{} {}: {} tokens ({share:.1}%)",
+        "{} {label}: {} tokens ({share:.1}%)",
         filled_dot(fill_ratio(tokens as u64, max as u64)),
-        label,
         format_tokens(tokens as u64)
     )
 }
@@ -330,7 +338,7 @@ mod tests {
             report.contains("Free space"),
             "free space is shown: {report}"
         );
-        assert!(report.contains("9.5k/100.0k tokens"), "headline: {report}");
+        assert!(report.contains("9.5k/100k tokens"), "headline: {report}");
     }
 
     /// The free space is the window minus the parts, and the parts sum to the total: a reader who

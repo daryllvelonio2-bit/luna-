@@ -316,7 +316,8 @@ fn print_totals(totals: &UsageTotals) {
 }
 
 fn print_buckets(by: &str, buckets: &[UsageBucket], totals: &UsageTotals) {
-    println!("{}", format!("By {by}").bold());
+    let title = format!("By {by}");
+    println!("{}", title.bold());
     println!("{}", rule(RULE));
     let width = buckets
         .iter()
@@ -395,14 +396,11 @@ fn print_recent(records: &[UsageRecord]) {
     }
     println!("{}", "Recent turns".bold());
     println!("{}", rule(RULE));
-    println!(
-        "  {}",
-        format!(
-            "{:<17}{:>8}{:>10}{:>8}  {}",
-            "when", "tokens", "cost", "time", "model"
-        )
-        .dimmed()
+    let header = format!(
+        "{:<17}{:>8}{:>10}{:>8}  {}",
+        "when", "tokens", "cost", "time", "model"
     );
+    println!("  {}", header.dimmed());
     for record in records {
         // Only turns whose provider reported a cache read carry the marker, so the column stays
         // quiet on the providers that say nothing about caching.
