@@ -162,64 +162,69 @@ impl FileNotesEngine {
 
         let mut imported = 0usize;
         let mut failed = 0usize;
-        let rows = conn.prepare(
-            "SELECT id, title, content, summary_pointer, tags, created_at, updated_at FROM notes",
-        );
-        match rows {
-            Ok(mut stmt) => {
-                let mapped = stmt.query_map([], |row| {
-                    Ok((
-                        row.get::<_, String>(0).unwrap_or_default(),
-                        row.get::<_, String>(1).unwrap_or_default(),
-                        row.get::<_, String>(2).unwrap_or_default(),
-                        row.get::<_, String>(3).unwrap_or_default(),
-                        row.get::<_, String>(4).unwrap_or_default(),
-                        row.get::<_, String>(5).unwrap_or_default(),
-                        row.get::<_, String>(6).unwrap_or_default(),
-                    ))
-                });
-                if let Ok(mapped) = mapped {
-                    for row in mapped.flatten() {
-                        let (id, title, content, pointer, tags_json, created, updated) = row;
-                        if title.trim().is_empty() {
-                            continue;
-                        }
-                        let note = Note {
-                            id: if id.trim().is_empty() {
-                                slugify(&title)
-                            } else {
-                                id
-                            },
-                            title,
-                            content,
-                            summary_pointer: if pointer.trim().is_empty() {
-                                String::new()
-                            } else {
-                                pointer
-                            },
-                            tags: serde_json::from_str(&tags_json).unwrap_or_default(),
-                            created_at: parse_timestamp(&created),
-                            updated_at: parse_timestamp(&updated),
-                            ..Default::default()
-                        };
-                        let target = projects::ensure(dir, projects::DEFAULT_PROJECT)
-                            .map(|project| project.notes_dir())
-                            .unwrap_or_else(|_| dir.to_path_buf());
-                        match write_note(&target, &note, true) {
-                            Ok(_) => imported += 1,
-                            Err(error) => {
-                                failed += 1;
-                                warn!("could not import note '{}': {}", note.id, error);
+        // The handle is scoped so it is closed before the retire below: Windows refuses to remove
+        // a file that is still open, which left the store to be re-imported on every start.
+        {
+            let rows = conn.prepare(
+                "SELECT id, title, content, summary_pointer, tags, created_at, updated_at FROM notes",
+            );
+            match rows {
+                Ok(mut stmt) => {
+                    let mapped = stmt.query_map([], |row| {
+                        Ok((
+                            row.get::<_, String>(0).unwrap_or_default(),
+                            row.get::<_, String>(1).unwrap_or_default(),
+                            row.get::<_, String>(2).unwrap_or_default(),
+                            row.get::<_, String>(3).unwrap_or_default(),
+                            row.get::<_, String>(4).unwrap_or_default(),
+                            row.get::<_, String>(5).unwrap_or_default(),
+                            row.get::<_, String>(6).unwrap_or_default(),
+                        ))
+                    });
+                    if let Ok(mapped) = mapped {
+                        for row in mapped.flatten() {
+                            let (id, title, content, pointer, tags_json, created, updated) = row;
+                            if title.trim().is_empty() {
+                                continue;
+                            }
+                            let note = Note {
+                                id: if id.trim().is_empty() {
+                                    slugify(&title)
+                                } else {
+                                    id
+                                },
+                                title,
+                                content,
+                                summary_pointer: if pointer.trim().is_empty() {
+                                    String::new()
+                                } else {
+                                    pointer
+                                },
+                                tags: serde_json::from_str(&tags_json).unwrap_or_default(),
+                                created_at: parse_timestamp(&created),
+                                updated_at: parse_timestamp(&updated),
+                                ..Default::default()
+                            };
+                            let target = projects::ensure(dir, projects::DEFAULT_PROJECT)
+                                .map(|project| project.notes_dir())
+                                .unwrap_or_else(|_| dir.to_path_buf());
+                            match write_note(&target, &note, true) {
+                                Ok(_) => imported += 1,
+                                Err(error) => {
+                                    failed += 1;
+                                    warn!("could not import note '{}': {}", note.id, error);
+                                }
                             }
                         }
                     }
                 }
-            }
-            Err(error) => {
-                warn!("legacy note store has no usable notes table: {}", error);
-                return;
+                Err(error) => {
+                    warn!("legacy note store has no usable notes table: {}", error);
+                    return;
+                }
             }
         }
+        drop(conn);
 
         // A partial import must not retire the source: renaming it to `.imported` would hide the
         // rows that failed and leave no automatic retry. Keeping the database makes the next start
@@ -946,6 +951,11 @@ impl NotesEngine for FileNotesEngine {
             content_hash: None,
         };
         let path = write_note_with_chunks(&target_dir, &note)?;
+        // Windows updates a file's mtime lazily, so a rewrite inside the same tick can leave the
+        // cached entry looking fresh; drop it rather than serve the previous body.
+        if let Ok(mut cache) = self.cache.write() {
+            cache.remove(&path);
+        }
 
         info!("Updated note '{}' ('{}')", note.id, path.display());
         Ok(note)
