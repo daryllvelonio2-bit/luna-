@@ -269,7 +269,7 @@ fn print_totals(totals: &UsageTotals) {
     println!("{}", "Usage — all sessions".bold());
     println!("{}", rule(RULE));
     println!(
-        "  {:<LABEL$}{:<22}{:<8}{}",
+        "  {:<LABEL$}{:<22}{:<10}{}",
         "turns",
         totals.turns,
         "time",
@@ -281,7 +281,7 @@ fn print_totals(totals: &UsageTotals) {
         format_tokens(totals.completion_tokens)
     );
     println!(
-        "  {:<LABEL$}{:<22}{:<8}{}",
+        "  {:<LABEL$}{:<22}{:<10}{}",
         "tokens",
         format_tokens(totals.total_tokens),
         "in · out",
@@ -450,8 +450,12 @@ pub(crate) fn format_duration(ms: u64) -> String {
         format!("{ms}ms")
     } else if ms < 60_000 {
         format!("{:.1}s", ms as f64 / 1000.0)
-    } else {
+    } else if ms < 3_600_000 {
         format!("{}m{:02}s", ms / 60_000, (ms % 60_000) / 1000)
+    } else {
+        // Past an hour, minutes alone stop being readable: a ledger holds days of turns, and
+        // `13381m51s` is a number nobody converts in their head.
+        format!("{}h{:02}m", ms / 3_600_000, (ms % 3_600_000) / 60_000)
     }
 }
 
@@ -492,6 +496,15 @@ mod tests {
     }
 
     /// A long model key is cut, not allowed to shift every column after it.
+    /// A long span rolls up to hours: the ledger holds every turn ever recorded, and `13381m51s` is
+    /// not a duration anyone reads at a glance.
+    #[test]
+    fn a_long_duration_rolls_up_to_hours() {
+        assert_eq!(format_duration(2_500), "2.5s");
+        assert_eq!(format_duration(150_000), "2m30s");
+        assert_eq!(format_duration(80_289_000), "22h18m");
+    }
+
     #[test]
     fn a_long_bucket_key_is_truncated() {
         assert_eq!(truncate("short", 10), "short");
