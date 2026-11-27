@@ -401,9 +401,21 @@ impl TurnSnapshot {
     fn relative_name(&self, absolute: &Path) -> String {
         absolute
             .strip_prefix(&self.workspace)
-            .map(|rest| rest.to_string_lossy().to_string())
-            .unwrap_or_else(|_| absolute.to_string_lossy().to_string())
+            .map(portable_path)
+            .unwrap_or_else(|_| portable_path(absolute))
     }
+}
+
+/// A path as it is recorded and compared: `/` separators on every platform.
+///
+/// These strings are matched against ignore rules, tool-provided names and the transcript's
+/// `target/`-style prefixes, all of which are written the repository way. Windows would
+/// otherwise record `src\main.rs` and stop matching any of them.
+fn portable_path(path: &Path) -> String {
+    path.components()
+        .map(|part| part.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// Owns the checkpoint directory and the turn currently open.
@@ -981,8 +993,8 @@ impl TreeScan {
                     .unwrap_or(0);
                 let relative = path
                     .strip_prefix(root)
-                    .map(|rest| rest.to_string_lossy().to_string())
-                    .unwrap_or_else(|_| path.to_string_lossy().to_string());
+                    .map(portable_path)
+                    .unwrap_or_else(|_| portable_path(&path));
                 scan.files.insert(
                     relative,
                     FileStamp {
