@@ -622,11 +622,19 @@ mod tests {
         // A binary that does not exist is a silent "this source has nothing",
         // not an error: the xclip fallback must no-op on Wayland-only boxes.
         assert!(command_bytes("luna-nonexistent-helper", &["--version"]).is_none());
-        // A real binary with real output parses as bytes.
-        assert_eq!(
-            command_bytes("/bin/echo", &["ok"]).as_deref(),
-            Some(&b"ok\n"[..])
-        );
+        // A real binary with real output parses as bytes. Windows has no `/bin/echo`, and its
+        // `echo` is a cmd builtin, so the helper is named per platform.
+        #[cfg(windows)]
+        let (helper, args) = ("cmd", ["/c", "echo", "ok"]);
+        #[cfg(not(windows))]
+        let (helper, args) = ("/bin/echo", ["ok"]);
+        // cmd ends lines with CRLF, so the carriage returns are dropped before comparing.
+        let bytes: Vec<u8> = command_bytes(helper, &args)
+            .expect("helper output")
+            .into_iter()
+            .filter(|b| *b != b'\r')
+            .collect();
+        assert_eq!(bytes, b"ok\n");
     }
 
     /// Not ignored by default for CI cost, but kept as the out-of-process proof: the file this

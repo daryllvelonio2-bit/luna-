@@ -620,8 +620,8 @@ fn find_agent_reach_bin() -> Option<PathBuf> {
             }
         }
     }
-    if let Some(home) = std::env::var_os("HOME") {
-        let local = PathBuf::from(home).join(".local/bin/agent-reach");
+    if let Some(home) = Some(crate::config::home_dir()) {
+        let local = home.join(".local/bin/agent-reach");
         if local.is_file() {
             return Some(local);
         }

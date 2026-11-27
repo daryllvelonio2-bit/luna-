@@ -12,4 +12,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+
+# AT-SPI is a Linux accessibility bus; on other platforms the crate is empty (`#![cfg]` in lib.rs),
+# so the D-Bus client must not be built there either.
+[target.'cfg(target_os = "linux")'.dependencies]
 zbus = "5"

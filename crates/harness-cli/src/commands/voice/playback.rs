@@ -43,6 +43,7 @@ pub fn select_player_tool() -> Option<String> {
             if find_in_path("paplay").is_some() {
                 return Some("paplay".to_string());
             }
+            #[cfg(unix)]
             tracing::warn!(
                 "Audio forwarding is configured (PULSE_SERVER) but 'paplay' isn't installed. \
                  Install with: sudo apt-get install -y pulseaudio-utils"

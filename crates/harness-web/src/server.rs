@@ -48,7 +48,7 @@ fn write_ready_file(path: Option<&PathBuf>, payload: &serde_json::Value) {
         }
         let tmp = p.with_extension("tmp");
         if std::fs::write(&tmp, payload.to_string()).is_ok() {
-            let _ = std::fs::rename(&tmp, p);
+            let _ = harness_core::fsutil::replace_file(&tmp, p);
         } else {
             let _ = std::fs::write(p, payload.to_string());
         }

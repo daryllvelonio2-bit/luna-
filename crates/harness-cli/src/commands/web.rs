@@ -93,12 +93,7 @@ fn runtime_dir(config: &Config) -> PathBuf {
         .sessions_db
         .parent()
         .map(Path::to_path_buf)
-        .unwrap_or_else(|| {
-            std::env::var("HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|_| PathBuf::from("."))
-                .join(".luna")
-        })
+        .unwrap_or_else(|| harness_core::config::home_dir().join(".luna"))
 }
 
 fn state_file_path(config: &Config) -> PathBuf {
@@ -140,8 +135,14 @@ fn is_pid_alive(pid: u32) -> bool {
     }
     #[cfg(not(unix))]
     {
-        let _ = pid;
-        false
+        // Windows: no signal-0 probe, so ask the task list whether the pid is there.
+        let Ok(output) = std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+            .output()
+        else {
+            return false;
+        };
+        String::from_utf8_lossy(&output.stdout).contains(&pid.to_string())
     }
 }
 
@@ -168,8 +169,13 @@ fn stop_pid(pid: u32) -> bool {
     }
     #[cfg(not(unix))]
     {
-        let _ = pid;
-        false
+        // Windows: no SIGTERM/SIGKILL pair, so `/F` is the force stop and there is nothing
+        // gentler that still ends a detached `luna web`.
+        std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/F"])
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(false)
     }
 }
 

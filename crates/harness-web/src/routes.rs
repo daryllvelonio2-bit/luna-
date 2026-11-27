@@ -1315,7 +1315,7 @@ async fn browse_workspace(
     State(state): State<Arc<WebState>>,
     Query(query): Query<BrowseWorkspaceQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let home = Some(harness_core::config::home_dir());
     let current = match query
         .path
         .as_deref()
@@ -1397,7 +1397,7 @@ async fn set_workspace(
             ));
         }
         let candidate = if raw == "~" || raw.starts_with("~/") {
-            if let Some(h) = std::env::var_os("HOME").map(std::path::PathBuf::from) {
+            if let Some(h) = Some(harness_core::config::home_dir()) {
                 if raw == "~" {
                     h
                 } else {

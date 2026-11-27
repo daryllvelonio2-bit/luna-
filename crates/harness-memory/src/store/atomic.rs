@@ -41,7 +41,7 @@ pub fn write(path: &Path, bytes: &[u8]) -> io::Result<()> {
         file.write_all(bytes)?;
         file.sync_all()?;
         drop(file);
-        fs::rename(&temp, path)
+        harness_core::fsutil::replace_file(&temp, path)
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temp);

@@ -181,11 +181,8 @@ async fn prepare_session(
         }
     }
 
-    if current_provider.is_empty() {
-        return Err(HarnessError::ConfigurationError(
-            "No LLM provider configured or loaded with credentials. Run 'luna auth' to register a credential or specify '--provider <name>'.".to_string(),
-        ));
-    }
+    // An empty provider is a valid state: the session opens, `/model` sets one, and the first turn
+    // says how. Refusing here is what made a first run unable to reach the TUI at all.
 
     // Fold against the model's own window, not a fixed bar: a 300k threshold on a 256k model only
     // folds after the provider has already refused the request. Keeping the number on the shared

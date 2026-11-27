@@ -413,14 +413,20 @@ pub fn friendly_model_name(raw: &str) -> String {
 /// Shorten a workspace path for the bottom-left footer (`~` when under `$HOME`).
 pub fn shorten_cwd(path: &Path) -> String {
     let raw = path.display().to_string();
-    if let Ok(home) = std::env::var("HOME") {
-        if !home.is_empty() {
-            if raw == home {
-                return "~".to_string();
-            }
-            if let Some(rest) = raw.strip_prefix(&format!("{home}/")) {
-                return format!("~/{rest}");
-            }
+    let home = harness_core::config::home_dir()
+        .to_string_lossy()
+        .into_owned();
+    if !home.is_empty() {
+        if raw == home {
+            return "~".to_string();
+        }
+        if let Some(rest) = raw.strip_prefix(&format!("{home}/")) {
+            return format!("~/{rest}");
+        }
+        // Windows paths separate with `\`, so the same shortening needs the native separator.
+        let sep = std::path::MAIN_SEPARATOR;
+        if let Some(rest) = raw.strip_prefix(&format!("{home}{sep}")) {
+            return format!("~{sep}{rest}");
         }
     }
     raw

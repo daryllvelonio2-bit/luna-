@@ -372,6 +372,24 @@ impl GenericProviderClient {
         overrides: Option<&ProviderOverride>,
     ) -> Result<Self, HarnessError> {
         let p_id = provider_id.into();
+        // No provider chosen yet: the session still opens (an empty id is what a first run looks
+        // like), and `/model` replaces this client before any turn is sent. A turn that runs
+        // first explains how to pick one instead of failing on a credential lookup for "".
+        if p_id.trim().is_empty() {
+            return Ok(Self {
+                provider_id: p_id,
+                base_url: String::new(),
+                auth_format: AuthHeaderFormat::Bearer,
+                cred_manager,
+                discovery,
+                http_client: build_http_client(crate::catalog::DEFAULT_TIMEOUT_SECS)?,
+                default_model: default_model.into(),
+                session_id: None,
+                image_fallback: None,
+                images_must_be_described: std::sync::atomic::AtomicBool::new(false),
+                image_descriptions: std::sync::Mutex::new(std::collections::HashMap::new()),
+            });
+        }
         let fallback = discovery.get_override(&p_id);
         let effective_override = overrides.or(fallback.as_ref());
         let descriptor = resolve_descriptor(&p_id, effective_override)?;
@@ -1259,6 +1277,11 @@ impl ModelProvider for GenericProviderClient {
 }
 
 impl GenericProviderClient {
+    /// Why a turn cannot run before a provider is chosen: the session opens either way, so this is
+    /// the message the user meets on their first send instead of a credential lookup for "".
+    const NO_PROVIDER_HELP: &'static str = "No model is configured yet. Pick a provider and model \
+         with /model (or run 'luna auth add <provider>' from another terminal), then send again.";
+
     /// The provider call itself; the image fallback wrapper lives in `complete`.
     async fn complete_inner(
         &self,
@@ -1266,6 +1289,11 @@ impl GenericProviderClient {
         tools: &[ToolDefinition],
         options: &CompletionOptions,
     ) -> Result<Message, HarnessError> {
+        if self.provider_id.trim().is_empty() {
+            return Err(HarnessError::ConfigurationError(
+                Self::NO_PROVIDER_HELP.to_string(),
+            ));
+        }
         self.sync_provider_credentials("complete").await;
 
         let model = self.model_or_default(options);
@@ -1326,6 +1354,11 @@ impl GenericProviderClient {
         tools: &[ToolDefinition],
         options: &CompletionOptions,
     ) -> Result<BoxStream<'static, Result<StreamEvent, HarnessError>>, HarnessError> {
+        if self.provider_id.trim().is_empty() {
+            return Err(HarnessError::ConfigurationError(
+                Self::NO_PROVIDER_HELP.to_string(),
+            ));
+        }
         self.sync_provider_credentials("stream").await;
 
         let model = self.model_or_default(options);

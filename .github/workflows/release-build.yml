@@ -15,7 +15,17 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: luna-binary-linux
+            binary: target/release/luna
+          - os: windows-latest
+            artifact: luna-binary-windows
+            binary: target/release/luna.exe
     steps:
       # `gh workflow run --ref <branch>` selects the ref this workflow file comes from; build that
       # same branch unless the caller named one explicitly. Defaulting to 'main' silently built
@@ -26,7 +36,12 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
+
       - name: Install ALSA system dependency
+        if: runner.os == 'Linux'
         run: sudo apt-get update -qq && sudo apt-get install -y -qq libasound2-dev
 
       - name: Setup Node.js
@@ -36,6 +51,7 @@ jobs:
 
       - name: Build web frontend
         working-directory: web
+        shell: bash
         run: |
           npm ci --no-audit --no-fund || npm install --no-audit --no-fund
           npm run typecheck
@@ -44,17 +60,14 @@ jobs:
       - name: Build release binary
         run: cargo build --release --bin luna
 
-      - name: Install luna binary
-        run: sudo install -m 0755 target/release/luna /usr/local/bin/luna
-
-      - name: Verify installed binary
-        run: luna --version
+      - name: Verify built binary
+        run: ${{ matrix.binary }} --version
 
       - name: Upload luna binary artifact
         uses: actions/upload-artifact@v4
         with:
-          name: luna-binary
-          path: target/release/luna
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.binary }}
           retention-days: 1
 
   publish-release:
@@ -67,14 +80,22 @@ jobs:
       - name: Download Linux binary
         uses: actions/download-artifact@v4
         with:
-          name: luna-binary
+          name: luna-binary-linux
           path: dist-linux
+      - name: Download Windows binary
+        uses: actions/download-artifact@v4
+        with:
+          name: luna-binary-windows
+          path: dist-windows
       - name: Package release assets
         run: |
           mkdir -p release-assets
           chmod +x dist-linux/luna
           cp dist-linux/luna release-assets/luna-linux-x86_64
           tar -czf release-assets/luna-linux-x86_64.tar.gz -C dist-linux luna
+          # The updater looks for exactly these Windows names (see update.rs asset candidates).
+          cp dist-windows/luna.exe release-assets/luna-windows-x86_64.exe
+          (cd dist-windows && zip -q -9 ../release-assets/luna-windows-x86_64.zip luna.exe)
       - name: Create or Update GitHub Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

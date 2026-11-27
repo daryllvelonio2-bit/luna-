@@ -307,8 +307,7 @@ pub fn build_orchestrator_prompt_block(name: &str, orch: &OrchestratorConfig) ->
 
 /// Load the active orchestrator name persisted for a session across restarts.
 pub fn load_session_orchestrator(session_id: &str) -> Option<String> {
-    let home = std::env::var("HOME").ok()?;
-    let path = std::path::Path::new(&home)
+    let path = harness_core::config::home_dir()
         .join(".luna")
         .join("session_orchestrators.json");
     let content = std::fs::read_to_string(path).ok()?;
@@ -318,10 +317,7 @@ pub fn load_session_orchestrator(session_id: &str) -> Option<String> {
 
 /// Persist or clear the active orchestrator name for a session.
 pub fn save_session_orchestrator(session_id: &str, orch: Option<&str>) {
-    let Ok(home) = std::env::var("HOME") else {
-        return;
-    };
-    let path = std::path::Path::new(&home)
+    let path = harness_core::config::home_dir()
         .join(".luna")
         .join("session_orchestrators.json");
     let mut map: std::collections::HashMap<String, String> = std::fs::read_to_string(&path)

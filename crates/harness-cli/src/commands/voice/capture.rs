@@ -160,7 +160,11 @@ pub async fn run_background_voice_listener(
         let Some(device) = host.default_input_device() else {
             tracing::warn!("No default audio input device found for voice listener");
             let _ = err_tx.send(VoiceEvent::Error(
-                "No microphone recorder found. Install one with: sudo apt-get install -y alsa-utils (arecord), or use PipeWire's pw-record.".to_string(),
+                if cfg!(unix) {
+                    "No microphone recorder found. Install one with: sudo apt-get install -y alsa-utils (arecord), or use PipeWire's pw-record.".to_string()
+                } else {
+                    "No default microphone found. Check that a recording device is enabled in Windows sound settings.".to_string()
+                },
             ));
             return;
         };

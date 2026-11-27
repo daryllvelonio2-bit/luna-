@@ -69,3 +69,41 @@ jobs:
 
       - name: cargo build release
         run: cargo build --release --bin luna
+
+  # Windows is a supported target, so it is built and tested on a Windows runner: none of
+  # `#[cfg(windows)]` code (raw-mode crossterm, tasklist/taskkill, rename-aside self update) is
+  # compiled — let alone run — by the Linux job.
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows
+
+      # rust-embed compiles `web/dist` into the binary; without it the build fails on a fresh clone.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Build web frontend
+        working-directory: web
+        shell: bash
+        run: |
+          npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+          npm run typecheck
+          npm run build
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace
+
+      - name: cargo build release
+        run: cargo build --release --bin luna

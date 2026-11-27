@@ -120,11 +120,8 @@ impl AppRuntime {
                 current_model = model;
             }
         }
-        if current_provider.is_empty() {
-            return Err(HarnessError::ConfigurationError(
-                "No LLM provider configured or loaded with credentials. Run 'luna auth' to register a credential or specify '--provider <name>'.".to_string(),
-            ));
-        }
+        // An empty provider is a valid state: the session opens, `/model` sets one, and the first turn
+        // says how. Refusing here kept the web/desktop runtime closed on a fresh install.
 
         config.agent.context_window =
             Some(context_window(&config, &discovery, &current_provider, &current_model) as usize);

@@ -10,6 +10,8 @@
 //! and `EditableText`; it knows nothing about refs, snapshots or the JSON
 //! envelope, because those belong to the core.
 
+#![cfg(target_os = "linux")]
+
 pub mod actions;
 pub mod adapter;
 pub mod bus;
