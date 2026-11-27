@@ -99,11 +99,13 @@ jobs:
           npm run typecheck
           npm run build
 
+      # The AT-SPI adapter crate is Linux-only by construction (`#![cfg(target_os = "linux")]`),
+      # so its examples and integration tests cannot compile here; everything else must.
       - name: cargo clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --exclude harness-desktop-linux --all-targets -- -D warnings
 
       - name: cargo test
-        run: cargo test --workspace
+        run: cargo test --workspace --exclude harness-desktop-linux
 
       - name: cargo build release
         run: cargo build --release --bin luna
