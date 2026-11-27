@@ -1343,15 +1343,15 @@ fn test_subagents_chrome_strip_and_hint_counter() {
     assert_eq!(rendered_label, "● 2 subagents · ");
 }
 
-#[test]
-fn subagent_tool_blocks_render_nested_under_the_delegate_row() {
-    let st = test_dummy_tui_state();
-    let snap = TuiLiveSnapshot {
+/// One delegate with three blocks, including an absolute path and a failure.
+fn subagent_blocks_snapshot() -> TuiLiveSnapshot {
+    TuiLiveSnapshot {
         delegate_count: 1,
         delegate_last: Some(("Review PR".to_string(), "terminal running".to_string())),
         delegate_blocks: vec![
             (
-                "terminal · cargo test --workspace".to_string(),
+                "terminal · cd /home/janelle/Documents/GitHub/rust-agent-harness && cargo test"
+                    .to_string(),
                 "test result: ok".to_string(),
                 false,
             ),
@@ -1367,14 +1367,52 @@ fn subagent_tool_blocks_render_nested_under_the_delegate_row() {
             ),
         ],
         ..Default::default()
-    };
+    }
+}
+
+#[test]
+fn subagent_chrome_row_is_the_fallback_when_no_turn_is_active() {
+    let st = test_dummy_tui_state();
+    let snap = subagent_blocks_snapshot();
 
     let chrome = build_chrome_lines(&st, &snap, 80);
     let text = chrome.iter().map(line_text).collect::<Vec<_>>().join("\n");
+    // No active turn means nothing inline is on screen, so the compact row is the only signal.
     assert_eq!(
         text,
-        "⠋ Subagent: Review PR — terminal running (Ctrl+B / click to inspect)\n  ├─ terminal · cargo test --workspace · test result: ok\n  ├─ search_files · pattern=foo · 3 matches\n  └─ patch · src/main.rs ✖ failed to apply"
+        "⠋ Subagent: Review PR — terminal running (Ctrl+B / click to inspect)"
     );
+}
+
+#[test]
+fn subagent_blocks_render_inline_with_shortened_paths_and_output_tail() {
+    let snap = subagent_blocks_snapshot();
+    let mut out = Vec::new();
+    push_subagent_inline_blocks(&mut out, &snap, 120);
+    let text = out.iter().map(line_text).collect::<Vec<_>>().join("\n");
+
+    assert!(
+        text.contains("▶ terminal · cd Documents/GitHub/rust-agent-harness && cargo test"),
+        "{text}"
+    );
+    assert!(text.contains("    test result: ok"), "{text}");
+    // A failure is marked, not only coloured.
+    assert!(text.contains("    ✖ failed to apply"), "{text}");
+    assert!(
+        !text.contains("/home/janelle"),
+        "path must be shortened: {text}"
+    );
+}
+
+#[tokio::test]
+async fn subagent_chrome_row_hides_while_inline_blocks_are_drawn() {
+    let mut st = test_dummy_tui_state();
+    st.active_turn = Some(tokio::spawn(std::future::pending()));
+    let snap = subagent_blocks_snapshot();
+
+    let chrome = build_chrome_lines(&st, &snap, 80);
+    let text = chrome.iter().map(line_text).collect::<Vec<_>>().join("\n");
+    assert!(!text.contains("Subagent:"), "row would duplicate: {text}");
 }
 
 #[test]

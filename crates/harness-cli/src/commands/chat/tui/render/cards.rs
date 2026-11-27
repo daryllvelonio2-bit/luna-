@@ -129,6 +129,9 @@ pub(crate) fn build_chrome_lines(
         }
     }
     if snap.delegate_count > 0 {
+        // Once the child's calls are drawn inline in the transcript this row would state the same
+        // activity twice, so it only appears when nothing inline is on screen.
+        let inline_drawn = st.active_turn.is_some() && !snap.delegate_blocks.is_empty();
         if let Some((ref goal, ref act)) = snap.delegate_last {
             let spinner = SPINNER_FRAMES[st.spinner_tick % SPINNER_FRAMES.len()];
             let more = if snap.delegate_count > 1 {
@@ -159,29 +162,8 @@ pub(crate) fn build_chrome_lines(
                         .bg(bg_canvas()),
                 )]
             };
-            lines.push(Line::from(spans));
-            // Each child tool call is one bounded line nested under the delegate row. Branches
-            // make the call/output pairs read as a list without spending a row on each half.
-            let blocks = snap
-                .delegate_blocks
-                .iter()
-                .take(MAX_DELEGATE_BLOCKS)
-                .collect::<Vec<_>>();
-            let last = blocks.len().saturating_sub(1);
-            for (idx, (command, output, is_error)) in blocks.into_iter().enumerate() {
-                let branch = if idx == last { "└─" } else { "├─" };
-                let mark = if *is_error { "✖" } else { "·" };
-                let body = if output.is_empty() {
-                    command.clone()
-                } else {
-                    format!("{command} {mark} {output}")
-                };
-                lines.push(Line::from(Span::styled(
-                    truncate_str(&format!("  {branch} {body}"), width),
-                    Style::default()
-                        .fg(if *is_error { red_err() } else { text_muted() })
-                        .bg(bg_canvas()),
-                )));
+            if !inline_drawn {
+                lines.push(Line::from(spans));
             }
         }
     }
@@ -976,6 +958,41 @@ pub(crate) fn render_active_turn_process(
                     Style::default().fg(accent_coral()).bg(bg_canvas()),
                 ),
             ]));
+        }
+    }
+
+    // A delegated child's calls land here, below the live tool cards, rather than in the chrome
+    // above the composer: the transcript has room for a command and its output.
+    push_subagent_inline_blocks(out, snap, card_inner_w);
+}
+
+/// A delegated child's tool calls, drawn in the transcript where the parent's own tool output
+/// goes: the command with paths shortened so it stays readable, then its newest output line. A
+/// call with no output yet shows the command alone.
+pub(crate) fn push_subagent_inline_blocks(
+    out: &mut Vec<Line<'static>>,
+    snap: &TuiLiveSnapshot,
+    card_inner_w: usize,
+) {
+    for (command, output, is_error) in snap.delegate_blocks.iter().take(MAX_DELEGATE_BLOCKS) {
+        out.push(Line::from(Span::styled(
+            truncate_str(
+                &format!("  ▶ {}", shorten_paths_in_text(command)),
+                card_inner_w,
+            ),
+            Style::default()
+                .fg(if *is_error { red_err() } else { cyan_link() })
+                .bg(bg_canvas()),
+        )));
+        if !output.is_empty() {
+            // The mark keeps a failure readable without relying on colour alone.
+            let mark = if *is_error { "✖ " } else { "" };
+            out.push(Line::from(Span::styled(
+                truncate_str(&format!("    {mark}{output}"), card_inner_w),
+                Style::default()
+                    .fg(if *is_error { red_err() } else { text_muted() })
+                    .bg(bg_canvas()),
+            )));
         }
     }
 }
