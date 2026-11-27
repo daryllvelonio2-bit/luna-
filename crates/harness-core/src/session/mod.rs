@@ -248,8 +248,16 @@ pub fn clean_user_display_text(raw: &str) -> String {
     }
 
     // Collapse iteration-1 autonomous goal prompts back to `/goal <objective>`.
-    if text.starts_with("Autonomous Goal Mode (iteration 1/") {
-        if let Some(after_obj) = text.split("\n\nObjective:\n").nth(1) {
+    // The prompt comes from `prompts.md`; a checkout that carries CRLF is parsed as LF here.
+    let normalized;
+    let goal_text = if text.contains('\r') {
+        normalized = text.replace("\r\n", "\n");
+        normalized.as_str()
+    } else {
+        text
+    };
+    if goal_text.starts_with("Autonomous Goal Mode (iteration 1/") {
+        if let Some(after_obj) = goal_text.split("\n\nObjective:\n").nth(1) {
             let objective = after_obj
                 .split("\n\nExecution contract:")
                 .next()
@@ -320,5 +328,13 @@ mod tests {
             clean_user_display_text("[background job finished]\nsome internal info"),
             ""
         );
+    }
+
+    /// `prompts.md` is checked out with LF now (`.gitattributes`), but an older Windows checkout
+    /// still carries CRLF, and the collapsed replay line must not depend on that.
+    #[test]
+    fn collapses_a_goal_prompt_that_arrived_with_crlf() {
+        let raw = "Autonomous Goal Mode (iteration 1/4).\r\n\r\nObjective:\r\nfix tests\r\n\r\nExecution contract:\r\n- work\r\n";
+        assert_eq!(clean_user_display_text(raw), "/goal fix tests");
     }
 }

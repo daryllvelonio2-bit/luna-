@@ -279,8 +279,16 @@ pub fn clean_user_query_for_transcript(raw: &str) -> String {
     }
 
     // Collapse the structured iteration-1 goal prompt back to `/goal <objective>` on replay.
-    if trimmed_start.starts_with("Autonomous Goal Mode (iteration 1/") {
-        if let Some(after_obj) = trimmed_start.split("\n\nObjective:\n").nth(1) {
+    // The prompt is built from `prompts.md`; a checkout that carries CRLF is parsed as LF here.
+    let normalized;
+    let goal_text = if trimmed_start.contains('\r') {
+        normalized = trimmed_start.replace("\r\n", "\n");
+        normalized.as_str()
+    } else {
+        trimmed_start
+    };
+    if goal_text.starts_with("Autonomous Goal Mode (iteration 1/") {
+        if let Some(after_obj) = goal_text.split("\n\nObjective:\n").nth(1) {
             let objective = after_obj
                 .split("\n\nExecution contract:")
                 .next()

@@ -1,0 +1,5 @@
+# Prompt files are compiled into the binary with `include_str!` and then parsed by exact-string
+# rules (`"Objective:\n"`, `"[PLAN MODE ACTIVE:"`, `{{ITERATION}}`). A Windows checkout would
+# otherwise give them CRLF and every one of those separators would stop matching, so prompts keep
+# LF on every platform.
+*.md text eol=lf
