@@ -10,7 +10,9 @@ use harness_core::tools::sandbox::Sandbox;
 
 fn workspace() -> (tempfile::TempDir, PathBuf) {
     let dir = tempfile::tempdir().expect("tempdir");
-    let root = dir.path().canonicalize().expect("canonical workspace");
+    // `fsutil::canonicalize` drops the `\\?\` prefix Windows adds, which is the form the sandbox
+    // resolves to and the form a user types; the fixture has to agree with it.
+    let root = harness_core::fsutil::canonicalize(dir.path()).expect("canonical workspace");
     (dir, root)
 }
 
@@ -148,7 +150,7 @@ fn tilde_expansion_does_not_become_a_home_directory_hole() {
 fn extra_roots_are_honoured_and_nothing_else_widens() {
     let (_dir, root) = workspace();
     let scratch = tempfile::tempdir().expect("scratch");
-    let scratch_root = scratch.path().canonicalize().expect("canonical scratch");
+    let scratch_root = harness_core::fsutil::canonicalize(scratch.path()).expect("canonical scratch");
 
     let sandbox = Sandbox::with_extra_roots(root.clone(), vec![scratch_root.clone()]);
 
