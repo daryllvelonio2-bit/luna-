@@ -637,8 +637,27 @@ fn session_selection(
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<(), HarnessError> {
+/// Windows gives the main thread 1 MiB of stack where Linux gives 8 MiB, and the turn loop, the
+/// markdown/JSON parsers and the plugin runtime together need more than that — the binary
+/// overflowed and died on launch under Windows. Running the runtime on a thread with the Linux
+/// headroom makes both platforms behave the same.
+fn main() -> Result<(), HarnessError> {
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?
+                .block_on(main_async())
+        })
+        .map_err(|error| {
+            HarnessError::Io(format!("could not start the Luna runtime thread: {error}"))
+        })?
+        .join()
+        .map_err(|_| HarnessError::Io("the Luna runtime thread panicked".to_string()))?
+}
+
+async fn main_async() -> Result<(), HarnessError> {
     let Startup {
         cli,
         mut layers,
