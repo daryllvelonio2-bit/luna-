@@ -1214,10 +1214,18 @@ fn glob_matches(glob: &str, fname: &str, path: &Path, workspace_root: &Path) -> 
 /// canonicalized root versus the plain form the walker yields), so both sides are normalized
 /// before the strip; without that, `strip_prefix` fails and every path-shaped glob stops matching.
 fn workspace_relative(path: &Path, workspace_root: &Path) -> String {
-    let path = crate::fsutil::strip_verbatim(path.to_path_buf());
-    let root = crate::fsutil::strip_verbatim(workspace_root.to_path_buf());
+    // Canonicalizing both sides closes every way they can differ on Windows: the `\\?\` prefix a
+    // canonicalized root carries, a `.` the walker kept, and case-only spelling of the drive.
+    // A path that cannot be canonicalized (already relative) is used as given.
+    let canonical = |p: &Path| {
+        crate::fsutil::canonicalize(p)
+            .unwrap_or_else(|_| crate::fsutil::strip_verbatim(p.to_path_buf()))
+    };
+    let path = canonical(path);
+    let root = canonical(workspace_root);
     let rel = path.strip_prefix(&root).unwrap_or(&path);
     rel.components()
+        .filter(|part| !matches!(part, std::path::Component::CurDir))
         .map(|part| part.as_os_str().to_string_lossy().into_owned())
         .collect::<Vec<_>>()
         .join("/")
