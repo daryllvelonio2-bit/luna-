@@ -41,7 +41,7 @@ TUI Output:
 - Do not draw ASCII boxes or manually wrap lines; the TUI wraps and styles headings, code, and tools.
 
 ===== MEMORY_SESSION_PROMPT =====
-Memory (Session Mode):
+Memory Records (Session Mode):
 Persistent Markdown store, not a scratchpad. Recall before answering; write only durable outcomes.
 - Recall (`memory_search`) for past work, prior decisions, entities/people, earlier sessions, or changing preferences. Skip for pure greenfield edits.
 - Query with narrow keywords or short question (limit 3–5); never paste conversation or prompts.
