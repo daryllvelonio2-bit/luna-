@@ -8,7 +8,7 @@
 //! - [`input`]: `crossterm::event::EventStream` keyboard, mouse, and paste handling
 //! - [`actions`]: turn lifecycle, slash commands, session switching, pickers
 
-mod actions;
+pub(crate) mod actions;
 mod input;
 mod markdown;
 mod render;

@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use harness_core::{CompletionOptions, Config, HarnessError, Message, ModelProvider, Role};
 use harness_providers::GenericProviderClient;
 
-use super::super::interactive::state::Env;
+use super::super::super::interactive::state::Env;
 use super::super::state::{ActiveModal, InputAction, SelectAction, TuiState};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
