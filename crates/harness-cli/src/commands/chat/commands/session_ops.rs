@@ -466,12 +466,10 @@ pub(crate) async fn handle_delete_command(
         format!("'{}' ({})", old_name.cyan(), old_id.dimmed())
     };
 
-    if ui.is_attended {
-        if !ui.is_tui_mode() {
-            crate::commands::clear_screen();
-            ui.draw_landing();
-            ui.draw_initial_box();
-        }
+    if ui.is_attended && !ui.is_tui_mode() {
+        crate::commands::clear_screen();
+        ui.draw_landing();
+        ui.draw_initial_box();
         ui.emit_above(&format!(
             "{} Deleted session {} and started fresh session {}",
             "✔".green().bold(),
