@@ -166,6 +166,11 @@ impl ModelDiscovery {
             Some(cid) => format!("{provider_id}::{cid}"),
             None => provider_id.to_string(),
         };
+        // An empty provider id is what a session with nothing configured looks like; requesting
+        // "models" from no endpoint only spends a round trip to fail.
+        if cache_key.trim().is_empty() {
+            return Ok(Vec::new());
+        }
         let mut cache = self.load_cache();
 
         if !force_refresh {
