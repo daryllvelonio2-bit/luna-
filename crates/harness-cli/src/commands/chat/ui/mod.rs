@@ -47,19 +47,19 @@ use super::render::PROMPT;
 use colored::Colorize;
 #[cfg(all(test, unix))]
 use consts::{HINT_MIN_ROOM, IDLE_HINT};
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use harness_core::tools::todo::TodoSnapshot;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use harness_providers::QuotaLine;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use metrics::{humanize_tokens, tool_tail_limit};
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use panels::BoxDrawnMetrics;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use std::io::{self, Write};
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use std::sync::atomic::Ordering;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use tail::TOOL_TAIL_LINES;
 
 // The module measures the UI by capturing the process's stdout descriptor, which only `dup2` on

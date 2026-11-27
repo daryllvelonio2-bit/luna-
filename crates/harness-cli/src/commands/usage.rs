@@ -219,11 +219,12 @@ pub(crate) fn dot_bar(ratio: f64) -> String {
         if index > 0 {
             bar.push(' ');
         }
-        bar.push_str(if index < filled {
-            &filled_dot(ratio)
+        let cell = if index < filled {
+            filled_dot(ratio)
         } else {
-            &empty_dot()
-        });
+            empty_dot()
+        };
+        bar.push_str(&cell);
     }
     bar
 }
@@ -406,14 +407,17 @@ fn print_recent(records: &[UsageRecord]) {
         // Only turns whose provider reported a cache read carry the marker, so the column stays
         // quiet on the providers that say nothing about caching.
         let cached = if record.cached_tokens > 0 {
-            format!(" ({} cached)", format_tokens(record.cached_tokens))
+            format!(
+                " ({} cached)",
+                format_tokens(u64::from(record.cached_tokens))
+            )
         } else {
             String::new()
         };
         println!(
             "  {:<17}{:>8}{:>10}{:>8}  {}",
             record.ts.format("%Y-%m-%d %H:%M"),
-            format!("{}{cached}", format_tokens(record.total_tokens)),
+            format!("{}{cached}", format_tokens(u64::from(record.total_tokens))),
             record
                 .cost_usd
                 .map(|cost| format!("${cost:.4}"))
