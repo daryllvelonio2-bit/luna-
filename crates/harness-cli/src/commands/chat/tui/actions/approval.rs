@@ -147,6 +147,22 @@ pub fn build_approval_question_prompt(req: &ApprovalRequest, question: &str) -> 
     out
 }
 
+/// Build the feedback sent to the requesting model when the user suggests an alternative at the
+/// approval popup. It names the tool, its target when present, and the popup as the origin so the
+/// model knows both *what* was suggested and *where* it was suggested.
+pub fn build_suggestion_feedback(req: &ApprovalRequest, text: &str) -> String {
+    let mut out = format!(
+        "Suggestion made at the approval popup for pending tool call: {}\n",
+        req.tool
+    );
+    if let Some(ref target) = req.target {
+        out.push_str(&format!("Target: {target}\n"));
+    }
+    out.push_str("User suggestion: ");
+    out.push_str(text.trim());
+    out
+}
+
 pub fn ask_approval_model(env: &Env<'_>, st: &TuiState, req: ApprovalRequest, question: String) {
     let (provider, model, reasoning_effort, _) = resolve_approval_model(env, st);
     let cred_manager = env.cred_manager.clone();

@@ -3,7 +3,7 @@
 use std::io;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use harness_core::{ApprovalDecision, HarnessError, ReasoningEffort};
+use harness_core::{ApprovalDecision, ApprovalRequest, HarnessError, ReasoningEffort};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
@@ -16,9 +16,72 @@ use super::super::actions::{
 use super::super::render::{
     filtered_models, filtered_palette_items, filtered_providers, filtered_sessions,
 };
-use super::super::state::{self as state, ActiveModal, AgentMode, ModelTarget, TuiState};
+use super::super::state::{
+    self as state, ActiveModal, AgentMode, ApprovalInputMode, ModelTarget, TuiState,
+    APPROVAL_ASK_INDEX, APPROVAL_CHOICE_COUNT, APPROVAL_SUGGEST_INDEX,
+};
 use super::handle_paste;
 use crate::commands::clarify::{ClarifyAnswer, ClarifyResponse};
+
+const ERROR_ASK_NEEDS_TEXT: &str = "Type a question first, or press Esc.";
+const ERROR_SUGGEST_NEEDS_TEXT: &str = "Type a suggestion first, or press Esc.";
+const ERROR_CTRL_S_NEEDS_TEXT: &str = "Type a suggestion before sending it to the model.";
+const ERROR_CTRL_S_NO_INPUT: &str = "Press s to type a suggestion first.";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ApprovalSubmitOutcome {
+    Asked(String),
+    Suggested(String),
+    NeedText(ApprovalInputMode),
+    Pending,
+}
+
+/// Single source of truth for the suggestion payload: Ctrl+S and the `[s]` choice both build it
+/// here, so the gate always receives the same context. `None` means there is nothing to send.
+pub(crate) fn approval_suggestion_payload(req: &ApprovalRequest, input: &str) -> Option<String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(actions::build_suggestion_feedback(req, trimmed))
+}
+
+pub(crate) fn approval_error_for(mode: ApprovalInputMode) -> &'static str {
+    match mode {
+        ApprovalInputMode::Ask => ERROR_ASK_NEEDS_TEXT,
+        ApprovalInputMode::Suggest => ERROR_SUGGEST_NEEDS_TEXT,
+    }
+}
+
+/// Decide what Enter in the approval input box does. The caller owns the reply channel and sends
+/// the decision itself, so this stays pure enough to test without a terminal or a provider.
+pub(crate) fn apply_approval_submit<F>(
+    mode: ApprovalInputMode,
+    req: &ApprovalRequest,
+    input: &str,
+    asking: bool,
+    ask: F,
+) -> ApprovalSubmitOutcome
+where
+    F: FnOnce(String),
+{
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return ApprovalSubmitOutcome::NeedText(mode);
+    }
+    match mode {
+        ApprovalInputMode::Ask if !asking => {
+            let question = trimmed.to_string();
+            ask(question.clone());
+            ApprovalSubmitOutcome::Asked(question)
+        }
+        ApprovalInputMode::Suggest => match approval_suggestion_payload(req, trimmed) {
+            Some(feedback) => ApprovalSubmitOutcome::Suggested(feedback),
+            None => ApprovalSubmitOutcome::NeedText(mode),
+        },
+        ApprovalInputMode::Ask => ApprovalSubmitOutcome::Pending,
+    }
+}
 
 pub async fn handle_modal_key(
     env: &mut Env<'_>,
@@ -730,10 +793,58 @@ pub async fn handle_modal_key(
                     KeyCode::Char('s') | KeyCode::Char('S')
                         if key.modifiers.contains(KeyModifiers::CONTROL) =>
                     {
-                        let trimmed = input.trim().to_string();
-                        if trimmed.is_empty() {
-                            error =
-                                Some("Type a suggestion before sending to the agent.".to_string());
+                        match approval_suggestion_payload(&req, &input) {
+                            // Sent: the sender is consumed and the resolved gate closes the modal
+                            // on its own, so there is nothing to put back.
+                            Some(feedback) => {
+                                let _ = resp_tx.send(ApprovalDecision::DenyWithFeedback(feedback));
+                            }
+                            None => {
+                                error = Some(ERROR_CTRL_S_NEEDS_TEXT.to_string());
+                                st.modal = ActiveModal::Approval {
+                                    req,
+                                    resp_tx,
+                                    selected,
+                                    diff_scroll,
+                                    editing_input,
+                                    input,
+                                    asking,
+                                    reply,
+                                    reply_scroll,
+                                    error,
+                                };
+                            }
+                        }
+                    }
+                    KeyCode::Enter => {
+                        let mode = ApprovalInputMode::from_selected(selected);
+                        let outcome = apply_approval_submit(mode, &req, &input, asking, |text| {
+                            ask_approval_model(env, st, req.clone(), text)
+                        });
+                        // Only the suggest route consumes the reply channel; the other outcomes must
+                        // keep the modal open, so hold the sender until we know which happened.
+                        let mut resp_tx = Some(resp_tx);
+                        match outcome {
+                            ApprovalSubmitOutcome::Asked(_) => {
+                                asking = true;
+                                editing_input = false;
+                                error = None;
+                                reply = None;
+                                reply_scroll = 0;
+                            }
+                            ApprovalSubmitOutcome::Suggested(feedback) => {
+                                if let Some(tx) = resp_tx.take() {
+                                    let _ = tx.send(ApprovalDecision::DenyWithFeedback(feedback));
+                                }
+                            }
+                            ApprovalSubmitOutcome::NeedText(mode) => {
+                                error = Some(approval_error_for(mode).to_string());
+                            }
+                            ApprovalSubmitOutcome::Pending => {}
+                        }
+                        // A sent suggestion leaves `resp_tx` empty: the gate resolves, so the modal
+                        // is deliberately not rebuilt.
+                        if let Some(resp_tx) = resp_tx {
                             st.modal = ActiveModal::Approval {
                                 req,
                                 resp_tx,
@@ -746,36 +857,7 @@ pub async fn handle_modal_key(
                                 reply_scroll,
                                 error,
                             };
-                        } else {
-                            let _ = resp_tx.send(ApprovalDecision::DenyWithFeedback(trimmed));
                         }
-                    }
-                    KeyCode::Enter => {
-                        let trimmed = input.trim().to_string();
-                        if !trimmed.is_empty() && !asking {
-                            asking = true;
-                            editing_input = false;
-                            error = None;
-                            reply = None;
-                            reply_scroll = 0;
-                            ask_approval_model(env, st, req.clone(), trimmed);
-                        } else if trimmed.is_empty() {
-                            error = Some(
-                                "Type a question or suggestion first, or press Esc.".to_string(),
-                            );
-                        }
-                        st.modal = ActiveModal::Approval {
-                            req,
-                            resp_tx,
-                            selected,
-                            diff_scroll,
-                            editing_input,
-                            input,
-                            asking,
-                            reply,
-                            reply_scroll,
-                            error,
-                        };
                     }
                     KeyCode::Backspace => {
                         input.pop();
@@ -840,7 +922,27 @@ pub async fn handle_modal_key(
                     }
                     KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Char('4') => {
                         editing_input = true;
-                        selected = 3;
+                        selected = APPROVAL_ASK_INDEX;
+                        error = None;
+                        st.modal = ActiveModal::Approval {
+                            req,
+                            resp_tx,
+                            selected,
+                            diff_scroll,
+                            editing_input,
+                            input,
+                            asking,
+                            reply,
+                            reply_scroll,
+                            error,
+                        };
+                    }
+                    // Bare s/S is free; Ctrl+S is a separate shortcut, hence the guard.
+                    KeyCode::Char('s') | KeyCode::Char('S') | KeyCode::Char('5')
+                        if !key.modifiers.contains(KeyModifiers::CONTROL) =>
+                    {
+                        editing_input = true;
+                        selected = APPROVAL_SUGGEST_INDEX;
                         error = None;
                         st.modal = ActiveModal::Approval {
                             req,
@@ -888,23 +990,25 @@ pub async fn handle_modal_key(
                     KeyCode::Char('s') | KeyCode::Char('S')
                         if key.modifiers.contains(KeyModifiers::CONTROL) =>
                     {
-                        let trimmed = input.trim().to_string();
-                        if trimmed.is_empty() {
-                            error = Some("Press q to type a suggestion first.".to_string());
-                            st.modal = ActiveModal::Approval {
-                                req,
-                                resp_tx,
-                                selected,
-                                diff_scroll,
-                                editing_input,
-                                input,
-                                asking,
-                                reply,
-                                reply_scroll,
-                                error,
-                            };
-                        } else {
-                            let _ = resp_tx.send(ApprovalDecision::DenyWithFeedback(trimmed));
+                        match approval_suggestion_payload(&req, &input) {
+                            Some(feedback) => {
+                                let _ = resp_tx.send(ApprovalDecision::DenyWithFeedback(feedback));
+                            }
+                            None => {
+                                error = Some(ERROR_CTRL_S_NO_INPUT.to_string());
+                                st.modal = ActiveModal::Approval {
+                                    req,
+                                    resp_tx,
+                                    selected,
+                                    diff_scroll,
+                                    editing_input,
+                                    input,
+                                    asking,
+                                    reply,
+                                    reply_scroll,
+                                    error,
+                                };
+                            }
                         }
                     }
                     KeyCode::PageUp => {
@@ -946,7 +1050,11 @@ pub async fn handle_modal_key(
                         };
                     }
                     KeyCode::Up => {
-                        selected = if selected == 0 { 3 } else { selected - 1 };
+                        selected = if selected == 0 {
+                            APPROVAL_CHOICE_COUNT - 1
+                        } else {
+                            selected - 1
+                        };
                         st.modal = ActiveModal::Approval {
                             req,
                             resp_tx,
@@ -961,7 +1069,7 @@ pub async fn handle_modal_key(
                         };
                     }
                     KeyCode::Down => {
-                        selected = (selected + 1) % 4;
+                        selected = (selected + 1) % APPROVAL_CHOICE_COUNT;
                         st.modal = ActiveModal::Approval {
                             req,
                             resp_tx,

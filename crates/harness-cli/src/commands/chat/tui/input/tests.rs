@@ -85,3 +85,62 @@ fn cursor_byte_from_coords_maps_lines_and_columns() {
     assert_eq!(cursor_byte_from_coords(text, 1, 0, 40), 6);
     assert_eq!(cursor_byte_from_coords(text, 1, 2, 40), 8);
 }
+
+#[test]
+fn approval_ask_and_suggest_take_different_routes() {
+    use super::super::state::ApprovalInputMode;
+    use super::modals::{
+        apply_approval_submit, approval_suggestion_payload, ApprovalSubmitOutcome,
+    };
+
+    let req = harness_core::ApprovalRequest {
+        tool: "terminal".to_string(),
+        call_id: "c1".to_string(),
+        target: Some("cargo test".to_string()),
+        diff: None,
+        arguments: serde_json::Value::Null,
+    };
+
+    // Whitespace is not a suggestion.
+    assert_eq!(approval_suggestion_payload(&req, "   "), None);
+
+    // A suggestion carries the tool and its target, so the model knows what and where.
+    let payload = approval_suggestion_payload(&req, " use pytest ").expect("payload");
+    assert!(payload.contains("terminal"), "{payload}");
+    assert!(payload.contains("cargo test"), "{payload}");
+    assert!(payload.ends_with("use pytest"), "{payload}");
+
+    // Enter in ask mode runs the Q&A route and sends no decision.
+    let mut asked: Vec<String> = Vec::new();
+    let outcome = apply_approval_submit(ApprovalInputMode::Ask, &req, "why?", false, |q| {
+        asked.push(q)
+    });
+    assert_eq!(outcome, ApprovalSubmitOutcome::Asked("why?".to_string()));
+    assert_eq!(asked, vec!["why?".to_string()]);
+
+    // Enter in suggest mode yields the denial payload instead of asking.
+    match apply_approval_submit(
+        ApprovalInputMode::Suggest,
+        &req,
+        "use pytest",
+        false,
+        |_| {},
+    ) {
+        ApprovalSubmitOutcome::Suggested(feedback) => {
+            assert!(feedback.ends_with("use pytest"), "{feedback}")
+        }
+        other => panic!("expected a suggestion, got {other:?}"),
+    }
+
+    // Empty text in suggest mode asks for text and sends nothing.
+    assert_eq!(
+        apply_approval_submit(ApprovalInputMode::Suggest, &req, "  ", false, |_| {}),
+        ApprovalSubmitOutcome::NeedText(ApprovalInputMode::Suggest)
+    );
+
+    // A second Enter while the model is still answering must not send again.
+    assert_eq!(
+        apply_approval_submit(ApprovalInputMode::Ask, &req, "again?", true, |_| {}),
+        ApprovalSubmitOutcome::Pending
+    );
+}

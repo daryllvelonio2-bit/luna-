@@ -121,6 +121,37 @@ fn build_approval_question_prompt_includes_diff_and_question() {
     assert!(prompt.contains("Is +new safe?"));
 }
 
+#[test]
+fn suggestion_feedback_names_the_tool_the_target_and_the_suggestion() {
+    let req = harness_core::ApprovalRequest {
+        tool: "terminal".to_string(),
+        call_id: "c1".to_string(),
+        target: Some("cargo test".to_string()),
+        diff: None,
+        arguments: serde_json::json!({ "command": "cargo test" }),
+    };
+    let feedback = super::build_suggestion_feedback(&req, "  use pytest instead  ");
+    // The model must learn what was suggested and where it was suggested.
+    assert!(feedback.contains("approval popup"), "{feedback}");
+    assert!(feedback.contains("terminal"), "{feedback}");
+    assert!(feedback.contains("cargo test"), "{feedback}");
+    assert!(feedback.ends_with("use pytest instead"), "{feedback}");
+}
+
+#[test]
+fn suggestion_feedback_without_a_target_still_names_the_tool() {
+    let req = harness_core::ApprovalRequest {
+        tool: "patch".to_string(),
+        call_id: "c2".to_string(),
+        target: None,
+        diff: None,
+        arguments: serde_json::Value::Null,
+    };
+    let feedback = super::build_suggestion_feedback(&req, "keep the old name");
+    assert!(feedback.contains("patch"), "{feedback}");
+    assert!(!feedback.contains("Target:"), "{feedback}");
+}
+
 #[tokio::test]
 async fn priority_scope_modal_actions() {
     let temp_dir = tempfile::tempdir().unwrap();

@@ -1,6 +1,7 @@
 //! modals
 
 use super::*;
+use crate::commands::chat::tui::state::ApprovalInputMode;
 use crate::commands::chat::tui::theme::accent_auto;
 
 pub(crate) fn render_modal(
@@ -728,14 +729,18 @@ pub(crate) fn render_modal(
             ..
         } => {
             let (max_w, max_h) = responsive_modal_size(screen, 4, 2, 58, 100, 10, 34);
+            let edit_mode = ApprovalInputMode::from_selected(*selected);
             let hint = if *editing_input {
-                "enter ask · ctrl+s send · esc back"
+                match edit_mode {
+                    ApprovalInputMode::Ask => "enter ask · ctrl+s suggest · esc back",
+                    ApprovalInputMode::Suggest => "enter suggest · ctrl+s suggest · esc back",
+                }
             } else if reply.is_some() {
-                "↑/↓ · enter · q ask · pgup/pgdn · [/] diff · ctrl+s send"
+                "↑/↓ · enter · q ask · s suggest · pgup/pgdn · [/] diff · ctrl+s suggest"
             } else if !input.trim().is_empty() {
-                "↑/↓ · enter · q ask · [/] diff · ctrl+s send"
+                "↑/↓ · enter · q ask · s suggest · [/] diff · ctrl+s suggest"
             } else {
-                "↑/↓ · enter · y/a/n/q · [/] diff"
+                "↑/↓ · enter · y/a/n/q/s · [/] diff"
             };
             let box_w_est = max_w.saturating_sub(4) as usize;
             let box_inner_w_est = box_w_est.saturating_sub(3).max(16);
@@ -1031,7 +1036,8 @@ pub(crate) fn render_modal(
                 ("[y]", " Allow once", green_ok()),
                 ("[a]", " Allow for this session (Auto mode)", yellow_warn()),
                 ("[n]", " Deny", red_err()),
-                ("[q]", " Ask a question / add a suggestion", cyan_link()),
+                ("[q]", " Ask a question", cyan_link()),
+                ("[s]", " Suggest an alternative", cyan_link()),
             ];
             for (idx, (key, label, base_fg)) in choices.iter().enumerate() {
                 let is_sel = !*editing_input && idx == *selected;
@@ -1074,10 +1080,10 @@ pub(crate) fn render_modal(
                 if lines.len() + 2 <= inner_h {
                     lines.push(Line::default());
                 }
-                let prompt_prefix = if inner_w < 32 {
-                    " ▸ Ask: "
-                } else {
-                    " ▸ Ask / suggest: "
+                // Both modes use a short prefix so the narrow-width layout keeps working.
+                let prompt_prefix = match edit_mode {
+                    ApprovalInputMode::Ask => " ▸ Ask: ",
+                    ApprovalInputMode::Suggest => " ▸ Suggest: ",
                 };
                 let avail = inner_w.saturating_sub(prompt_prefix.width() + 1);
                 let mut shown = input.clone();

@@ -1189,6 +1189,31 @@ pub struct ModelPickerItem {
     pub is_current: bool,
 }
 
+/// Number of choices in the approval popup; bounds `selected` for arrow-key wrapping.
+pub(crate) const APPROVAL_CHOICE_COUNT: usize = 5;
+/// `[q] Ask a question` — Enter runs the in-popup approval Q&A model.
+pub(crate) const APPROVAL_ASK_INDEX: usize = 3;
+/// `[s] Suggest an alternative` — Enter denies the call and feeds the suggestion back to the model.
+pub(crate) const APPROVAL_SUGGEST_INDEX: usize = 4;
+
+/// Which route the approval popup's text input serves. Derived from the selected choice index,
+/// which survives `editing_input`, so the modal needs no extra field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ApprovalInputMode {
+    Ask,
+    Suggest,
+}
+
+impl ApprovalInputMode {
+    pub(crate) fn from_selected(selected: usize) -> Self {
+        if selected == APPROVAL_SUGGEST_INDEX {
+            Self::Suggest
+        } else {
+            Self::Ask
+        }
+    }
+}
+
 /// Modal overlay currently owning keyboard input.
 pub enum ActiveModal {
     None,

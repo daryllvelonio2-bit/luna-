@@ -51,7 +51,8 @@ fn approval_modal_renders_four_choices_input_and_reply() {
     assert!(text.contains("-a"), "{text}");
     assert!(text.contains("+b"), "{text}");
     assert!(text.contains("Allow once"), "{text}");
-    assert!(text.contains("Ask a question / add a suggestion"), "{text}");
+    assert!(text.contains("Ask a question"), "{text}");
+    assert!(text.contains("Suggest an alternative"), "{text}");
     assert!(text.contains("Because b fixes the off-by-one."), "{text}");
     assert!(text.contains("Why replace a with b?"), "{text}");
 
