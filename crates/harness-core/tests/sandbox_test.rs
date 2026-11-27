@@ -150,7 +150,8 @@ fn tilde_expansion_does_not_become_a_home_directory_hole() {
 fn extra_roots_are_honoured_and_nothing_else_widens() {
     let (_dir, root) = workspace();
     let scratch = tempfile::tempdir().expect("scratch");
-    let scratch_root = harness_core::fsutil::canonicalize(scratch.path()).expect("canonical scratch");
+    let scratch_root =
+        harness_core::fsutil::canonicalize(scratch.path()).expect("canonical scratch");
 
     let sandbox = Sandbox::with_extra_roots(root.clone(), vec![scratch_root.clone()]);
 
