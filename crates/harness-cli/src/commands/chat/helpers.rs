@@ -117,6 +117,7 @@ pub(crate) fn finish_slash_command(
         tool_items: Vec::new(),
         duration: std::time::Duration::ZERO,
         reply,
+        command_output: true,
     });
     if redraw && ui.is_attended && !ui.is_tui_mode() {
         crate::commands::clear_screen();

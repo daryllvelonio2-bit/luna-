@@ -5,11 +5,9 @@
 //! only visible by leaving the session. `/usage` reads the same ledger, filtered to the session on
 //! screen: the same numbers, in the place the work is happening.
 //!
-//! The layout is a report, not a table. A context window is a *share*, and a share is read as a
-//! picture before it is read as a number: the grid of cells fills left to right, then the rows
-//! beside it say what filled it — system prompt, the user's turns, the model's replies, its
-//! reasoning, and the tool calls. The empty cells are the free space, which is the one number a
-//! reader usually wants and the one a total of "tokens used" never shows.
+//! The layout is a two-column report: a 10×10 grid of square cells (`■` / `□`, 1% each) on the
+//! left, and an aligned list of facts on the right — model, headline, auto-compact setting,
+//! category breakdown, and free space.
 //!
 //! Three things are reported, and they answer three different questions:
 //!
@@ -19,9 +17,7 @@
 //!   that says nothing about caching reports nothing here: a line of zeroes would read as
 //!   "caching was measured and did not help", when what happened is that nothing was said.
 //!
-//! The report is emitted as one block into the transcript. It is not a modal: a modal would cover
-//! the conversation the numbers are about, and `/usage` is a question asked *about* the pane, not
-//! a place to go.
+//! The report is emitted as one block into the transcript and can be dismissed with `Esc`.
 
 use std::sync::Arc;
 
@@ -29,21 +25,31 @@ use colored::Colorize;
 use harness_core::session::ContextParts;
 use harness_core::usage::{UsageFilter, UsageLedger, UsageTotals};
 use harness_core::{Config, HarnessError};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::commands::chat::ui::{get_terminal_width, ChatUi};
 use crate::commands::chat::ChatAgent;
 use crate::commands::context_window::context_window_for;
 use crate::commands::usage::{
-    cache_text, cost_text, dot_bar, dot_grid, empty_dot, fill_ratio, filled_dot, format_duration,
-    format_tokens,
+    cache_text, cost_text, dot_bar, fill_ratio, format_duration, format_tokens,
 };
 
-/// Where the right-hand column starts when the grid is drawn beside it. The grid is
-/// `GRID_COLUMNS * 2 - 1` cells wide (`4*2-1 = 7`), two spaces of indent, then a gap.
-const RIGHT_COLUMN: usize = 14;
-
+const GRID_COLS: usize = 10;
+const GRID_ROWS: usize = 10;
+/// Width of one 10-cell grid row (`10 * 2 - 1 = 19` visible cells).
+const GRID_WIDTH: usize = GRID_COLS * 2 - 1;
+/// Where the right-hand column starts: 2-space indent + 19-cell grid + 3-space gap = 24.
+const RIGHT_COLUMN: usize = 24;
 /// Below this width the grid and the rows stack instead of sitting side by side.
-const SIDE_BY_SIDE_MIN: usize = 60;
+const SIDE_BY_SIDE_MIN: usize = 50;
+
+const CATEGORIES: [(&str, (u8, u8, u8)); 5] = [
+    ("System prompt", (137, 180, 250)),
+    ("User messages", (166, 227, 161)),
+    ("Agent responses", (116, 199, 236)),
+    ("Reasoning", (203, 166, 247)),
+    ("Tool calls", (148, 226, 213)),
+];
 
 /// `/usage`: the session's context, its spend, and the ledger's, in the chat pane.
 pub(crate) async fn handle_usage_command(
@@ -95,7 +101,7 @@ pub(crate) async fn handle_usage_command(
         parts.as_ref(),
         max,
         &compact_note(config),
-        get_terminal_width(),
+        get_terminal_width().saturating_sub(8),
     );
     report.push(String::new());
     report.extend(totals_report("Session totals", &session_totals));
@@ -130,34 +136,86 @@ fn compact_note(config: &Config) -> String {
     }
 }
 
-fn rule(width: usize) -> String {
-    "─".repeat(width.clamp(20, 78)).dimmed().to_string()
-}
-
 fn heading(title: &str) -> String {
-    format!("{} {}", "▸".dimmed(), title.bold())
+    format!("{} {}", "└".dimmed(), title.bold())
 }
 
-/// One row of the context split: the bullet carries the share as colour, the text as a number.
-fn part_row(parts: &ContextParts, max: u32, label: &str, tokens: u32) -> String {
+fn truncate_with_ellipsis(text: &str, max_width: usize) -> String {
+    if text.width() <= max_width {
+        return text.to_string();
+    }
+    if max_width == 0 {
+        return String::new();
+    }
+    if max_width == 1 {
+        return "…".to_string();
+    }
+    let target = max_width - 1;
+    let mut out = String::new();
+    let mut w = 0;
+    for ch in text.chars() {
+        let cw = ch.width().unwrap_or(0);
+        if w + cw > target {
+            break;
+        }
+        out.push(ch);
+        w += cw;
+    }
+    out.push('…');
+    out
+}
+
+/// Build the 10×10 square-cell grid: each cell is 1% of the window, colored by category.
+fn context_grid(tokens_list: &[u32; 5], max: u32) -> Vec<String> {
+    let total_cells = GRID_COLS * GRID_ROWS;
+    let mut counts = [0usize; 5];
+    if max > 0 {
+        for (i, &tokens) in tokens_list.iter().enumerate() {
+            if tokens > 0 {
+                counts[i] = ((tokens as f64 / max as f64) * 100.0).round().max(1.0) as usize;
+            }
+        }
+        while counts.iter().sum::<usize>() > total_cells {
+            if let Some((idx, _)) = counts.iter().enumerate().max_by_key(|(_, &c)| c) {
+                if counts[idx] > 0 {
+                    counts[idx] -= 1;
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+
+    let mut cells = Vec::with_capacity(total_cells);
+    for (idx, &count) in counts.iter().enumerate() {
+        let (_, (r, g, b)) = CATEGORIES[idx];
+        for _ in 0..count {
+            cells.push("■".truecolor(r, g, b).to_string());
+        }
+    }
+    while cells.len() < total_cells {
+        cells.push("□".dimmed().to_string());
+    }
+
+    cells.chunks(GRID_COLS).map(|row| row.join(" ")).collect()
+}
+
+/// One row of the context split: the bullet carries the category colour, the text the number.
+fn part_row(parts: &ContextParts, max: u32, label: &str, rgb: (u8, u8, u8), tokens: u32) -> String {
+    let bullet = "●".truecolor(rgb.0, rgb.1, rgb.2);
     // Without a published window there is no share to draw, and a `0.0%` row would read as
     // empty — so the row states the tokens and nothing else.
     if max == 0 {
-        return format!(
-            "{} {label}: {} tokens",
-            "•".dimmed(),
-            format_tokens(tokens as u64)
-        );
+        return format!("{bullet} {label}: {} tokens", format_tokens(tokens as u64));
     }
     let share = parts.percent(tokens, max);
     format!(
-        "{} {label}: {} tokens ({share:.1}%)",
-        filled_dot(fill_ratio(tokens as u64, max as u64)),
+        "{bullet} {label}: {} tokens ({share:.1}%)",
         format_tokens(tokens as u64)
     )
 }
 
-/// The context section: the filled grid, then what filled it.
+/// The context section: the filled grid on the left, then what filled it on the right.
 ///
 /// Pure, so the report is checked without a terminal: `parts` is `None` while a turn holds the
 /// agent, and the section then says the measurement is unavailable instead of inventing zeros.
@@ -168,7 +226,7 @@ pub(crate) fn context_report(
     compact_note: &str,
     width: usize,
 ) -> Vec<String> {
-    let mut lines = vec![rule(width), heading("Context Usage")];
+    let mut lines = vec![heading("Context Usage")];
 
     let Some(parts) = parts else {
         lines.push(format!(
@@ -178,59 +236,66 @@ pub(crate) fn context_report(
         return lines;
     };
 
+    let side_by_side = width >= SIDE_BY_SIDE_MIN;
+    let right_budget = if side_by_side {
+        width.saturating_sub(RIGHT_COLUMN)
+    } else {
+        width.saturating_sub(2)
+    };
+
     let used = parts.used();
     let ratio = fill_ratio(used as u64, max as u64);
     let headline = if max == 0 {
         format!(
-            "{} · {} tokens · {}",
-            model_label.bold(),
+            "{} tokens · {}",
             format_tokens(used as u64),
             "window unknown".dimmed()
         )
     } else {
         format!(
-            "{} · {}/{} tokens ({:.1}%)",
-            model_label.bold(),
+            "{}/{} tokens ({:.1}%)",
             format_tokens(used as u64),
             format_tokens(max as u64),
             ratio * 100.0
         )
     };
 
-    let mut rows = vec![
-        headline,
-        format!("{} Auto-compact {compact_note}", "·".dimmed()),
-        format!(
-            "{}",
-            "Estimated usage (4 chars ≈ 1 token over the transcript)".dimmed()
-        ),
-        part_row(parts, max, "System prompt", parts.system),
-        part_row(parts, max, "User messages", parts.user),
-        part_row(parts, max, "Agent responses", parts.assistant),
-        part_row(parts, max, "Reasoning", parts.reasoning),
-        part_row(
-            parts,
-            max,
-            "Tool calls",
-            parts.tool_calls + parts.tool_results,
-        ),
+    let tokens_list = [
+        parts.system,
+        parts.user,
+        parts.assistant,
+        parts.reasoning,
+        parts.tool_calls + parts.tool_results,
     ];
+
+    let mut rows = vec![
+        truncate_with_ellipsis(model_label, right_budget)
+            .bold()
+            .to_string(),
+        headline,
+        format!("Auto-compact {compact_note}"),
+        "Estimated usage (≈4 chars per token)".dimmed().to_string(),
+    ];
+    for (idx, (label, rgb)) in CATEGORIES.iter().enumerate() {
+        rows.push(part_row(parts, max, label, *rgb, tokens_list[idx]));
+    }
     if max > 0 {
         rows.push(format!(
             "{} Free space: {} tokens ({:.1}%)",
-            empty_dot(),
+            "□".dimmed(),
             format_tokens(parts.free(max) as u64),
             parts.percent(parts.free(max), max)
         ));
     }
 
-    let grid = dot_grid(ratio);
-    if width >= SIDE_BY_SIDE_MIN {
-        let pad = " ".repeat(RIGHT_COLUMN.saturating_sub(2 + 7));
+    let grid = context_grid(&tokens_list, max);
+    if side_by_side {
+        let pad_left = " ".repeat(GRID_WIDTH);
+        let gap = " ".repeat(RIGHT_COLUMN - 2 - GRID_WIDTH);
         for index in 0..grid.len().max(rows.len()) {
-            let left = grid.get(index).cloned().unwrap_or_default();
+            let left = grid.get(index).map(String::as_str).unwrap_or(&pad_left);
             match rows.get(index) {
-                Some(right) => lines.push(format!("  {left}{pad}{right}")),
+                Some(right) => lines.push(format!("  {left}{gap}{right}")),
                 None => lines.push(format!("  {left}")),
             }
         }
@@ -350,7 +415,8 @@ mod tests {
     fn a_running_turn_says_the_measurement_is_unavailable() {
         let report = context_report("p/m", None, 100_000, "at 80% of the window", 100).join("\n");
         assert!(report.contains("in flight"), "{report}");
-        assert!(!report.contains('○'), "no grid: {report}");
+        assert!(!report.contains('□'), "no grid: {report}");
+        assert!(!report.contains('■'), "no grid: {report}");
     }
 
     /// A narrow pane stacks the grid above the rows rather than wrapping them into nonsense.
@@ -397,5 +463,39 @@ mod tests {
         empty.turns = 0;
         let report = totals_report("Session totals", &empty).join("\n");
         assert!(report.contains("no turns recorded yet"), "{report}");
+    }
+
+    /// The grid always renders 100 square cells (1% each) alongside the breakdown.
+    #[test]
+    fn grid_has_100_cells_with_expected_fill() {
+        let report =
+            context_report("p/m", Some(&parts()), 100_000, "at 80% of the window", 100).join("\n");
+        // 6000->6, 1000->1, 800->1, 200->max(1,0)=1, 1500->2 => 11 filled cells.
+        let filled = report.matches('■').count();
+        // 89 empty cells in the grid + 1 '□' bullet on the Free space row = 90.
+        let empty = report.matches('□').count();
+        assert_eq!(filled, 11, "filled cells: {report}");
+        assert_eq!(empty, 90, "empty cells + free bullet: {report}");
+    }
+
+    /// Long model names are truncated so no line in the wide report exceeds the width budget.
+    #[test]
+    fn wide_report_respects_width_budget_with_long_model_name() {
+        let long_model = "provider/".to_string() + &"m".repeat(61);
+        let lines = context_report(
+            &long_model,
+            Some(&parts()),
+            100_000,
+            "at 80% of the window",
+            80,
+        );
+        for line in &lines {
+            let plain = dialoguer::console::strip_ansi_codes(line);
+            assert!(
+                plain.width() <= 80,
+                "line exceeded 80 cols ({}): {plain:?}",
+                plain.width()
+            );
+        }
     }
 }

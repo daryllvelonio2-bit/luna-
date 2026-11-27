@@ -100,6 +100,7 @@ fn worker_turns_from_history_excludes_parent_fork_history() {
         tool_items: Vec::new(),
         duration: std::time::Duration::ZERO,
         reply: r.to_string(),
+        command_output: false,
     };
 
     let parent_only = vec![turn("hello", "hi"), turn("check status", "ok")];

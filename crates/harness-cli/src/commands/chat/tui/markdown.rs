@@ -20,6 +20,37 @@ pub struct CodeBlockRegion {
     pub code: String,
 }
 
+/// Command output drawn line for line: ANSI colours kept, indentation kept, no markdown.
+pub fn render_verbatim(input: &str, max_width: usize) -> Vec<Line<'static>> {
+    let width = max_width.max(1);
+    let base = Style::default().fg(text_primary());
+    let mut out = Vec::new();
+    for raw_line in input.split('\n') {
+        let mut clean = String::with_capacity(raw_line.len());
+        for ch in raw_line.chars() {
+            if ch == '\t' {
+                clean.push_str("    ");
+            } else if ch != '\r' {
+                clean.push(ch);
+            }
+        }
+        if clean.is_empty() {
+            out.push(Line::default());
+            continue;
+        }
+        let mut spans = Vec::new();
+        let mut lexer = AnsiLexer::default();
+        lexer.feed(&clean, base, &mut spans);
+        let visible_width: usize = spans.iter().map(|s| s.content.width()).sum();
+        if visible_width <= width {
+            out.push(Line::from(spans));
+        } else {
+            out.extend(wrap_spans(&spans, width));
+        }
+    }
+    out
+}
+
 /// Render Markdown into wrapped `ratatui` lines constrained to `max_width` terminal cells.
 pub fn render_markdown(input: &str, max_width: usize) -> Vec<Line<'static>> {
     render_md(input, max_width, false).0
@@ -1716,5 +1747,26 @@ mod tests {
                 line
             );
         }
+    }
+
+    #[test]
+    fn render_verbatim_preserves_indentation_and_ansi_color() {
+        let lines = render_verbatim("  a\n    b", 80);
+        assert_eq!(lines.len(), 2);
+        let first: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        let second: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(first.starts_with("  a"), "got: {first:?}");
+        assert!(second.starts_with("    b"), "got: {second:?}");
+
+        let colored = render_verbatim("\x1b[31mred\x1b[0m", 80);
+        assert_eq!(colored.len(), 1);
+        assert!(
+            colored[0]
+                .spans
+                .iter()
+                .any(|span| span.style.fg == Some(Color::Red)),
+            "ANSI color must be preserved: {:?}",
+            colored[0].spans
+        );
     }
 }

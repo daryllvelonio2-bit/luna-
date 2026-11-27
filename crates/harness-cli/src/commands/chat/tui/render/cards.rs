@@ -252,13 +252,17 @@ pub(crate) fn render_single_settled_turn(
         card_inner_w,
     );
 
-    // 4. Assistant reply (markdown)
+    // 4. Assistant reply (markdown, or verbatim for slash command output)
     let display_reply = reply_for_display(&turn.reply);
     if !display_reply.trim().is_empty() {
         if !turn.reasoning.as_deref().unwrap_or("").is_empty() || !turn.tool_items.is_empty() {
             out.push(Line::default());
         }
-        let (rendered, code_blocks) = render_markdown_with_code(display_reply, card_inner_w);
+        let (rendered, code_blocks) = if turn.command_output {
+            (render_verbatim(display_reply, card_inner_w), Vec::new())
+        } else {
+            render_markdown_with_code(display_reply, card_inner_w)
+        };
         let md_base = out.len();
         for mline in rendered {
             let mut spans = vec![Span::styled("  ", Style::default().bg(bg_canvas()))];

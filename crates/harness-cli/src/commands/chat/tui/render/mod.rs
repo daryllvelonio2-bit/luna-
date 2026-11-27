@@ -16,7 +16,7 @@ use super::super::render::{
 use super::super::ui::{TuiLiveSnapshot, TuiPtyPane, MAX_DELEGATE_BLOCKS};
 use super::markdown::{
     clean_terminal_text, parse_terminal_line, render_markdown, render_markdown_with_code,
-    strip_ansi, wrap_plain_text, wrap_spans,
+    render_verbatim, strip_ansi, wrap_plain_text, wrap_spans,
 };
 use crate::commands::chat::tui::state::{
     ActiveModal, ComposerHitBox, ImagePreview, LiveThinkingView, ModelPickerItem, PaletteAction,

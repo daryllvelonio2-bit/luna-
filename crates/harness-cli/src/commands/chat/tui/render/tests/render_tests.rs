@@ -351,6 +351,7 @@ fn compaction_turn_renders_yellow_card_and_compacted_footer() {
         tool_items: Vec::new(),
         duration: std::time::Duration::from_millis(1500),
         reply: "## Objective\nSummarized context.".to_string(),
+        command_output: false,
     };
     let mut out = Vec::new();
     let mut hits = Vec::new();
@@ -426,6 +427,7 @@ fn completed_turn_renders_interleaved_thinking_prose_and_tool_cards() {
         ],
         duration: Duration::from_secs(3),
         reply: "Done".to_string(),
+        command_output: false,
     };
 
     let mut out = Vec::new();
@@ -497,6 +499,7 @@ fn completed_turn_thinking_collapses_when_process_collapsed() {
         tool_items: Vec::new(),
         duration: Duration::from_secs(2),
         reply: "Hello.".to_string(),
+        command_output: false,
     };
     let mut out = Vec::new();
     let mut hits = Vec::new();
@@ -596,6 +599,7 @@ fn block_limit_caps_thinking_blocks_while_tool_cards_stay_capped_at_ten() {
         }],
         duration: Duration::from_secs(2),
         reply: "Done.".to_string(),
+        command_output: false,
     };
 
     let empty: HashSet<(usize, usize)> = HashSet::new();
@@ -758,6 +762,7 @@ fn ensure_settled_transcript_caches_and_appends_incrementally() {
             tool_items: Vec::new(),
             duration: Duration::from_secs(1),
             reply: "reply one".to_string(),
+            command_output: false,
         }],
         turn_meta: vec![TurnMeta {
             mode: "Build".to_string(),
@@ -922,6 +927,7 @@ fn ensure_settled_transcript_caches_and_appends_incrementally() {
         tool_items: Vec::new(),
         duration: Duration::from_secs(2),
         reply: "reply two".to_string(),
+        command_output: false,
     });
     st.turn_meta.push(TurnMeta {
         mode: "Build".to_string(),
@@ -1270,6 +1276,7 @@ fn test_subagent_inspector_lines_formatting() {
             }],
             duration: std::time::Duration::from_secs(14),
             reply: "The repository contains a modular CLI harness.".to_string(),
+            command_output: false,
         }],
         log_tail: Vec::new(),
     };
@@ -1552,6 +1559,7 @@ fn test_turn_footer_renders_additions_and_deletions() {
         }],
         duration: std::time::Duration::from_millis(2200),
         reply: "Patch applied successfully.".to_string(),
+        command_output: false,
     };
     let mut out = Vec::new();
     let mut hits = Vec::new();
@@ -1587,6 +1595,7 @@ fn test_turn_footer_renders_additions_and_deletions() {
         tool_items: Vec::new(),
         duration: std::time::Duration::from_millis(1500),
         reply: "Hello.".to_string(),
+        command_output: false,
     };
     let mut out_empty = Vec::new();
     let mut hits_empty = Vec::new();
@@ -1641,6 +1650,7 @@ fn test_total_code_changes_across_sessions() {
         }],
         duration: std::time::Duration::ZERO,
         reply: "".to_string(),
+        command_output: false,
     });
 
     let in_flight = vec![TurnProcessItem {
@@ -1703,6 +1713,7 @@ fn read_only_turns_never_animate_the_diff_counter() {
         }],
         duration: std::time::Duration::ZERO,
         reply: String::new(),
+        command_output: false,
     });
 
     st.update_diff_counter(None);
@@ -1765,6 +1776,7 @@ fn diff_counter_never_resets_down_to_low_value() {
         tool_items: in_flight,
         duration: std::time::Duration::ZERO,
         reply: "done".to_string(),
+        command_output: false,
     });
     st.update_diff_counter(None);
     assert_eq!(st.diff_anim_target_added, 2);
@@ -1794,6 +1806,7 @@ fn settled_turn_registers_copy_hit_target_on_code_block_header() {
         tool_items: Vec::new(),
         duration: Duration::from_millis(500),
         reply: "Here is a snippet:\n\n```rust\nlet x = 42;\nprintln!(\"{x}\");\n```\n".to_string(),
+        command_output: false,
     };
     let mut out = Vec::new();
     let mut hits = Vec::new();
@@ -2423,4 +2436,48 @@ fn command_header_truncates_after_three_blocks_and_expands_on_click() {
     assert!(joined_open.contains("cargo test -p harness-cli"));
     assert!(joined_open.contains("git status"));
     assert!(!joined_open.contains("more lines"));
+}
+
+#[test]
+fn esc_dismisses_trailing_command_output_and_leaves_model_turns() {
+    use crate::commands::chat::tui::input::keys::dismiss_command_output;
+
+    let mut st = test_dummy_tui_state();
+    st.turns.push(TurnRecord {
+        user_query: "hello".to_string(),
+        reasoning: None,
+        tools: Vec::new(),
+        tool_items: Vec::new(),
+        duration: Duration::from_secs(1),
+        reply: "Hi there.".to_string(),
+        command_output: false,
+    });
+    st.turn_meta.push(TurnMeta {
+        mode: "Build".to_string(),
+        model: "gpt-4o".to_string(),
+        output_tokens: None,
+    });
+    st.turns.push(TurnRecord {
+        user_query: "/usage".to_string(),
+        reasoning: None,
+        tools: Vec::new(),
+        tool_items: Vec::new(),
+        duration: Duration::ZERO,
+        reply: "Context Usage".to_string(),
+        command_output: true,
+    });
+    st.turn_meta.push(TurnMeta {
+        mode: "Build".to_string(),
+        model: "gpt-4o".to_string(),
+        output_tokens: None,
+    });
+
+    assert!(dismiss_command_output(&mut st));
+    assert_eq!(st.turns.len(), 1);
+    assert_eq!(st.turn_meta.len(), 1);
+    assert_eq!(st.turns[0].user_query, "hello");
+
+    // Pressing Esc again does not remove a model turn.
+    assert!(!dismiss_command_output(&mut st));
+    assert_eq!(st.turns.len(), 1);
 }

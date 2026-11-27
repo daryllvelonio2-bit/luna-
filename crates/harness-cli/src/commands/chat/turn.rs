@@ -74,6 +74,7 @@ pub(super) fn turn_records(
             tool_items: segment_tools,
             duration: notice.at.saturating_duration_since(segment_start),
             reply: notice.partial.trim().to_string(),
+            command_output: false,
         });
         segment_query = notice.text;
         segment_start = notice.at;
@@ -101,6 +102,7 @@ pub(super) fn turn_records(
         tool_items: final_segment_tools,
         duration: turn_duration.saturating_sub(segment_start.saturating_duration_since(turn_start)),
         reply: final_reply,
+        command_output: false,
     });
     records
 }

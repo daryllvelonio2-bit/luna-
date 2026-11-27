@@ -813,6 +813,7 @@ pub async fn apply_compaction_completed(env: &Env<'_>, st: &mut TuiState) {
                     tool_items: Vec::new(),
                     duration: dur,
                     reply: summary,
+                    command_output: false,
                 });
             }
         }

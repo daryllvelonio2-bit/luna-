@@ -16,6 +16,19 @@ use super::super::state::{ActiveModal, TuiState};
 use super::modals::{close_modal_with_cancel, handle_modal_key};
 use super::mouse::clear_selection;
 
+/// Dismiss the trailing slash-command output turn when idle, returning `true` if one was removed.
+pub(crate) fn dismiss_command_output(st: &mut TuiState) -> bool {
+    if st.turns.last().is_some_and(|t| t.command_output) {
+        st.turns.pop();
+        st.turn_meta.truncate(st.turns.len());
+        st.settled_cache.clear();
+        st.jump_to_latest();
+        true
+    } else {
+        false
+    }
+}
+
 pub async fn handle_key(
     env: &mut Env<'_>,
     st: &mut TuiState,
@@ -220,6 +233,8 @@ pub async fn handle_key(
             }
         } else if env.ui.transient_error().is_some() {
             env.ui.clear_transient_error();
+        } else {
+            dismiss_command_output(st);
         }
         return Ok(Flow::Continue);
     }

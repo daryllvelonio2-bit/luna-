@@ -101,6 +101,7 @@ pub async fn collect_subagent_entries(env: &Env<'_>) -> Vec<SubagentUiEntry> {
                 } else {
                     log_body
                 },
+                command_output: false,
             });
         }
 

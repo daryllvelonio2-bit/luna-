@@ -416,6 +416,7 @@ async fn scrolled_up_viewport_stays_pinned_while_agent_streams_at_bottom() {
             tool_items: Vec::new(),
             duration: std::time::Duration::from_secs(1),
             reply: format!("Answer paragraph {i}\nwith detail line {i}"),
+            command_output: false,
         });
         st.turn_meta.push(TurnMeta {
             mode: "Build".to_string(),

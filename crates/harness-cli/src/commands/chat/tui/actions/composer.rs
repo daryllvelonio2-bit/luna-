@@ -851,6 +851,7 @@ pub async fn run_slash_command(
                 tool_items: vec![item],
                 duration: std::time::Duration::ZERO,
                 reply: String::new(),
+                command_output: false,
             });
             st.turn_meta.push(TurnMeta {
                 mode: format!("Subagent · {}", info.worker_name),

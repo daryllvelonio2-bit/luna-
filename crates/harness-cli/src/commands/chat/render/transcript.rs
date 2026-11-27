@@ -231,6 +231,8 @@ pub struct TurnRecord {
     pub tool_items: Vec<TurnProcessItem>,
     pub duration: Duration,
     pub reply: String,
+    /// Output of a slash command (not a model turn): drawn verbatim, dismissed with Esc.
+    pub command_output: bool,
 }
 
 /// Extract user guidance from an out-of-band user message envelope.
@@ -469,6 +471,7 @@ fn build_turn(
         tool_items,
         duration: Duration::ZERO,
         reply,
+        command_output: false,
     }
 }
 
