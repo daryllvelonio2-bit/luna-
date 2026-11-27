@@ -1202,10 +1202,25 @@ impl Tool for SearchFilesTool {
 /// `cars`, and `cars` no longer matches `*.rs`.
 fn glob_matches(glob: &str, fname: &str, path: &Path, workspace_root: &Path) -> bool {
     if glob.contains('/') {
-        let rel = path.strip_prefix(workspace_root).unwrap_or(path);
-        return glob_match(glob, &rel.to_string_lossy().replace('\\', "/"));
+        return glob_match(glob, &workspace_relative(path, workspace_root));
     }
     glob_match(glob, fname)
+}
+
+/// A path relative to the workspace root, `/`-separated, which is the form every glob, listing
+/// line and ignore rule is written in.
+///
+/// The root and the walked entry can disagree on the Windows verbatim prefix (`\\?\C:\…` from a
+/// canonicalized root versus the plain form the walker yields), so both sides are normalized
+/// before the strip; without that, `strip_prefix` fails and every path-shaped glob stops matching.
+fn workspace_relative(path: &Path, workspace_root: &Path) -> String {
+    let path = crate::fsutil::strip_verbatim(path.to_path_buf());
+    let root = crate::fsutil::strip_verbatim(workspace_root.to_path_buf());
+    let rel = path.strip_prefix(&root).unwrap_or(&path);
+    rel.components()
+        .map(|part| part.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// Iterative wildcard matcher: `*` (any run, including separators) and `?` (exactly one). No
@@ -1327,11 +1342,7 @@ fn scan_files(
             continue;
         }
 
-        let rel_path = path
-            .strip_prefix(workspace_root)
-            .unwrap_or(path)
-            .to_string_lossy()
-            .to_string();
+        let rel_path = workspace_relative(path, workspace_root);
 
         // Non-UTF-8 files are binary for our purposes; skipping them is the intent.
         if let Ok(content) = std::fs::read_to_string(path) {
@@ -1592,11 +1603,7 @@ fn list_entries(
             break;
         }
 
-        let rel = path
-            .strip_prefix(workspace_root)
-            .unwrap_or(path)
-            .to_string_lossy()
-            .replace('\\', "/");
+        let rel = workspace_relative(path, workspace_root);
 
         entries.push(if is_dir { format!("{rel}/") } else { rel });
     }
