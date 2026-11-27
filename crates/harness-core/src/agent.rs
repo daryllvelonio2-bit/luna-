@@ -286,6 +286,19 @@ impl Default for AgentConfig {
 }
 
 impl AgentConfig {
+    /// Skill names that can unlock a tool when Skills are enabled.
+    ///
+    /// Returns an empty slice for always-available core tools.
+    pub fn required_skills_for_tool(name: &str) -> &'static [&'static str] {
+        if name.starts_with("desktop_") {
+            &["agent-desktop"]
+        } else if name.starts_with("profile_") {
+            &["profile", "automation"]
+        } else {
+            &[]
+        }
+    }
+
     /// Whether a tool may run under the session's runtime feature toggles.
     ///
     /// This is the single place that maps a tool name to the feature that owns it, so the turn
@@ -294,6 +307,9 @@ impl AgentConfig {
     pub fn tool_enabled(&self, name: &str) -> bool {
         if name.starts_with("mcp__") {
             return self.mcp_enabled;
+        }
+        if !Self::required_skills_for_tool(name).is_empty() {
+            return self.skills_enabled;
         }
         match name {
             "save_memory" | "update_memory" | "forget_memory" => {
@@ -1146,5 +1162,28 @@ mod tests {
         assert!(budget < fold_threshold(300_000, Some(256_000)));
         assert_eq!(replay_token_budget(None), None);
         assert_eq!(replay_token_budget(Some(0)), None);
+    }
+
+    #[test]
+    fn desktop_and_profile_tools_require_skills_enabled() {
+        let mut config = AgentConfig::default();
+        assert!(config.tool_enabled("desktop_click"));
+        assert!(config.tool_enabled("profile_create"));
+        assert_eq!(
+            AgentConfig::required_skills_for_tool("desktop_click"),
+            &["agent-desktop"]
+        );
+        assert_eq!(
+            AgentConfig::required_skills_for_tool("profile_create"),
+            &["profile", "automation"]
+        );
+        assert!(AgentConfig::required_skills_for_tool("read_file").is_empty());
+
+        config.skills_enabled = false;
+        assert!(!config.tool_enabled("desktop_click"));
+        assert!(!config.tool_enabled("desktop_snapshot"));
+        assert!(!config.tool_enabled("profile_create"));
+        assert!(!config.tool_enabled("profile_list"));
+        assert!(config.tool_enabled("read_file"));
     }
 }

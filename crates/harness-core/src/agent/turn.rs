@@ -605,7 +605,7 @@ where
         // A model that cannot call tools is not sent their schemas: every provider that accepts a
         // `tools` array for a model without tool use charges for the tokens, and some reject the
         // request outright.
-        let tools = self.turn_tools().await?;
+        let tools = self.turn_tools(&state.messages).await?;
 
         debug!("Starting agent task loop for query: '{}'", user_input);
 
@@ -847,18 +847,32 @@ where
         }
     }
 
-    /// The tools this turn may send: the registry surface minus the runtime toggles, and none at
-    /// all for a model that cannot call tools.
+    /// Whether `skill_name` is pinned, invoked via `/<skill>`, or loaded via `skill_view` in `messages`.
+    fn is_skill_activated(&self, skill_name: &str, messages: &[Message]) -> bool {
+        is_skill_activated_for(&self.config, skill_name, messages)
+    }
+
+    /// The tools this turn may send: the registry surface minus the runtime toggles and
+    /// unactivated skill tools, and none at all for a model that cannot call tools.
     ///
     /// Every provider that accepts a `tools` array for a model without tool use charges for the
     /// tokens, and some reject the request outright. The capability is resolved from the
     /// provider's own model, so this is the model the loop is about to ask.
-    async fn turn_tools(&self) -> Result<Vec<ToolDefinition>, HarnessError> {
+    async fn turn_tools(&self, messages: &[Message]) -> Result<Vec<ToolDefinition>, HarnessError> {
         let capabilities = self.provider.capabilities();
         let mut tools = self.registry.list_tools().await?;
-        // Runtime feature toggles (`/memory off`, `/notes off`, `/skills off`, `/mcp off`) remove
-        // the owned tools from the request entirely: the model cannot ask for what it cannot see.
-        tools.retain(|tool| self.config.tool_enabled(&tool.name));
+        // Runtime feature toggles (`/memory off`, `/notes off`, `/skills off`, `/mcp off`) and
+        // on-demand skill gates remove unactivated tools from the request entirely.
+        tools.retain(|tool| {
+            if !self.config.tool_enabled(&tool.name) {
+                return false;
+            }
+            let required = crate::agent::AgentConfig::required_skills_for_tool(&tool.name);
+            required.is_empty()
+                || required
+                    .iter()
+                    .any(|skill| self.is_skill_activated(skill, messages))
+        });
         // Images are always offered: a model that cannot read one is handled by the provider's
         // image fallback, so withholding the tool would deny it the pixels twice.
         if !capabilities.tool_use {
@@ -1655,6 +1669,57 @@ where
     }
 }
 
+/// Pure helper for [`Agent::is_skill_activated`] so tests can verify activation without a provider.
+fn is_skill_activated_for(
+    config: &crate::agent::AgentConfig,
+    skill_name: &str,
+    messages: &[Message],
+) -> bool {
+    let matches = |a: &str, b: &str| {
+        let norm = |s: &str| s.trim().to_ascii_lowercase().replace('_', "-");
+        norm(a) == norm(b)
+    };
+
+    if config
+        .pinned_skills
+        .iter()
+        .any(|name| matches(name, skill_name))
+        || config
+            .pinned_skill_instructions
+            .iter()
+            .any(|(name, _)| matches(name, skill_name))
+    {
+        return true;
+    }
+
+    messages.iter().any(|msg| {
+        if msg.role == Role::User {
+            if let Some(rest) = msg
+                .content
+                .as_deref()
+                .and_then(|c| c.strip_prefix("SKILL: "))
+            {
+                if let Some(first_line) = rest.lines().next() {
+                    if matches(first_line, skill_name) {
+                        return true;
+                    }
+                }
+            }
+        }
+        msg.tool_calls.iter().any(|call| {
+            call.name == "skill_view"
+                && call
+                    .arguments
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|arg| {
+                        let base = arg.split('/').next().unwrap_or(arg);
+                        matches(base, skill_name)
+                    })
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1690,5 +1755,73 @@ mod tests {
         assert_eq!(calls[1].id, "call_2");
         assert_eq!(calls[1].name, "read_file");
         assert_eq!(calls[1].arguments, json!({ "path": "Cargo.toml" }));
+    }
+
+    #[test]
+    fn skill_activation_unlocks_desktop_and_profile_tools_only_when_loaded_pinned_or_invoked() {
+        use crate::agent::AgentConfig;
+        use crate::types::ToolCall;
+
+        let config = AgentConfig::default();
+        let plain_msgs = vec![Message {
+            role: Role::User,
+            content: Some("hi".to_string()),
+            reasoning: None,
+            tool_calls: Vec::new(),
+            tool_result: None,
+            usage: None,
+        }];
+        assert!(!is_skill_activated_for(
+            &config,
+            "agent-desktop",
+            &plain_msgs
+        ));
+        assert!(!is_skill_activated_for(&config, "profile", &plain_msgs));
+
+        // 1. Loaded via `skill_view("agent_desktop")` (underscore variant matches `agent-desktop`).
+        let loaded_desktop = vec![Message {
+            role: Role::Assistant,
+            content: None,
+            reasoning: None,
+            tool_calls: vec![ToolCall {
+                id: "c1".to_string(),
+                name: "skill_view".to_string(),
+                arguments: json!({ "name": "agent_desktop" }),
+                signature: None,
+            }],
+            tool_result: None,
+            usage: None,
+        }];
+        assert!(is_skill_activated_for(
+            &config,
+            "agent-desktop",
+            &loaded_desktop
+        ));
+        assert!(!is_skill_activated_for(&config, "profile", &loaded_desktop));
+
+        // 2. Invoked via `/profile` slash command (`SKILL: profile`).
+        let slash_profile = vec![Message {
+            role: Role::User,
+            content: Some("SKILL: profile\nINSTRUCTIONS:\n...".to_string()),
+            reasoning: None,
+            tool_calls: Vec::new(),
+            tool_result: None,
+            usage: None,
+        }];
+        assert!(is_skill_activated_for(&config, "profile", &slash_profile));
+        assert!(!is_skill_activated_for(
+            &config,
+            "agent-desktop",
+            &slash_profile
+        ));
+
+        // 3. Pinned globally.
+        let mut pinned_cfg = AgentConfig::default();
+        pinned_cfg.pinned_skills.push("automation".to_string());
+        assert!(is_skill_activated_for(
+            &pinned_cfg,
+            "automation",
+            &plain_msgs
+        ));
     }
 }

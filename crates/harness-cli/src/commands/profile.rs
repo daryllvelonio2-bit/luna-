@@ -22,6 +22,26 @@ use harness_core::profiles::{self, Profile, ProfilePaths, ProfileText, DEFAULT_P
 use harness_core::HarnessError;
 use rusqlite::{Connection, OpenFlags};
 
+/// Built-in `profile` skill that unlocks and documents `profile_*` management tools on demand.
+pub fn profile_skill() -> harness_plugins::Skill {
+    harness_plugins::Skill::builtin(
+        "profile",
+        "Inspect, create, edit, or delete Luna profiles (persona, behavior, credentials, model defaults, and launcher).",
+        "Use the profile tools to manage Luna profiles (`~/.luna/profiles/<name>/profile.md` + `config.yaml`):\n\
+         - `profile_list`: list the built-in default and all custom profiles.\n\
+         - `profile_view(name)`: inspect a profile's persona, behavior, and settings.\n\
+         - `profile_create(name, summary?, persona?, behavior?, provider?, model?, copy_credentials?, notes?, memories?)`: create a new profile.\n\
+         - `profile_edit(...)`: update an existing custom profile.\n\
+         - `profile_delete(name)`: delete a custom profile.\n\n\
+         Profile Creation:\n\
+         - When asked to create a profile (e.g. \"create a profile named astra\"), ask the user to confirm preferences before calling `profile_create`:\n\
+           1. Credentials: copy active provider credentials or start unconfigured.\n\
+           2. Model & Provider: set a default model and provider or use system defaults.\n\
+           3. Notes & Memory: inherit the same notes and memory, choose specific ones, or start with fresh empty copies.\n\
+         - Call `profile_create` with the chosen parameters. A dedicated terminal launcher is automatically installed in `~/.local/bin/<name>` so the user can open it by typing `<name>` directly in the terminal.",
+    )
+}
+
 /// The subcommand surface.
 #[derive(clap::Subcommand, Debug)]
 pub enum ProfileCommand {

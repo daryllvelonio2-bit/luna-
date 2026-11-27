@@ -950,6 +950,12 @@ fn load_skills_and_readout(
     {
         all_skills.push(harness_plugins::plugin_skill());
     }
+    if !all_skills
+        .iter()
+        .any(|s| harness_plugins::names_match(&s.name, "profile"))
+    {
+        all_skills.push(crate::commands::profile::profile_skill());
+    }
 
     // `/skills` prints a name-only readout: a paragraph per skill is a wall of text on a terminal,
     // and the procedure itself is `skill_view`'s job. Skills are not listed in the system prompt;
