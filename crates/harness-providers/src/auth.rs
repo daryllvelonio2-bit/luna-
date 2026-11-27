@@ -1213,6 +1213,11 @@ mod tests {
         assert_eq!(remaining[0].label, "keep@gmail.com");
     }
 
+    /// Holding the store lock blocks a usage persist instead of letting it slip past.
+    ///
+    /// Unix-only: the cross-process credential-store lock is `flock`, which Windows has no
+    /// equivalent for in std; there the store is written atomically and without a lock.
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn persist_state_waits_for_the_store_lock() {
         let path = temp_store_path();
