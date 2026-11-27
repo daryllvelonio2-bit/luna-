@@ -268,6 +268,12 @@ pub async fn run_slash_command(
             st.modal = ActiveModal::Help { scroll: 0 };
             return Ok(Flow::Continue);
         }
+        // `/mcp` and `/mcp list` open the interactive list in a popup. `/mcp on|off|tools` and
+        // anything else still go through the dispatcher.
+        "/mcp" if arg.is_none() || arg == Some("list") => {
+            super::open_mcp_list(env, st);
+            return Ok(Flow::Continue);
+        }
         "/sessions" | "/session" if arg.is_none() => {
             open_session_picker(env, st).await;
             return Ok(Flow::Continue);

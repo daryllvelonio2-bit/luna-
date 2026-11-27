@@ -1497,6 +1497,51 @@ pub(crate) fn render_modal(
             st.modal_rect = Some(rect);
             render_subagent_inspector(frame, rect, items, *current_idx, *scroll, spinner_tick);
         }
+        ActiveModal::McpList { entries, selected } => {
+            let (w, h) = responsive_modal_size(screen, 4, 2, 54, 88, 12, 24);
+            let rect = centered_rect(screen, w, h);
+            st.modal_rect = Some(rect);
+            let inner = draw_modal_frame(
+                frame,
+                rect,
+                "MCP list",
+                "↑/↓ move · space toggle · esc close",
+            );
+            let inner_w = inner.width as usize;
+            // The name column leaves room for the longest status so the statuses line up.
+            let status_w = "enabled for this session".len();
+            let name_w = inner_w.saturating_sub(status_w + 6).max(8);
+            let mut lines: Vec<Line<'static>> = Vec::new();
+            if entries.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    "  no MCP servers configured — add an `mcp.servers` block to the config",
+                    Style::default().fg(text_muted()),
+                )));
+            }
+            for (idx, entry) in entries.iter().enumerate() {
+                let is_sel = idx == *selected;
+                let prefix = if is_sel { " ▸ " } else { "   " };
+                let fg = if entry.session {
+                    yellow_warn()
+                } else if entry.global {
+                    green_ok()
+                } else {
+                    text_muted()
+                };
+                let mut style = Style::default().fg(fg).bg(bg_elevated());
+                if is_sel {
+                    style = style.add_modifier(Modifier::BOLD);
+                }
+                let name = truncate_str(&entry.name, name_w);
+                let row = format!(
+                    "{prefix}{name:<name_w$}  {}",
+                    entry.status_label(),
+                    name_w = name_w
+                );
+                lines.push(Line::from(Span::styled(truncate_str(&row, inner_w), style)));
+            }
+            frame.render_widget(Paragraph::new(lines), inner);
+        }
     }
 }
 

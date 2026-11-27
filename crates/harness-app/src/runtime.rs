@@ -31,7 +31,6 @@ use crate::approval::{approval_settings, build_headless_approver, ChannelApprove
 use crate::clarify::{ClarifyRequest, ClarifyResponse, ClarifyTool};
 use crate::context_window::context_window;
 use crate::features::FeatureToggles;
-use crate::mcp::register_mcp_servers;
 use crate::memory_writer;
 use crate::prompts::ChannelSudoPrompter;
 use crate::session::{open_store, resolve_session, SessionSelection};
@@ -283,9 +282,8 @@ impl AppRuntime {
         )
         .await?;
 
-        if config.mcp_effective_enabled() {
-            register_mcp_servers(&registry, &config).await?;
-        }
+        // MCP servers are not spawned at startup: opening the app must not block on a server
+        // whose host is not running. They register lazily when MCP is enabled for the session.
 
         if let Some(extra) = options.extra_tools {
             extra(registry.clone()).await?;

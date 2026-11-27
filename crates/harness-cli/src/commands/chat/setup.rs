@@ -26,7 +26,6 @@ use harness_providers::{CredentialManager, GenericProviderClient, ModelDiscovery
 use tokio::sync::{mpsc, oneshot};
 
 use super::commands::FeatureToggles;
-use super::helpers::register_mcp_servers;
 use super::memory_writer;
 use super::observers::{agent_observer, delegate_completion_notifier, delegate_event_notifier};
 use super::prompts::ChatSudoPrompter;
@@ -1039,10 +1038,9 @@ async fn register_task_and_core_tools(
     )
     .await?;
 
-    // Register MCP servers from config when MCP is effectively enabled
-    if config.mcp_effective_enabled() {
-        register_mcp_servers(registry, config).await?;
-    }
+    // MCP servers are not spawned here: opening Luna must not block on a server whose host is
+    // not running (Blender, for one). They register lazily, when MCP is turned on for the session
+    // (`/mcp` -> `/mcp on`, or the `/mcp` list) via `ensure_mcp_servers_registered`.
 
     Ok((bg_queue, delegate_tool, sudo_rx))
 }

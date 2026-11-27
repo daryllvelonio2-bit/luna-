@@ -47,6 +47,7 @@ use crate::commands::sessions::{resolve_session, SessionSelection};
 
 pub mod approval;
 pub mod composer;
+pub mod mcp;
 pub mod modals_dispatch;
 pub mod orchestrator;
 pub mod pickers;
@@ -61,6 +62,7 @@ mod tests;
 
 pub use approval::*;
 pub use composer::*;
+pub use mcp::*;
 pub use modals_dispatch::*;
 pub use orchestrator::*;
 pub use pickers::*;

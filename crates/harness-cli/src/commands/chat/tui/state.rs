@@ -1309,6 +1309,11 @@ pub enum ActiveModal {
         current_idx: usize,
         scroll: usize,
     },
+    /// The `/mcp` popup: one row per configured server, space cycles its enablement.
+    McpList {
+        entries: Vec<McpListEntry>,
+        selected: usize,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1321,6 +1326,41 @@ pub struct SubagentUiEntry {
     pub elapsed_secs: u64,
     pub turns: Vec<TurnRecord>,
     pub log_tail: Vec<String>,
+}
+
+/// One MCP server as the `/mcp` list shows it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct McpListEntry {
+    pub name: String,
+    /// The config default (`mcp.servers[].enabled`).
+    pub global: bool,
+    /// Turned on for this session only.
+    pub session: bool,
+}
+
+impl McpListEntry {
+    /// The label shown after the name, exactly as the three states read.
+    pub fn status_label(&self) -> &'static str {
+        if self.session {
+            "enabled for this session"
+        } else if self.global {
+            "enabled globally"
+        } else {
+            "disabled"
+        }
+    }
+
+    /// Space cycles disabled -> session -> global -> disabled, so one key reaches every state.
+    pub fn cycle(&mut self) {
+        if self.session {
+            self.session = false;
+            self.global = true;
+        } else if self.global {
+            self.global = false;
+        } else {
+            self.session = true;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1896,6 +1936,7 @@ fn roll_number(from: usize, to: usize, progress: f32, direction: i8) -> String {
 #[cfg(test)]
 mod roll_tests {
     use super::roll_number;
+    use super::McpListEntry;
 
     #[test]
     fn rolls_the_changed_digit_upward() {
@@ -1922,5 +1963,32 @@ mod roll_tests {
     #[test]
     fn an_unchanged_number_never_moves() {
         assert_eq!(roll_number(42, 42, 0.3, 1), "42");
+    }
+
+    #[test]
+    fn mcp_entry_cycle_reaches_every_state_and_wraps() {
+        let mut entry = McpListEntry {
+            name: "blender".to_string(),
+            global: false,
+            session: false,
+        };
+        assert_eq!(entry.status_label(), "disabled");
+
+        entry.cycle();
+        assert_eq!(entry.status_label(), "enabled for this session");
+
+        entry.cycle();
+        assert_eq!(entry.status_label(), "enabled globally");
+
+        entry.cycle();
+        assert_eq!(entry.status_label(), "disabled");
+
+        // A server enabled in the config reads as global until the session overrides it.
+        let configured = McpListEntry {
+            name: "terminal-pty".to_string(),
+            global: true,
+            session: false,
+        };
+        assert_eq!(configured.status_label(), "enabled globally");
     }
 }

@@ -760,6 +760,57 @@ pub async fn handle_modal_key(
                 }
             }
         }
+        ActiveModal::McpList {
+            mut entries,
+            mut selected,
+        } => {
+            // Esc closes without rebuilding: the modal was already replaced with `None`.
+            if key.code == KeyCode::Esc || key.code == KeyCode::Char('q') {
+                return Ok(Flow::Continue);
+            }
+            match key.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    selected = selected.saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if !entries.is_empty() {
+                        selected = (selected + 1).min(entries.len() - 1);
+                    }
+                }
+                KeyCode::Char(' ') => {
+                    if let Some(entry) = entries.get_mut(selected) {
+                        entry.cycle();
+                        let (name, global, session) =
+                            (entry.name.clone(), entry.global, entry.session);
+                        // The global state is the config default; the session state is in memory.
+                        if let Some(server) =
+                            env.config.mcp.servers.iter_mut().find(|s| s.name == name)
+                        {
+                            server.enabled = global;
+                        }
+                        if global || session {
+                            let registry = {
+                                let mut ag = env.agent.lock().await;
+                                ag.set_mcp_enabled(true);
+                                ag.registry().clone()
+                            };
+                            if let Err(err) =
+                                crate::commands::chat::helpers::ensure_mcp_servers_registered(
+                                    &registry, env.config,
+                                )
+                                .await
+                            {
+                                env.ui.set_transient_error(Some(format!(
+                                    "Failed to start MCP servers: {err}"
+                                )));
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+            st.modal = ActiveModal::McpList { entries, selected };
+        }
         ActiveModal::Approval {
             req,
             resp_tx,

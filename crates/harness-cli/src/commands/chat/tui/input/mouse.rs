@@ -30,7 +30,8 @@ pub async fn handle_mouse(
                 | ActiveModal::ProviderPicker { selected, .. }
                 | ActiveModal::ModelPicker { selected, .. }
                 | ActiveModal::ThinkingPicker { selected, .. }
-                | ActiveModal::SubagentsModal { selected, .. } => {
+                | ActiveModal::SubagentsModal { selected, .. }
+                | ActiveModal::McpList { selected, .. } => {
                     *selected = selected.saturating_sub(1);
                 }
                 ActiveModal::TextModal { scroll, .. }
