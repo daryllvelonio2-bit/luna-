@@ -167,10 +167,6 @@ pub async fn run_usage(
 /// number. Ten is the widest bar that still fits beside a label in every terminal Luna draws for.
 pub(crate) const BAR_DOTS: usize = 10;
 
-/// The live context grid: four columns by twelve rows, the shape the pane draws.
-pub(crate) const GRID_COLUMNS: usize = 4;
-pub(crate) const GRID_ROWS: usize = 12;
-
 /// `used` over `max`, clamped to `0.0..=1.0`. An unknown window (`max == 0`) reads as empty rather
 /// than as a division by zero.
 pub(crate) fn fill_ratio(used: u64, max: u64) -> f64 {
@@ -227,26 +223,6 @@ pub(crate) fn dot_bar(ratio: f64) -> String {
         bar.push_str(&cell);
     }
     bar
-}
-
-/// The live context grid, one string per row, `ratio` of its cells filled in reading order.
-pub(crate) fn dot_grid(ratio: f64) -> Vec<String> {
-    let total = GRID_COLUMNS * GRID_ROWS;
-    let filled = filled_cells(ratio, total);
-    (0..GRID_ROWS)
-        .map(|row| {
-            (0..GRID_COLUMNS)
-                .map(|column| {
-                    if row * GRID_COLUMNS + column < filled {
-                        filled_dot(ratio)
-                    } else {
-                        empty_dot()
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(" ")
-        })
-        .collect()
 }
 
 /// A horizontal rule, dimmed so it separates without competing with the numbers.
@@ -482,17 +458,6 @@ mod tests {
     fn an_unknown_window_fills_nothing() {
         assert_eq!(fill_ratio(1_000, 0), 0.0);
         assert_eq!(dot_bar(fill_ratio(1_000, 0)).matches('●').count(), 0);
-    }
-
-    /// The grid is the bar's shape, not a second layout: every cell is drawn once.
-    #[test]
-    fn the_grid_draws_every_cell_once() {
-        let rows = dot_grid(0.5);
-        assert_eq!(rows.len(), GRID_ROWS);
-        let filled: usize = rows.iter().map(|row| row.matches('●').count()).sum();
-        let empty: usize = rows.iter().map(|row| row.matches('○').count()).sum();
-        assert_eq!(filled + empty, GRID_COLUMNS * GRID_ROWS);
-        assert_eq!(filled, GRID_COLUMNS * GRID_ROWS / 2);
     }
 
     /// A long model key is cut, not allowed to shift every column after it.
