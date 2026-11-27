@@ -245,7 +245,7 @@ pub async fn suggest_instruction_with_bg_model(
         env.discovery.clone(),
         env.config.providers.get(&provider),
     )?
-    .with_session_id(env.session_id);
+    .with_session_id(env.session_id.as_str());
 
     let messages = vec![
         Message {
