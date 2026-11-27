@@ -352,6 +352,34 @@ where
         }
     }
 
+    /// The same transcript [`Self::estimate_session_tokens`] measures, split by what fills it.
+    ///
+    /// The system-prompt part is the *static* prompt this agent sends — template, configured
+    /// prefix, profile text — and not the retrieved memories, because a report must not run a
+    /// memory search to draw itself and a retrieved block changes with the question. So the parts
+    /// answer "what the conversation costs", which is the number a reader can act on.
+    pub async fn context_parts(&self) -> Result<crate::session::ContextParts, HarnessError> {
+        let (history, _replay_notice) = self.load_history().await?;
+        Ok(crate::session::measure_context_parts(
+            &self.replay_messages(&history),
+            self.static_prompt_chars(),
+        ))
+    }
+
+    /// Characters of system prompt sent before retrieval: the static template, the configured
+    /// prefix or override, and the active profile's persona and behavior.
+    pub fn static_prompt_chars(&self) -> usize {
+        let template = crate::prompts::section(crate::prompts::SYSTEM_PROMPT)
+            .map(|text| text.len())
+            .unwrap_or(0);
+        let extra = |text: &Option<String>| text.as_ref().map_or(0, |text| text.len());
+        template
+            .saturating_add(extra(&self.config.system_prompt_prefix))
+            .saturating_add(extra(&self.config.system_prompt_override))
+            .saturating_add(extra(&self.config.profile_persona))
+            .saturating_add(extra(&self.config.profile_behavior))
+    }
+
     /// Get the estimated token count for the current session's conversation history.
     ///
     /// This is [`estimate_tokens`] over the messages the next request would actually send, which is

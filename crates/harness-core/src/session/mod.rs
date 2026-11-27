@@ -18,6 +18,7 @@
 //! indistinguishable — to the model — from the conversation never having happened.
 
 pub mod compaction;
+pub mod context;
 pub mod transcript;
 
 use std::path::PathBuf;
@@ -35,6 +36,7 @@ pub use compaction::{
     CompactionOutcome, Estimate, EstimateSource, CHARS_PER_TOKEN, CHECKPOINT_SECTIONS,
     COMPACTION_TARGET_KEEP_TOKENS, HEURISTIC_IMAGE_CHARS, HEURISTIC_TOLERANCE,
 };
+pub use context::{measure as measure_context_parts, ContextParts};
 pub use transcript::{last_fold_seq, sendable_messages, trim_messages_to_tokens};
 
 /// One chat session as `luna sessions list` reports it.

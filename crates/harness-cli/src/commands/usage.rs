@@ -163,36 +163,150 @@ pub async fn run_usage(
     Ok(())
 }
 
+/// Dots in a full share bar: how many of them are filled *is* the percentage, read before the
+/// number. Ten is the widest bar that still fits beside a label in every terminal Luna draws for.
+pub(crate) const BAR_DOTS: usize = 10;
+
+/// The live context grid: four columns by twelve rows, the shape the pane draws.
+pub(crate) const GRID_COLUMNS: usize = 4;
+pub(crate) const GRID_ROWS: usize = 12;
+
+/// `used` over `max`, clamped to `0.0..=1.0`. An unknown window (`max == 0`) reads as empty rather
+/// than as a division by zero.
+pub(crate) fn fill_ratio(used: u64, max: u64) -> f64 {
+    if max == 0 {
+        return 0.0;
+    }
+    (used as f64 / max as f64).clamp(0.0, 1.0)
+}
+
+/// How many cells a ratio fills: never zero for a non-zero amount, so "a little" is visible.
+fn filled_cells(ratio: f64, total: usize) -> usize {
+    if ratio <= 0.0 {
+        return 0;
+    }
+    ((ratio * total as f64).round() as usize).clamp(1, total)
+}
+
+/// Colour of a filled cell by how full the thing is — the one signal that survives a screenshot.
+fn fill_color(ratio: f64) -> colored::Color {
+    if ratio < 0.60 {
+        colored::Color::Green
+    } else if ratio < 0.85 {
+        colored::Color::Yellow
+    } else {
+        colored::Color::Red
+    }
+}
+
+/// One filled cell.
+pub(crate) fn filled_dot(ratio: f64) -> String {
+    use colored::Colorize;
+    "●".color(fill_color(ratio)).to_string()
+}
+
+/// One empty cell.
+pub(crate) fn empty_dot() -> String {
+    use colored::Colorize;
+    "○".dimmed().to_string()
+}
+
+/// A left-to-right bar of [`BAR_DOTS`]: `ratio` of them filled, the rest empty.
+pub(crate) fn dot_bar(ratio: f64) -> String {
+    let filled = filled_cells(ratio, BAR_DOTS);
+    let mut bar = String::new();
+    for index in 0..BAR_DOTS {
+        if index > 0 {
+            bar.push(' ');
+        }
+        bar.push_str(if index < filled {
+            &filled_dot(ratio)
+        } else {
+            &empty_dot()
+        });
+    }
+    bar
+}
+
+/// The live context grid, one string per row, `ratio` of its cells filled in reading order.
+pub(crate) fn dot_grid(ratio: f64) -> Vec<String> {
+    let total = GRID_COLUMNS * GRID_ROWS;
+    let filled = filled_cells(ratio, total);
+    (0..GRID_ROWS)
+        .map(|row| {
+            (0..GRID_COLUMNS)
+                .map(|column| {
+                    if row * GRID_COLUMNS + column < filled {
+                        filled_dot(ratio)
+                    } else {
+                        empty_dot()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect()
+}
+
+/// A horizontal rule, dimmed so it separates without competing with the numbers.
+fn rule(width: usize) -> String {
+    "─".repeat(width).dimmed().to_string()
+}
+
+/// The layout the report is read in: label column, value column, then whatever follows.
+const LABEL: usize = 12;
+const RULE: usize = 68;
+
 fn print_totals(totals: &UsageTotals) {
     if totals.turns == 0 {
         println!(
             "No turns recorded yet ({}).",
-            "luna chat` and `luna exec` write here".dimmed()
+            "`luna chat` and `luna exec` write here".dimmed()
         );
         return;
     }
-    println!("{}", "Usage".bold());
-    println!("  turns            {}", totals.turns);
+    println!("{}", "Usage — all sessions".bold());
+    println!("{}", rule(RULE));
     println!(
-        "  tokens           {} ({} in, {} out)",
-        totals.total_tokens, totals.prompt_tokens, totals.completion_tokens
+        "  {:<LABEL$}{:<22}{:<8}{}",
+        "turns",
+        totals.turns,
+        "time",
+        format_duration(totals.duration_ms)
     );
+    println!(
+        "  {:<LABEL$}{:<22}{:<8}{}",
+        "tokens",
+        format_tokens(totals.total_tokens),
+        "in · out",
+        format!(
+            "{} · {}",
+            format_tokens(totals.prompt_tokens),
+            format_tokens(totals.completion_tokens)
+        )
+    );
+    // The bar is the cached share: the one number here that is a *ratio* rather than a total, and
+    // so the one a row of dots communicates better than the percentage does.
     if let Some(cache) = cache_text(totals) {
-        println!("  cache            {cache}");
+        let ratio = fill_ratio(totals.cached_tokens, totals.prompt_tokens);
+        println!("  {:<LABEL$}{}  {cache}", "cache", dot_bar(ratio));
     }
-    println!("  cost             {}", cost_text(totals));
-    println!("  time in turns    {}", format_duration(totals.duration_ms));
+    println!("  {:<LABEL$}{}", "cost", cost_text(totals));
     if totals.failed_turns > 0 || totals.denied_calls > 0 {
         println!(
-            "  trouble          {} turn(s) hit a tool error, {} denied call(s)",
-            totals.failed_turns, totals.denied_calls
+            "  {}",
+            format!(
+                "{} turn(s) hit a tool error · {} denied call(s)",
+                totals.failed_turns, totals.denied_calls
+            )
+            .yellow()
         );
     }
     if totals.unpriced_turns > 0 {
         println!(
-            "{}",
+            "  {}",
             format!(
-                "  note             {} turn(s) used a model with no price; set usage.prices to cost them",
+                "{} turn(s) used a model with no price; set usage.prices to cost them",
                 totals.unpriced_turns
             )
             .dimmed()
@@ -202,6 +316,7 @@ fn print_totals(totals: &UsageTotals) {
 
 fn print_buckets(by: &str, buckets: &[UsageBucket], totals: &UsageTotals) {
     println!("{}", format!("By {by}").bold());
+    println!("{}", rule(RULE));
     let width = buckets
         .iter()
         .map(|bucket| bucket.key.chars().count())
@@ -209,29 +324,30 @@ fn print_buckets(by: &str, buckets: &[UsageBucket], totals: &UsageTotals) {
         .unwrap_or(8)
         .clamp(8, 40);
     for bucket in buckets {
+        // The bar is this row's share of the tokens the whole report covers, so the rows compare
+        // to each other by eye before any number is read.
+        let share = fill_ratio(bucket.totals.total_tokens, totals.total_tokens);
         println!(
-            "  {:width$}  {:>4} turns  {:>12} tok  {:>10}  {:>9}",
-            bucket.key,
+            "  {:width$}  {:>4} turns  {:>8} tok  {:>9}  {:>7}  {}",
+            truncate(&bucket.key, width),
             bucket.totals.turns,
-            bucket.totals.total_tokens,
+            format_tokens(bucket.totals.total_tokens),
             cost_text(&bucket.totals),
             format_duration(bucket.totals.duration_ms),
+            dot_bar(share),
             width = width
         );
     }
-    if buckets.len() > 1 {
-        println!(
-            "  {:width$}  {:>4} turns  {:>12} tok  {:>10}",
-            "total",
-            totals.turns,
-            totals.total_tokens,
-            cost_text(totals),
-            width = width
-        );
+}
+
+/// The key cut to the column width, so one long model id cannot push every other column right.
+fn truncate(text: &str, width: usize) -> String {
+    let count = text.chars().count();
+    if count <= width {
+        return text.to_string();
     }
-    if let Some(cache) = cache_text(totals) {
-        println!("  {}", cache.dimmed());
-    }
+    let kept: String = text.chars().take(width.saturating_sub(1)).collect();
+    format!("{kept}…")
 }
 
 /// Tokens the provider served from its prompt cache, and what share of the input that is.
@@ -276,19 +392,28 @@ fn print_recent(records: &[UsageRecord]) {
         println!("No turns recorded yet.");
         return;
     }
+    println!("{}", "Recent turns".bold());
+    println!("{}", rule(RULE));
+    println!(
+        "  {}",
+        format!(
+            "{:<17}{:>8}{:>10}{:>8}  {}",
+            "when", "tokens", "cost", "time", "model"
+        )
+        .dimmed()
+    );
     for record in records {
         // Only turns whose provider reported a cache read carry the marker, so the column stays
         // quiet on the providers that say nothing about caching.
         let cached = if record.cached_tokens > 0 {
-            format!(" ({} cached)", record.cached_tokens)
+            format!(" ({} cached)", format_tokens(record.cached_tokens))
         } else {
             String::new()
         };
         println!(
-            "{}  {:>6} tok{}  {:>9}  {:>7}  {}",
-            record.ts.format("%Y-%m-%d %H:%M:%S"),
-            record.total_tokens,
-            cached,
+            "  {:<17}{:>8}{:>10}{:>8}  {}",
+            record.ts.format("%Y-%m-%d %H:%M"),
+            format!("{}{cached}", format_tokens(record.total_tokens)),
             record
                 .cost_usd
                 .map(|cost| format!("${cost:.4}"))
@@ -324,5 +449,51 @@ pub(crate) fn format_duration(ms: u64) -> String {
         format!("{:.1}s", ms as f64 / 1000.0)
     } else {
         format!("{}m{:02}s", ms / 60_000, (ms % 60_000) / 1000)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The bar is a percentage you can count: exactly [`BAR_DOTS`] cells, `ratio` of them filled.
+    /// Colours are counted as glyphs, so this holds whatever the terminal does with SGR.
+    #[test]
+    fn a_bar_fills_the_share_it_is_given() {
+        let cells = |bar: &str| -> (usize, usize) {
+            (bar.matches('●').count(), bar.matches('○').count())
+        };
+        assert_eq!(cells(&dot_bar(0.0)), (0, BAR_DOTS));
+        assert_eq!(cells(&dot_bar(1.0)), (BAR_DOTS, 0));
+        assert_eq!(cells(&dot_bar(0.5)), (5, 5));
+        // A sliver is still visible: a session that has spent anything shows a filled cell.
+        assert_eq!(cells(&dot_bar(0.01)).0, 1);
+    }
+
+    /// An unknown window is not a division by zero, and does not claim space is free.
+    #[test]
+    fn an_unknown_window_fills_nothing() {
+        assert_eq!(fill_ratio(1_000, 0), 0.0);
+        assert_eq!(dot_bar(fill_ratio(1_000, 0)).matches('●').count(), 0);
+    }
+
+    /// The grid is the bar's shape, not a second layout: every cell is drawn once.
+    #[test]
+    fn the_grid_draws_every_cell_once() {
+        let rows = dot_grid(0.5);
+        assert_eq!(rows.len(), GRID_ROWS);
+        let filled: usize = rows.iter().map(|row| row.matches('●').count()).sum();
+        let empty: usize = rows.iter().map(|row| row.matches('○').count()).sum();
+        assert_eq!(filled + empty, GRID_COLUMNS * GRID_ROWS);
+        assert_eq!(filled, GRID_COLUMNS * GRID_ROWS / 2);
+    }
+
+    /// A long model key is cut, not allowed to shift every column after it.
+    #[test]
+    fn a_long_bucket_key_is_truncated() {
+        assert_eq!(truncate("short", 10), "short");
+        let cut = truncate("a-very-long-model-id", 8);
+        assert_eq!(cut.chars().count(), 8);
+        assert!(cut.ends_with('…'));
     }
 }
