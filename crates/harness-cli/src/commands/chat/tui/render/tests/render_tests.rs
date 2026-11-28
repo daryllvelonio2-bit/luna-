@@ -1798,6 +1798,50 @@ fn diff_counter_never_resets_down_to_low_value() {
 }
 
 #[test]
+fn diff_counter_is_session_only_and_ignores_context_signs() {
+    use crate::commands::chat::render::count_diff_lines;
+
+    // Context lines indented 4 spaces whose code starts with + or - must not be counted.
+    let lines = vec![
+        "    - unchanged markdown bullet".to_string(),
+        "    + unchanged expression".to_string(),
+        "  + real addition".to_string(),
+        "  - real deletion".to_string(),
+    ];
+    assert_eq!(count_diff_lines(&lines), (1, 1));
+
+    let mut st = test_dummy_tui_state();
+    st.turns.push(TurnRecord {
+        user_query: "active".to_string(),
+        reasoning: None,
+        tools: Vec::new(),
+        tool_items: vec![TurnProcessItem {
+            tool_name: "patch".to_string(),
+            call_formatted: "patch(...)".to_string(),
+            result_formatted: "✔".to_string(),
+            diff_lines: vec!["  + active add".to_string()],
+            output: String::new(),
+            output_dropped: 0,
+            arguments: None,
+            duration_secs: None,
+            is_error: false,
+        }],
+        duration: Duration::ZERO,
+        reply: String::new(),
+        command_output: false,
+    });
+    st.update_diff_counter(None);
+    assert_eq!(st.diff_anim_target_added, 1);
+
+    // Switching/clearing to an empty session resets the high-watermark diff counter cleanly.
+    st.turns.clear();
+    st.reset_diff_counter();
+    assert_eq!(st.total_code_changes(None), (0, 0));
+    assert_eq!(st.diff_anim_target_added, 0);
+    assert_eq!(st.diff_anim_target_deleted, 0);
+}
+
+#[test]
 fn settled_turn_registers_copy_hit_target_on_code_block_header() {
     let turn = TurnRecord {
         user_query: "show me rust".to_string(),

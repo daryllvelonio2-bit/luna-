@@ -225,15 +225,19 @@ pub fn strip_ansi_codes(s: &str) -> String {
 }
 
 /// Count additions and deletions from formatted or unified diff lines.
+///
+/// Matches formatted diff markers (`"  + "` / `"  - "`) and raw unified diff markers at column 0
+/// (`"+"` / `"-"`, excluding `"+++"` / `"---"`), without miscounting indented context lines whose
+/// content starts with `+` or `-`.
 pub fn count_diff_lines(diff_lines: &[String]) -> (usize, usize) {
     let mut added = 0;
     let mut deleted = 0;
     for line in diff_lines {
         let clean = strip_ansi_codes(line);
-        let trimmed = clean.trim_start();
-        if trimmed.starts_with('+') && !trimmed.starts_with("+++") {
+        if clean.starts_with("  + ") || (clean.starts_with('+') && !clean.starts_with("+++")) {
             added += 1;
-        } else if trimmed.starts_with('-') && !trimmed.starts_with("---") {
+        } else if clean.starts_with("  - ") || (clean.starts_with('-') && !clean.starts_with("---"))
+        {
             deleted += 1;
         }
     }

@@ -752,6 +752,9 @@ pub async fn run_slash_command(
             st.settled_cache.clear();
             if st.turns.len() < prev_len {
                 st.turn_meta.truncate(st.turns.len());
+                if st.turns.is_empty() {
+                    st.reset_diff_counter();
+                }
             }
             sync_turn_meta_len(env, st);
             drain_tui_notices(env, st);

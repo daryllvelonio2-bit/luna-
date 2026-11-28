@@ -1759,6 +1759,21 @@ impl TuiState {
 }
 
 impl TuiState {
+    /// Reset diff counter & animation state when switching/starting a session, and immediately
+    /// settle on the current session's `turns`.
+    pub fn reset_diff_counter(&mut self) {
+        self.compacted_added = 0;
+        self.compacted_deleted = 0;
+        let (added, deleted) = self.total_code_changes(None);
+        self.session_max_added = added;
+        self.session_max_deleted = deleted;
+        self.diff_anim_from_added = added;
+        self.diff_anim_from_deleted = deleted;
+        self.diff_anim_target_added = added;
+        self.diff_anim_target_deleted = deleted;
+        self.diff_anim_start = None;
+    }
+
     /// Update the target code changes, rolling the counter forward when a count grows.
     ///
     /// The session watermark ensures additions and deletions never reset or drop back
@@ -1852,6 +1867,9 @@ impl TuiState {
 
     /// Calculate total added lines (+) and deleted lines (-) across all turns in all sessions
     /// (including current active session, active in-flight tools, and parked background sessions).
+    /// Total `(added, deleted)` lines across the active session only (compacted turns + visible
+    /// turns + in-flight tools). Parked background tabs are excluded so switching or keeping tabs
+    /// open never inflates the current session's counter.
     pub fn total_code_changes(
         &self,
         in_flight: Option<&[crate::commands::chat::render::TurnProcessItem]>,
@@ -1874,24 +1892,6 @@ impl TuiState {
                 let (a, d) = item_diff_counts(item);
                 total_a += a;
                 total_d += d;
-            }
-        }
-
-        // 3. Parked background sessions (all other open tabs)
-        for bg in self.background_sessions.values() {
-            total_a += bg.compacted_added;
-            total_d += bg.compacted_deleted;
-            for turn in &bg.turns {
-                let (a, d) = turn_diff_counts(turn);
-                total_a += a;
-                total_d += d;
-            }
-            if let Ok(guard) = bg.in_flight_tools.lock() {
-                for item in guard.iter() {
-                    let (a, d) = item_diff_counts(item);
-                    total_a += a;
-                    total_d += d;
-                }
             }
         }
 

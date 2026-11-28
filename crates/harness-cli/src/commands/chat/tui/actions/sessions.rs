@@ -268,8 +268,11 @@ pub(crate) fn restore_background_session(
     st.compacted_deleted = slot.compacted_deleted;
     st.session_max_added = slot.session_max_added;
     st.session_max_deleted = slot.session_max_deleted;
+    st.diff_anim_from_added = slot.session_max_added;
+    st.diff_anim_from_deleted = slot.session_max_deleted;
     st.diff_anim_target_added = slot.session_max_added;
     st.diff_anim_target_deleted = slot.session_max_deleted;
+    st.diff_anim_start = None;
     st.pending_modals = slot.pending_modals;
     st.active_orchestrator = slot
         .active_orchestrator
@@ -568,6 +571,7 @@ pub async fn switch_to_session(
     st.idle_pass = IdleMemoryPass::new(initial_len);
     st.pending_images = Arc::new(Mutex::new(Vec::new()));
     st.memory_project_filter = None;
+    st.reset_diff_counter();
 
     env.ui.set_status(&target_model, 0, ctx_max);
     env.ui.set_session_name(&record.name);
@@ -667,6 +671,7 @@ pub async fn create_new_session(env: &mut Env<'_>, st: &mut TuiState) -> Result<
     st.idle_pass = IdleMemoryPass::new(0);
     st.pending_images = Arc::new(Mutex::new(Vec::new()));
     st.memory_project_filter = None;
+    st.reset_diff_counter();
 
     env.ui.set_status(&model, 0, ctx_max);
     env.ui.set_session_name("");
